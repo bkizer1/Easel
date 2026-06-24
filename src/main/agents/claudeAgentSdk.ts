@@ -11,8 +11,10 @@
  *  5. Honour `ctx.signal` for cancellation.
  *
  * Auth modes (from ClaudeAgentSdkConfig.authMode):
- *  - inherit (default): NO credential env vars set; SDK uses existing machine
- *    credential (e.g. Claude Code login → Pro/Max plan). No extra spend.
+ *  - inherit (default): NO credential env vars set, AND any ambient Anthropic
+ *    auth/routing vars (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, …) are scrubbed
+ *    from the child env, so the SDK uses the existing machine credential
+ *    (Claude Code login → Pro/Max plan). No extra API spend.
  *  - api-key:   set ANTHROPIC_API_KEY from resolved secret.
  *  - bedrock:   set CLAUDE_CODE_USE_BEDROCK=1 (+ AWS_REGION / AWS_PROFILE).
  *  - vertex:    set CLAUDE_CODE_USE_VERTEX=1 (+ ANTHROPIC_VERTEX_PROJECT_ID / CLOUD_ML_REGION).
@@ -129,9 +131,42 @@ const CAPABILITIES: AgentCapabilities = {
 };
 
 /**
+ * Env keys that select or route Claude authentication. These are scrubbed from
+ * the inherited environment before per-mode overrides are applied, so the chosen
+ * authMode is deterministic. Critically, this makes `inherit` fall back to the
+ * Claude Code login (subscription) instead of silently using a stray
+ * ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL the user has exported in their shell —
+ * which would route through (and bill) the metered API or a proxy.
+ */
+const CLAUDE_AUTH_ENV_KEYS: readonly string[] = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
+  'CLOUD_ML_REGION',
+];
+
+/**
+ * Compose the COMPLETE child environment for the SDK call: the inherited
+ * environment (for PATH / HOME / keychain access) with every Claude
+ * auth-routing var removed, then the chosen mode's overrides layered on top.
+ */
+export function buildChildEnv(authEnv: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || CLAUDE_AUTH_ENV_KEYS.includes(k)) continue;
+    env[k] = v;
+  }
+  return { ...env, ...authEnv };
+}
+
+/**
  * Build the additional environment variables for the SDK call based on the
  * configured `authMode`.  Returns only the keys to set — the SDK call receives
- * these merged over a clean environment (never `process.env`).
+ * these merged over a scrubbed environment (never raw `process.env`).
  */
 function buildAuthEnv(
   settings: AppSettings,
@@ -276,11 +311,17 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
           `Use the Read tool to view it — it shows what they're pointing at and the surrounding layout. Let it guide your edit.`;
       }
 
+      // Surface which ambient auth vars we removed, so it's verifiable from the
+      // logs that `inherit` is using the subscription login (not a proxy/key).
+      const scrubbedAmbientAuth = CLAUDE_AUTH_ENV_KEYS.filter(
+        (k) => process.env[k] !== undefined && !(k in authEnv),
+      );
       log.info('Starting Claude Agent SDK edit', {
         requestId: request.id,
         authMode: settings.backends['claude-agent-sdk'].authMode,
         model: settings.model,
-        envKeys: Object.keys(authEnv),
+        appliedAuthKeys: Object.keys(authEnv),
+        scrubbedAmbientAuth,
       });
 
       yield { type: 'thinking', requestId: request.id, text: 'Analysing your request...' };
@@ -317,12 +358,13 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         // Bash permission request.
         permissionMode: 'acceptEdits',
         allowedTools: ['Read', 'Edit', 'Write', 'MultiEdit', 'Glob', 'Grep'],
-        // CRITICAL: the SDK uses `env` as the COMPLETE child environment — it
-        // does NOT merge with process.env. Passing only authEnv (e.g. {} for
-        // inherit mode) would wipe PATH and break the `node` spawn
-        // (`spawn node ENOENT`). Layer the auth-mode overrides on top of the
-        // inherited environment so PATH/HOME/credentials are preserved.
-        env: { ...process.env, ...authEnv },
+        // The SDK uses `env` as the COMPLETE child environment — it does NOT
+        // merge with process.env (passing {} would wipe PATH → `spawn node
+        // ENOENT`). buildChildEnv preserves the inherited PATH/HOME/keychain
+        // access but scrubs ambient Anthropic auth/routing vars, so `inherit`
+        // uses the Claude Code subscription login rather than a stray
+        // ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL. See CLAUDE_AUTH_ENV_KEYS.
+        env: buildChildEnv(authEnv),
         abortController,
       };
 
