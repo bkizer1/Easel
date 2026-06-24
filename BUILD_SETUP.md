@@ -16,7 +16,7 @@ Easel is built with:
 ## Directory Structure
 
 ```
-/Users/bkizer1/Code/Easel/
+/path/to/Easel/
 ├── src/
 │   ├── shared/              # Cross-process type contracts (no runtime code)
 │   │   ├── types.ts         # Domain types (Point, BoundingBox, EditRequest, etc.)

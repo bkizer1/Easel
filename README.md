@@ -173,11 +173,12 @@ Release builds ship with a CycloneDX **SBOM**, an aggregated third-party
 ### Optional: precise source mapping
 
 Easel works without it, but adding the (MIT-licensed) plugin to your project gives
-pinpoint element→source accuracy:
+pinpoint element→source accuracy.
 
-```bash
-npm install --save-dev @easel/vite-plugin-inspector
-```
+> **Not on npm yet.** For now, use the copy in this repo
+> ([`packages/vite-plugin-inspector`](packages/vite-plugin-inspector)) via a workspace
+> or local path — or just skip it; Easel's selector/grep fallback works without it.
+> (Publishing to npm is on the [roadmap](docs/ROADMAP.md).)
 
 ```typescript
 // vite.config.ts

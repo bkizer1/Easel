@@ -4,7 +4,7 @@
 
 This is the exhaustive map of every file in the Easel codebase: its responsibility, its key exports, and
 its dependencies. It is the build-order and ownership reference for all subsequent implementation work.
-Paths are relative to the repo root (`/Users/bkizer1/Code/Easel`). Keep this in sync with the actual
+Paths are relative to the repo root (`/path/to/Easel`). Keep this in sync with the actual
 tree and with `docs/ARCHITECTURE.md` (NFR-20).
 
 **Legend — Process:** `shared` (cross-process contracts) · `main` (Node) · `preload` (host bridge) ·

@@ -144,7 +144,7 @@ export function transformSource(
 
 ### Source path resolution
 
-The `id` passed by Vite to `transform` is always the absolute on-disk path of the module (e.g., `/Users/bkizer1/myapp/src/components/Button.tsx`). We derive the relative path with `path.relative(config.root, id)`, giving `src/components/Button.tsx`. This is the same path convention used by Vite's own error overlays. The agent receives this relative path and resolves it against the project root (which Easel knows from the project configuration in `src/main/project.ts`).
+The `id` passed by Vite to `transform` is always the absolute on-disk path of the module (e.g., `/path/to/myapp/src/components/Button.tsx`). We derive the relative path with `path.relative(config.root, id)`, giving `src/components/Button.tsx`. This is the same path convention used by Vite's own error overlays. The agent receives this relative path and resolves it against the project root (which Easel knows from the project configuration in `src/main/project.ts`).
 
 ### Framework coverage
 
