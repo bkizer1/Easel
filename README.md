@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Point at your live site. Draw on it. Tell Claude what to change. Watch your source update — live.</strong>
+  <strong>Point at your running local site. Draw on it. Tell the AI what to change. Watch your source update — live.</strong>
 </p>
 
 <p align="center">
@@ -17,8 +17,8 @@
 
 Easel is a desktop **browser for web developers**. It loads your running dev
 server, lets you **select an element** or **scribble on the page**, and you just
-say what you want in plain English. A Claude agent reads the rendered element's
-source, edits your files, and your dev server hot-reloads the result. Every change
+say what you want in plain English. The AI reads the rendered element's source,
+edits your files, and your dev server hot-reloads the result. Every change
 is a git checkpoint, so undo is one click.
 
 ```
