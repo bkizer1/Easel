@@ -1,0 +1,143 @@
+{
+  "name": "easel",
+  "version": "0.1.0",
+  "description": "An open-source agentic web browser for web development",
+  "private": true,
+  "type": "module",
+  "main": "out/main/index.js",
+  "license": "AGPL-3.0-or-later",
+  "author": "Blake Kizer",
+  "homepage": "https://github.com/bkizer1/Easel",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bkizer1/Easel.git"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && npm run lint && electron-vite build && electron-builder",
+    "build:mac": "npm run build -- --mac",
+    "build:win": "npm run build -- --win",
+    "build:linux": "npm run build -- --linux",
+    "build:preview": "npm run typecheck && npm run lint && electron-vite build",
+    "lint": "eslint . --ext .ts,.tsx --max-warnings 0",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx,json}\" \"packages/**/*.{ts,tsx,json}\" \"./**/*.{json,md}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,json}\" \"packages/**/*.{ts,tsx,json}\" \"./**/*.{json,md}\"",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "typecheck:watch": "tsc -p tsconfig.renderer.json --noEmit --watch",
+    "precommit": "npm run format:check && npm run lint && npm run typecheck",
+    "sbom": "node scripts/generate-sbom.mjs",
+    "notice": "node scripts/generate-notice.mjs"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "build": {
+    "appId": "com.easel.app",
+    "productName": "Easel",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "out/main/**/*",
+      "out/preload/**/*",
+      "out/renderer/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/@anthropic-ai/claude-agent-sdk/**/*"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "identity": null,
+      "certificateFile": null,
+      "certificatePassword": null,
+      "notarize": false
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 410,
+          "y": 150,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 130,
+          "y": 150,
+          "type": "file"
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable",
+        "zip"
+      ],
+      "certificateFile": null,
+      "certificatePassword": null,
+      "signingHashAlgorithms": [
+        "sha256"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.187",
+    "@anthropic-ai/sdk": "^0.105.0",
+    "@fontsource-variable/bricolage-grotesque": "^5.2.10",
+    "@fontsource-variable/geist": "^5.2.9",
+    "@fontsource-variable/geist-mono": "^5.2.8",
+    "lucide-react": "^0.408.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.11",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "electron": "^32.0.0",
+    "electron-builder": "^25.1.1",
+    "electron-vite": "^2.2.0",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-react": "^7.35.0",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "postcss": "^8.4.41",
+    "prettier": "^3.3.3",
+    "tailwindcss": "^3.4.7",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.4"
+  }
+}

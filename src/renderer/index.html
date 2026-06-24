@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Easel</title>
+
+    <!--
+      Content Security Policy for the Easel renderer process.
+
+      Process security model (contextIsolation: ON, nodeIntegration: OFF):
+        - All privileged operations go through window.easel (contextBridge).
+        - The renderer has no Node access; CSP locks it to same-origin resources.
+
+      Directives:
+        default-src 'self'         — only load resources from the same origin.
+        script-src  'self'         — scripts from the same bundle only; no inline
+                                     eval, no external CDN scripts.
+        style-src   'self' 'unsafe-inline'
+                                   — Tailwind injects style attributes for JIT
+                                     dynamic values; unsafe-inline is required.
+        img-src     'self' data: blob:
+                                   — screenshot data URLs (data:image/png) and
+                                     blob: URLs for captured frames.
+        font-src    'self' data:   — bundled fonts and embedded font data URLs.
+        connect-src 'self'         — no outbound fetch/XHR from the renderer;
+                                     all network I/O is delegated to main.
+        frame-src   'none'         — no iframes inside the renderer window
+                                     (the <webview> is a distinct process, not
+                                     a frame from the renderer's perspective).
+        object-src  'none'         — no Flash / plugin objects.
+        base-uri    'self'         — prevent base-tag injection.
+        form-action 'self'         — forms submit only to same origin.
+
+      Note: The <webview> element is governed by its own webPreferences and
+      its guest's CSP; this policy applies only to the Easel UI shell.
+    -->
+    <!--
+      'unsafe-inline'/'unsafe-eval' in script-src and ws:/http(s) in connect-src
+      are required for Vite HMR + React Fast Refresh in dev (the dev server
+      injects an inline module preamble and an HMR websocket). They are safe
+      here because the renderer is fully sandboxed (contextIsolation ON,
+      nodeIntegration OFF) and never loads remote code. Production builds can
+      tighten script-src with a per-load nonce.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self' 'unsafe-inline' 'unsafe-eval';
+        style-src 'self' 'unsafe-inline';
+        img-src 'self' data: blob:;
+        font-src 'self' data:;
+        connect-src 'self' ws: wss: http: https:;
+        frame-src 'none';
+        object-src 'none';
+        base-uri 'self';
+        form-action 'self';
+      "
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

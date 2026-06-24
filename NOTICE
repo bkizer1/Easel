@@ -1,0 +1,20 @@
+# NOTICE
+
+This file contains attribution notices for third-party software included in Easel.
+
+NOTICE: This file is generated at build time using the `npm run notice` command,
+which scans node_modules and extracts license information from package.json files.
+
+The generated NOTICE will include:
+  - Component Name
+  - Version
+  - License
+  - Repository URL (if available)
+
+To regenerate this file locally, run:
+  npm run notice
+
+To regenerate the SBOM (Software Bill of Materials), run:
+  npm run sbom
+
+Both commands are executed automatically during the release workflow (see .github/workflows/release.yml).

@@ -1,0 +1,386 @@
+/**
+ * Easel Renderer — Global Styles
+ *
+ * Layer order:
+ *   1. @tailwind base      — Preflight reset + :root CSS custom properties.
+ *   2. @tailwind components — Component-class utilities (.btn-primary etc.).
+ *   3. @tailwind utilities  — JIT utility classes (generated on demand).
+ *
+ * Design system:
+ *   - Dark-first: default surface is gray-950; light mode is opt-in via
+ *     the `.dark` class toggle on <html> (managed by useTheme in App.tsx).
+ *   - Brand palette: purple (brand-*) defined in tailwind.config.ts.
+ *   - Base font: system-ui stack for native OS feel in a desktop app.
+ *   - CSS custom properties on :root expose design tokens for any
+ *     non-Tailwind contexts (canvas drawing colors, SVG fills, etc.).
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* -------------------------------------------------------------------------- */
+/*  CSS custom properties (design tokens)                                     */
+/* -------------------------------------------------------------------------- */
+
+@layer base {
+  :root {
+    /* Surface colors — light mode */
+    --color-surface-0:  #ffffff;     /* topmost surface (dialogs) */
+    --color-surface-1:  #f9fafb;     /* app background */
+    --color-surface-2:  #f3f4f6;     /* panel background */
+    --color-surface-3:  #e5e7eb;     /* elevated card */
+
+    /* Border */
+    --color-border:     #e5e7eb;
+    --color-border-subtle: #f3f4f6;
+
+    /* Text */
+    --color-text-primary:   #111827;
+    --color-text-secondary: #6b7280;
+    --color-text-muted:     #9ca3af;
+
+    /* Brand (jade/teal) */
+    --color-brand:      #15b896;  /* brand-500 */
+    --color-brand-hover:#0a937a;  /* brand-600 */
+
+    /* Semantic */
+    --color-success:    #16a34a;
+    --color-warning:    #d97706;
+    --color-error:      #dc2626;
+    --color-info:       #2563eb;
+
+    /* Annotation overlay colors */
+    --color-annotation-default: #2dd4bf;   /* jade */
+    --color-annotation-select:  #34d3b0;   /* brand jade for element targets */
+    --color-annotation-hover:   #67e8c9;   /* light jade for hover highlight */
+
+    /* Geometry */
+    --radius-sm:   0.375rem;
+    --radius-md:   0.5rem;
+    --radius-lg:   0.75rem;
+
+    /* Transitions */
+    --duration-fast:   100ms;
+    --duration-base:   200ms;
+    --duration-slow:   350ms;
+  }
+
+  /* Dark mode overrides — active when <html class="dark"> */
+  .dark {
+    --color-surface-0:  #030712;     /* gray-950 */
+    --color-surface-1:  #111827;     /* gray-900 */
+    --color-surface-2:  #1f2937;     /* gray-800 */
+    --color-surface-3:  #374151;     /* gray-700 */
+
+    --color-border:        #1f2937;
+    --color-border-subtle: #111827;
+
+    --color-text-primary:   #f9fafb;
+    --color-text-secondary: #9ca3af;
+    --color-text-muted:     #6b7280;
+
+    --color-brand:      #34d3b0;  /* brand-400 — lighter for dark bg */
+    --color-brand-hover:#15b896;  /* brand-500 */
+  }
+
+  /* Base element resets */
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;       /* Scroll happens inside panes, not the shell */
+  }
+
+  body {
+    @apply font-sans antialiased;
+    background-color: #06080c;
+    color: var(--color-text-primary);
+    font-feature-settings: 'cv01', 'cv03', 'ss03';
+    letter-spacing: -0.011em;
+  }
+
+  /* Focus-visible ring — replaces browser default outlines with a branded ring */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-white dark:ring-offset-gray-950;
+  }
+
+  /* Selection highlight */
+  ::selection {
+    background-color: rgba(45, 212, 191, 0.28);
+    color: #ecfdf8;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Component classes                                                          */
+/* -------------------------------------------------------------------------- */
+
+@layer components {
+  /* Buttons */
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2
+           px-4 py-2 rounded-lg
+           bg-brand-600 text-white text-sm font-medium
+           hover:bg-brand-700 active:bg-brand-800
+           disabled:opacity-40 disabled:pointer-events-none
+           transition-colors duration-[var(--duration-fast)];
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2
+           px-4 py-2 rounded-lg
+           bg-gray-100 dark:bg-gray-800
+           text-gray-900 dark:text-gray-50 text-sm font-medium
+           hover:bg-gray-200 dark:hover:bg-gray-700
+           active:bg-gray-300 dark:active:bg-gray-600
+           disabled:opacity-40 disabled:pointer-events-none
+           transition-colors duration-[var(--duration-fast)];
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2
+           px-3 py-1.5 rounded-lg
+           text-gray-600 dark:text-gray-400 text-sm font-medium
+           hover:bg-gray-100 dark:hover:bg-gray-800
+           active:bg-gray-200 dark:active:bg-gray-700
+           disabled:opacity-40 disabled:pointer-events-none
+           transition-colors duration-[var(--duration-fast)];
+  }
+
+  .btn-icon {
+    @apply inline-flex items-center justify-center
+           w-8 h-8 rounded-lg
+           text-gray-600 dark:text-gray-400
+           hover:bg-gray-100 dark:hover:bg-gray-800
+           active:bg-gray-200 dark:active:bg-gray-700
+           disabled:opacity-40 disabled:pointer-events-none
+           transition-colors duration-[var(--duration-fast)];
+  }
+
+  /* Inputs */
+  .input-field {
+    @apply w-full px-3 py-2 rounded-lg text-sm
+           border border-gray-300 dark:border-gray-600
+           bg-white dark:bg-gray-800
+           text-gray-900 dark:text-gray-50
+           placeholder-gray-400 dark:placeholder-gray-500
+           focus:border-brand-500 focus:ring-1 focus:ring-brand-500
+           disabled:opacity-40 disabled:bg-gray-50 dark:disabled:bg-gray-900
+           transition-colors duration-[var(--duration-fast)];
+  }
+
+  .input-label {
+    @apply block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1;
+  }
+
+  /* Select */
+  .select-field {
+    @apply input-field appearance-none pr-8
+           bg-[url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E")]
+           bg-no-repeat bg-[right_0.75rem_center];
+  }
+
+  /* Cards */
+  .card {
+    @apply rounded-lg border border-gray-200 dark:border-gray-700
+           bg-white dark:bg-gray-800 shadow-sm;
+  }
+
+  .card-header {
+    @apply px-4 py-3 border-b border-gray-200 dark:border-gray-700
+           text-sm font-medium text-gray-900 dark:text-gray-50;
+  }
+
+  .card-body {
+    @apply p-4;
+  }
+
+  /* Panels (toolbar, sidebar sections) */
+  .panel {
+    @apply bg-gray-50 dark:bg-gray-900
+           border border-gray-200 dark:border-gray-800;
+  }
+
+  /* Badge variants */
+  .badge {
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5
+           rounded text-xs font-medium;
+  }
+
+  .badge-high {
+    @apply badge bg-green-100 dark:bg-green-900/40
+           text-green-700 dark:text-green-400;
+  }
+
+  .badge-medium {
+    @apply badge bg-yellow-100 dark:bg-yellow-900/40
+           text-yellow-700 dark:text-yellow-400;
+  }
+
+  .badge-low {
+    @apply badge bg-red-100 dark:bg-red-900/40
+           text-red-700 dark:text-red-400;
+  }
+
+  .badge-none {
+    @apply badge bg-gray-100 dark:bg-gray-800
+           text-gray-500 dark:text-gray-400;
+  }
+
+  /* Annotation tool mode button */
+  .mode-btn {
+    @apply btn-icon;
+  }
+
+  .mode-btn-active {
+    @apply bg-brand-100 dark:bg-brand-900/40 text-brand-600 dark:text-brand-400;
+  }
+
+  /* Diff viewer: line types */
+  .diff-add {
+    @apply bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-300;
+  }
+
+  .diff-del {
+    @apply bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-300;
+  }
+
+  .diff-ctx {
+    @apply text-gray-500 dark:text-gray-500;
+  }
+
+  /* Chat message bubbles */
+  .chat-bubble-user {
+    @apply rounded-2xl rounded-br-sm
+           bg-brand-600 text-white
+           px-3 py-2 text-sm;
+  }
+
+  .chat-bubble-assistant {
+    @apply rounded-2xl rounded-bl-sm
+           bg-gray-100 dark:bg-gray-800
+           text-gray-900 dark:text-gray-50
+           px-3 py-2 text-sm;
+  }
+
+  .chat-bubble-system {
+    @apply rounded-lg
+           bg-gray-50 dark:bg-gray-900
+           text-gray-500 dark:text-gray-400
+           px-3 py-2 text-xs;
+  }
+
+  /* Scrollable areas inside panels */
+  .scrollable {
+    @apply overflow-y-auto overscroll-contain;
+  }
+
+  /* Divider */
+  .divider {
+    @apply border-t border-gray-200 dark:border-gray-800 my-2;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Utility extensions                                                         */
+/* -------------------------------------------------------------------------- */
+
+@layer utilities {
+  /* Overlay fill: used by AnnotationOverlay to cover the preview area */
+  .overlay-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  /* Pointer-passthrough: overlay is visible but passes clicks to content */
+  .pointer-passthrough {
+    pointer-events: none;
+  }
+
+  /* Pointer-capture: overlay intercepts all pointer events (freeform draw) */
+  .pointer-capture {
+    pointer-events: auto;
+    cursor: crosshair;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Shell atmosphere — Midnight Atelier                                       */
+/* -------------------------------------------------------------------------- */
+
+@layer components {
+  /* Deep ink base with a soft jade aurora in the upper corners. */
+  .shell-atmosphere {
+    background-color: #06080c;
+    background-image:
+      radial-gradient(120% 95% at -5% -10%, rgba(45, 212, 191, 0.08), transparent 55%),
+      radial-gradient(90% 70% at 105% -8%, rgba(52, 211, 176, 0.05), transparent 60%),
+      linear-gradient(180deg, #080b11 0%, #06080c 100%);
+  }
+
+  /* Fine film grain overlay — sits above the shell, below content. */
+  .shell-grain {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.04;
+    mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+
+  /* Hairline borders tuned for ink surfaces. */
+  .hairline-b { border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+  .hairline-l { border-left: 1px solid rgba(255, 255, 255, 0.06); }
+  .hairline-t { border-top: 1px solid rgba(255, 255, 255, 0.06); }
+
+  /* Electron hiddenInset title-bar drag helpers. */
+  .drag-region { -webkit-app-region: drag; }
+  .no-drag { -webkit-app-region: no-drag; }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Webkit scrollbar styling (Electron Chromium)                              */
+/* -------------------------------------------------------------------------- */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(107, 114, 128, 0.35);   /* gray-500 at 35% */
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.55);
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.25);   /* gray-400 at 25% */
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.45);
+}
+
+/* Firefox fallback */
+@supports (scrollbar-color: auto) {
+  * {
+    scrollbar-color: rgba(107, 114, 128, 0.35) transparent;
+    scrollbar-width: thin;
+  }
+}

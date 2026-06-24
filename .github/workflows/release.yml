@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  NODE_VERSION: '20'
+  NPM_VERSION: '10'
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: macos
+          - os: windows-latest
+            platform: windows
+    permissions:
+      id-token: write
+      attestations: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build and package
+        run: npm run build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SBOM
+        run: npm run sbom
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/*
+          push-provenance: true
+
+      - name: Attest SBOM
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: sbom.cdx.json
+          push-provenance: true
+
+      - name: Upload artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+            sbom.cdx.json
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sbom-only:
+    name: Generate & Verify SBOM
+    runs-on: ubuntu-latest
+    needs: build-and-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate SBOM (verification)
+        run: npm run sbom
+
+      - name: Validate CycloneDX format
+        run: |
+          if ! jq empty sbom.cdx.json 2>/dev/null; then
+            echo "SBOM is not valid JSON"
+            exit 1
+          fi
+          if ! jq -e '.metadata' sbom.cdx.json > /dev/null; then
+            echo "SBOM missing required metadata"
+            exit 1
+          fi
+          echo "SBOM validation successful"
+
+      - name: Upload SBOM for verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-verification
+          path: sbom.cdx.json

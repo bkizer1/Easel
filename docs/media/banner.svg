@@ -1,0 +1,88 @@
+<svg viewBox="0 0 1200 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Easel — the agentic browser for web development">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080b11"/>
+      <stop offset="1" stop-color="#06080c"/>
+    </linearGradient>
+    <radialGradient id="glowL" cx="0" cy="0" r="1">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowR" cx="1" cy="0" r="1">
+      <stop offset="0" stop-color="#34d3b0" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#34d3b0" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="jade" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8c9"/>
+      <stop offset="1" stop-color="#0a937a"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8c9"/>
+      <stop offset="0.5" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#0a937a"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="420" fill="url(#bg)"/>
+  <rect width="1200" height="420" fill="url(#glowL)"/>
+  <rect width="1200" height="420" fill="url(#glowR)"/>
+
+  <!-- Left: brand -->
+  <g transform="translate(72,112)" font-family="'Geist','Helvetica Neue',Arial,sans-serif">
+    <rect x="0" y="0" width="40" height="40" rx="11" fill="url(#mark)"/>
+    <rect x="14" y="14" width="12" height="12" rx="4" fill="#06080c" opacity="0.85"/>
+    <text x="54" y="31" font-size="40" font-weight="700" fill="#f3f5f4" letter-spacing="-1">Easel</text>
+
+    <text x="0" y="98" font-size="30" font-weight="600" fill="#eaf0ee" letter-spacing="-0.5">The agentic browser for</text>
+    <text x="0" y="134" font-size="30" font-weight="600" letter-spacing="-0.5" fill="url(#jade)">web development.</text>
+
+    <text x="0" y="180" font-size="15.5" fill="#9aa6a1">Point at your live site. Describe the change in plain English.</text>
+    <text x="0" y="202" font-size="15.5" fill="#9aa6a1">Claude edits your source, the page hot-reloads, every change is undoable.</text>
+
+    <g transform="translate(0,230)">
+      <rect x="0" y="0" width="208" height="30" rx="15" fill="#0e1a17" stroke="#2dd4bf" stroke-opacity="0.35"/>
+      <circle cx="18" cy="15" r="4" fill="#2dd4bf"/>
+      <text x="32" y="20" font-size="12.5" font-weight="600" fill="#bfeee2" letter-spacing="0.4">OPEN SOURCE · AGPL-3.0</text>
+    </g>
+  </g>
+
+  <!-- Right: app mockup -->
+  <g transform="translate(636,60)">
+    <rect x="0" y="0" width="500" height="300" rx="16" fill="#10131b" stroke="#ffffff" stroke-opacity="0.07"/>
+    <circle cx="22" cy="22" r="5" fill="#ff5f57"/>
+    <circle cx="40" cy="22" r="5" fill="#febc2e"/>
+    <circle cx="58" cy="22" r="5" fill="#28c840"/>
+    <rect x="86" y="13" width="300" height="18" rx="9" fill="#0b0e14" stroke="#ffffff" stroke-opacity="0.06"/>
+    <text x="100" y="26" font-size="11" font-family="'Geist Mono',ui-monospace,monospace" fill="#5d6b66">http://localhost:3000</text>
+    <circle cx="398" cy="22" r="3" fill="#2dd4bf"/>
+
+    <line x1="0" y1="44" x2="500" y2="44" stroke="#ffffff" stroke-opacity="0.06"/>
+    <line x1="350" y1="44" x2="350" y2="300" stroke="#ffffff" stroke-opacity="0.06"/>
+
+    <!-- preview content -->
+    <g transform="translate(28,70)">
+      <rect x="0" y="0" width="120" height="14" rx="4" fill="#2a3340"/>
+      <rect x="0" y="34" width="280" height="22" rx="5" fill="#3a4654"/>
+      <rect x="0" y="64" width="230" height="22" rx="5" fill="#3a4654"/>
+      <rect x="0" y="110" width="150" height="34" rx="8" fill="#ff7a1a" opacity="0.9"/>
+      <rect x="-8" y="102" width="166" height="50" rx="10" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-dasharray="6 4"/>
+      <g transform="translate(116,150)">
+        <rect x="0" y="0" width="150" height="26" rx="13" fill="#0e1a17" stroke="#2dd4bf" stroke-opacity="0.4"/>
+        <text x="14" y="17" font-size="12" font-family="'Geist',sans-serif" fill="#bfeee2">make this pop ✦</text>
+      </g>
+    </g>
+
+    <!-- chat strip -->
+    <g transform="translate(366,62)" font-family="'Geist','Helvetica Neue',Arial,sans-serif">
+      <text x="0" y="10" font-size="11" font-weight="700" fill="#8a958f">CHAT</text>
+      <rect x="0" y="22" width="118" height="40" rx="10" fill="#0e2a25" stroke="#2dd4bf" stroke-opacity="0.25"/>
+      <rect x="10" y="32" width="92" height="6" rx="3" fill="#7fe3cf" opacity="0.7"/>
+      <rect x="10" y="44" width="70" height="6" rx="3" fill="#7fe3cf" opacity="0.5"/>
+      <rect x="0" y="74" width="118" height="8" rx="4" fill="#2a3340"/>
+      <rect x="0" y="90" width="96" height="8" rx="4" fill="#2a3340"/>
+      <rect x="0" y="106" width="104" height="8" rx="4" fill="#2a3340"/>
+      <rect x="0" y="208" width="118" height="28" rx="9" fill="#161a23" stroke="#ffffff" stroke-opacity="0.08"/>
+      <circle cx="104" cy="222" r="9" fill="url(#mark)"/>
+    </g>
+  </g>
+</svg>

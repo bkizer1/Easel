@@ -1,0 +1,72 @@
+import type { Config } from 'tailwindcss';
+
+export default {
+  content: [
+    './src/renderer/**/*.{js,ts,jsx,tsx}',
+  ],
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Geist Variable', 'ui-sans-serif', 'system-ui', '-apple-system', 'sans-serif'],
+        display: ['Bricolage Grotesque Variable', 'Geist Variable', 'sans-serif'],
+        mono: ['Geist Mono Variable', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+      },
+      colors: {
+        // Signature accent — jade/teal "Midnight Atelier" palette.
+        brand: {
+          50: '#ecfdf8',
+          100: '#cffbec',
+          200: '#a3f4dc',
+          300: '#67e8c9',
+          400: '#34d3b0',
+          500: '#15b896',
+          600: '#0a937a',
+          700: '#0c7565',
+          800: '#0e5d51',
+          900: '#104d44',
+          950: '#022e28',
+        },
+        ink: {
+          950: '#06080c',
+          900: '#0b0e14',
+          850: '#10131b',
+          800: '#161a23',
+          700: '#1e232e',
+          600: '#2a3140',
+        },
+      },
+      fontSize: {
+        xs: ['0.75rem', { lineHeight: '1rem' }],
+        sm: ['0.875rem', { lineHeight: '1.25rem' }],
+        base: ['1rem', { lineHeight: '1.5rem' }],
+        lg: ['1.125rem', { lineHeight: '1.75rem' }],
+        xl: ['1.25rem', { lineHeight: '1.75rem' }],
+        '2xl': ['1.5rem', { lineHeight: '2rem' }],
+      },
+      spacing: {
+        '0.5': '0.125rem',
+        '1': '0.25rem',
+        '1.5': '0.375rem',
+        '2': '0.5rem',
+        '3': '0.75rem',
+        '4': '1rem',
+        '6': '1.5rem',
+        '8': '2rem',
+        '12': '3rem',
+        '16': '4rem',
+        '20': '5rem',
+        '24': '6rem',
+      },
+      borderRadius: {
+        none: '0',
+        xs: '0.25rem',
+        sm: '0.375rem',
+        base: '0.5rem',
+        md: '0.625rem',
+        lg: '0.75rem',
+        xl: '1rem',
+      },
+    },
+  },
+  plugins: [],
+} satisfies Config;
