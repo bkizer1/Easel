@@ -146,15 +146,23 @@ function detectFramework(root: string, pkg: PackageJson | null): ProjectFramewor
  * Infer the default dev-server URL for the detected framework.
  * Users can override this in Settings.
  */
-function inferDevServerUrl(framework: ProjectFramework, pkg: PackageJson | null): string {
-  // Check package.json scripts for explicit port hints.
+function inferDevServerUrl(root: string, framework: ProjectFramework, pkg: PackageJson | null): string {
+  // 1. Explicit --port in the dev/start script.
   const devScript = pkg?.scripts?.['dev'] ?? pkg?.scripts?.['start'] ?? '';
   const portMatch = devScript.match(/--port[= ](\d+)|-p\s+(\d+)/);
   if (portMatch) {
-    const port = portMatch[1] ?? portMatch[2];
-    return `http://localhost:${port}`;
+    return `http://localhost:${portMatch[1] ?? portMatch[2]}`;
   }
 
+  // 2. A `server.port` configured in the vite config (e.g. the demo app's 3000).
+  for (const name of ['vite.config.ts', 'vite.config.js', 'vite.config.mts', 'vite.config.mjs']) {
+    const text = readFileText(root, name);
+    if (!text) continue;
+    const m = /server\s*:\s*\{[^}]*?\bport\s*:\s*(\d+)/s.exec(text) ?? /\bport\s*:\s*(\d+)/.exec(text);
+    if (m) return `http://localhost:${m[1]}`;
+  }
+
+  // 3. Framework defaults.
   switch (framework) {
     case 'next':
       return 'http://localhost:3000';
@@ -186,7 +194,11 @@ function detectInspectorPlugin(root: string, pkg: PackageJson | null): boolean {
   // Also scan vite config text as a loose text check (plugin may be inline).
   for (const name of ['vite.config.ts', 'vite.config.js', 'vite.config.mts']) {
     const text = readFileText(root, name);
-    if (text.includes('easel') || text.includes('easelInspector')) return true;
+    // Require a real call/import, not just the word "easel" (which can appear in
+    // a comment — e.g. the demo app's vite config mentions the optional plugin).
+    if (text.includes('easelInspector(') || /from\s+['"]@easel\/vite-plugin-inspector['"]/.test(text)) {
+      return true;
+    }
   }
 
   return false;
@@ -231,7 +243,7 @@ export function loadProject(root: string): ProjectConfig {
     root,
     name: cached.name ?? path.basename(root),
     framework: cached.framework ?? framework,
-    devServerUrl: cached.devServerUrl ?? inferDevServerUrl(framework, pkg),
+    devServerUrl: cached.devServerUrl ?? inferDevServerUrl(root, framework, pkg),
     inspectorPluginPresent: cached.inspectorPluginPresent ?? inspectorPluginPresent,
     devCommand: cached.devCommand ?? inferDevCommand(framework, pkg),
   };
