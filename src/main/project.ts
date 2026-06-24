@@ -146,7 +146,7 @@ function detectFramework(root: string, pkg: PackageJson | null): ProjectFramewor
  * Infer the default dev-server URL for the detected framework.
  * Users can override this in Settings.
  */
-function inferDevServerUrl(root: string, framework: ProjectFramework, pkg: PackageJson | null): string {
+export function inferDevServerUrl(root: string, framework: ProjectFramework, pkg: PackageJson | null): string {
   // 1. Explicit --port in the dev/start script.
   const devScript = pkg?.scripts?.['dev'] ?? pkg?.scripts?.['start'] ?? '';
   const portMatch = devScript.match(/--port[= ](\d+)|-p\s+(\d+)/);
@@ -239,13 +239,19 @@ export function loadProject(root: string): ProjectConfig {
   const cached = loadCachedProject(root);
   const inspectorPluginPresent = detectInspectorPlugin(root, pkg);
 
+  // Detection is authoritative — re-run it on every open so detection fixes
+  // (and projects that later change their port or framework) always take effect.
+  // We deliberately do NOT read detected fields back from the cache: there is no
+  // user-override path worth preserving over a fresh read, and a stale cached
+  // value silently masking detection is exactly the bug this avoids. Only the
+  // display `name` is remembered.
   const config: ProjectConfig = {
     root,
     name: cached.name ?? path.basename(root),
-    framework: cached.framework ?? framework,
-    devServerUrl: cached.devServerUrl ?? inferDevServerUrl(root, framework, pkg),
-    inspectorPluginPresent: cached.inspectorPluginPresent ?? inspectorPluginPresent,
-    devCommand: cached.devCommand ?? inferDevCommand(framework, pkg),
+    framework,
+    devServerUrl: inferDevServerUrl(root, framework, pkg),
+    inspectorPluginPresent,
+    devCommand: inferDevCommand(framework, pkg),
   };
 
   log.info('Project loaded', {
