@@ -7,7 +7,7 @@
  * left for the traffic-light buttons.
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   FolderOpen,
   X,
@@ -18,9 +18,16 @@ import {
   RefreshCw,
   Settings,
   Sparkles,
+  History,
+  Monitor,
+  Code2,
+  Terminal,
+  ExternalLink,
 } from 'lucide-react';
-import { useEaselStore } from '../store';
+import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
+import { HistoryPanel } from './HistoryPanel';
+import { ConsolePanel } from './ConsolePanel';
 
 /** macOS reserves the top-left for window controls; pad the toolbar past them. */
 const IS_MAC =
@@ -146,6 +153,38 @@ function Sep(): React.ReactElement {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Responsive viewport menu                                                  */
+/* -------------------------------------------------------------------------- */
+
+function ViewportMenu({
+  current,
+  onPick,
+}: {
+  current: number | null;
+  onPick: (width: number | null) => void;
+}): React.ReactElement {
+  return (
+    <div className="absolute left-0 top-full mt-1.5 z-30 w-44 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 py-1 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+      {VIEWPORT_PRESETS.map((p) => {
+        const active = p.width === current;
+        return (
+          <button
+            key={p.label}
+            onClick={() => onPick(p.width)}
+            className={`flex w-full items-center justify-between px-3.5 py-2 text-left text-[12.5px] transition-colors ${
+              active ? 'bg-brand-500/10 text-brand-200' : 'text-gray-300 hover:bg-white/[0.05]'
+            }`}
+          >
+            <span>{p.label}</span>
+            <span className="font-mono text-[11px] text-gray-500">{p.width ? `${p.width}px` : 'auto'}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Toolbar                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -155,6 +194,10 @@ export function Toolbar(): React.ReactElement {
   const checkpoints = useEaselStore((s) => s.checkpoints);
   const currentCheckpointId = useEaselStore((s) => s.currentCheckpointId);
   const streaming = useEaselStore((s) => s.streaming);
+  const previewUrl = useEaselStore((s) => s.previewUrl);
+  const viewportWidth = useEaselStore((s) => s.viewportWidth);
+  const pageLogs = useEaselStore((s) => s.pageLogs);
+  const historyOpen = useEaselStore((s) => s.historyOpen);
 
   const openProject = useEaselStore((s) => s.openProject);
   const closeProject = useEaselStore((s) => s.closeProject);
@@ -162,10 +205,32 @@ export function Toolbar(): React.ReactElement {
   const setSettingsOpen = useEaselStore((s) => s.setSettingsOpen);
   const undo = useEaselStore((s) => s.undo);
   const redo = useEaselStore((s) => s.redo);
+  const reloadPreview = useEaselStore((s) => s.reloadPreview);
+  const toggleDevTools = useEaselStore((s) => s.toggleDevTools);
+  const setViewportWidth = useEaselStore((s) => s.setViewportWidth);
+  const setHistoryOpen = useEaselStore((s) => s.setHistoryOpen);
 
+  const [menu, setMenu] = useState<'viewport' | 'console' | null>(null);
+
+  // Timeline is oldest-first; the cursor is the checkpoint the tree matches.
   const currentIdx = checkpoints.findIndex((c) => c.id === currentCheckpointId);
-  const canUndo = checkpoints.length > 0 && (currentIdx < checkpoints.length - 1 || currentIdx === -1);
-  const canRedo = currentIdx > 0;
+  const canUndo = currentIdx > 0; // an earlier checkpoint exists
+  const canRedo = currentIdx >= 0 && currentIdx < checkpoints.length - 1; // a later one exists
+
+  const errorCount = pageLogs.filter((l) => l.level === 'error').length;
+  const anyMenuOpen = historyOpen || menu !== null;
+  const closeAllMenus = (): void => {
+    setMenu(null);
+    setHistoryOpen(false);
+  };
+  const toggleMenu = (m: 'viewport' | 'console'): void => {
+    setHistoryOpen(false);
+    setMenu((cur) => (cur === m ? null : m));
+  };
+  const toggleHistory = (): void => {
+    setMenu(null);
+    setHistoryOpen(!historyOpen);
+  };
 
   return (
     <header
@@ -181,7 +246,7 @@ export function Toolbar(): React.ReactElement {
           type="button"
           onClick={() => void openProject()}
           className="no-drag flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-lg text-[12px] text-gray-400 hover:text-gray-100 hover:bg-white/[0.07] transition-colors"
-          title="Open a project folder so Claude can edit its source"
+          title="Open a project folder so the AI can edit its source"
         >
           <FolderOpen className="w-3.5 h-3.5" />
           Open project
@@ -224,19 +289,78 @@ export function Toolbar(): React.ReactElement {
 
       <Sep />
 
-      {/* History */}
-      <IconButton onClick={() => void undo()} title="Undo last edit" disabled={!canUndo || streaming}>
+      {/* Edit history: undo / redo / history timeline */}
+      <IconButton onClick={() => void undo()} title="Undo last change" disabled={!canUndo || streaming}>
         <Undo2 className="w-[17px] h-[17px]" />
       </IconButton>
       <IconButton onClick={() => void redo()} title="Redo" disabled={!canRedo || streaming}>
         <Redo2 className="w-[17px] h-[17px]" />
       </IconButton>
-      <IconButton
-        onClick={() => void easel.preview.reload({ hard: false })}
-        title="Reload preview"
-        disabled={!project}
-      >
+      <div className="relative no-drag">
+        <IconButton
+          onClick={toggleHistory}
+          title="History — revert any change"
+          active={historyOpen}
+          disabled={!project || checkpoints.length === 0}
+        >
+          <History className="w-[17px] h-[17px]" />
+        </IconButton>
+        {historyOpen && <HistoryPanel />}
+      </div>
+
+      <Sep />
+
+      {/* View tools: reload / viewport / devtools / console / open-external */}
+      <IconButton onClick={() => reloadPreview()} title="Reload preview" disabled={!previewUrl}>
         <RefreshCw className="w-[17px] h-[17px]" />
+      </IconButton>
+      <div className="relative no-drag">
+        <IconButton
+          onClick={() => toggleMenu('viewport')}
+          title="Responsive viewport"
+          active={menu === 'viewport' || viewportWidth !== null}
+          disabled={!previewUrl}
+        >
+          <Monitor className="w-[17px] h-[17px]" />
+        </IconButton>
+        {menu === 'viewport' && (
+          <ViewportMenu
+            current={viewportWidth}
+            onPick={(w) => {
+              setViewportWidth(w);
+              setMenu(null);
+            }}
+          />
+        )}
+      </div>
+      <IconButton onClick={() => toggleDevTools()} title="Toggle DevTools for the preview" disabled={!previewUrl}>
+        <Code2 className="w-[17px] h-[17px]" />
+      </IconButton>
+      <div className="relative no-drag">
+        <IconButton
+          onClick={() => toggleMenu('console')}
+          title="Page console — warnings & errors from the previewed page"
+          active={menu === 'console'}
+          variant={errorCount > 0 ? 'danger' : 'default'}
+          disabled={!previewUrl}
+        >
+          <Terminal className="w-[17px] h-[17px]" />
+        </IconButton>
+        {errorCount > 0 && (
+          <span className="pointer-events-none absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-full bg-rose-500 px-1 text-[9px] font-bold text-white ring-2 ring-ink-900">
+            {errorCount > 9 ? '9+' : errorCount}
+          </span>
+        )}
+        {menu === 'console' && <ConsolePanel />}
+      </div>
+      <IconButton
+        onClick={() => {
+          if (previewUrl) void easel.preview.openExternal({ url: previewUrl });
+        }}
+        title="Open in your browser"
+        disabled={!previewUrl}
+      >
+        <ExternalLink className="w-[17px] h-[17px]" />
       </IconButton>
 
       <div className="flex-1" />
@@ -249,6 +373,9 @@ export function Toolbar(): React.ReactElement {
       <IconButton onClick={() => setSettingsOpen(true)} title="Settings">
         <Settings className="w-[17px] h-[17px]" />
       </IconButton>
+
+      {/* Click-away backdrop closes any open menu */}
+      {anyMenuOpen && <div className="fixed inset-0 z-20" onClick={closeAllMenus} />}
     </header>
   );
 }

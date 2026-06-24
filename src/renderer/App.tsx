@@ -162,6 +162,23 @@ export default function App(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Global undo/redo shortcuts (⌘Z / ⌘⇧Z), skipping text fields so normal text
+  // editing keeps working. Reads state imperatively to avoid re-subscribing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const store = useEaselStore.getState();
+      if (store.streaming || !store.project) return;
+      e.preventDefault();
+      if (e.shiftKey) void store.redo();
+      else void store.undo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   return (
     /*
      * Root container: full viewport, flex column, no scroll (scroll happens

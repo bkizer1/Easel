@@ -12,7 +12,7 @@
  * Call `registerIpcHandlers()` once, after `app.whenReady()`.
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, shell } from 'electron';
 import type {
   EditSubmitRequest,
   EditCancelRequest,
@@ -23,6 +23,7 @@ import type {
   PreviewReloadRequest,
   PreviewCaptureRequest,
   PreviewRequestImageRequest,
+  PreviewOpenExternalRequest,
 } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { ok, okVoid, fail } from '@shared/result';
@@ -242,6 +243,12 @@ export function registerIpcHandlers(): void {
     const provider = getActiveImageProvider();
     const result = await provider.request(req.request);
     return ok({ result });
+  });
+
+  handle(IpcChannels.previewOpenExternal, async (req: PreviewOpenExternalRequest) => {
+    if (!/^https?:\/\//i.test(req.url)) return fail('Only http(s) URLs can be opened externally', 'validation');
+    await shell.openExternal(req.url);
+    return okVoid();
   });
 
   // ── devServer.* ───────────────────────────────────────────────────────────

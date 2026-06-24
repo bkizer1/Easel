@@ -158,6 +158,9 @@ const api: EaselApi = {
     requestImage(req) {
       return ipcRenderer.invoke(IpcChannels.previewRequestImage, req);
     },
+    openExternal(req) {
+      return ipcRenderer.invoke(IpcChannels.previewOpenExternal, req);
+    },
     onStatus(handler) {
       return subscribe(IpcChannels.previewStatus, handler);
     },

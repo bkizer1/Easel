@@ -87,6 +87,8 @@ export const IpcChannels = {
   previewRequestImage: 'preview.requestImage',
   /** Emitted by main to report dev-server reachability status. */
   previewStatus: 'preview.status',
+  /** Open the current preview URL in the user's external browser. */
+  previewOpenExternal: 'preview.openExternal',
 
   // Dev server (auto-start) -------------------------------------------------
   /** Start the current project's dev server (runs its detected devCommand). */
@@ -238,6 +240,11 @@ export interface PreviewRequestImageResponse {
   result: ImageResult;
 }
 
+export interface PreviewOpenExternalRequest {
+  /** http(s) URL to open in the user's default browser. */
+  url: string;
+}
+
 /** Dev-server reachability, pushed on {@link IpcChannels.previewStatus}. */
 export interface PreviewStatusPayload {
   url: string;
@@ -330,6 +337,7 @@ export interface EaselApi {
     reload(req?: PreviewReloadRequest): Promise<IpcResult<void>>;
     capture(req?: PreviewCaptureRequest): Promise<IpcResult<PreviewCaptureResponse>>;
     requestImage(req: PreviewRequestImageRequest): Promise<IpcResult<PreviewRequestImageResponse>>;
+    openExternal(req: PreviewOpenExternalRequest): Promise<IpcResult<void>>;
     onStatus(handler: (payload: PreviewStatusPayload) => void): Unsubscribe;
   };
 
@@ -377,6 +385,7 @@ export interface IpcInvokeMap {
   [IpcChannels.previewReload]: { request: PreviewReloadRequest | void; response: IpcResult<void> };
   [IpcChannels.previewCapture]: { request: PreviewCaptureRequest | void; response: IpcResult<PreviewCaptureResponse> };
   [IpcChannels.previewRequestImage]: { request: PreviewRequestImageRequest; response: IpcResult<PreviewRequestImageResponse> };
+  [IpcChannels.previewOpenExternal]: { request: PreviewOpenExternalRequest; response: IpcResult<void> };
 
   [IpcChannels.devServerStart]: { request: void; response: IpcResult<void> };
   [IpcChannels.devServerStop]: { request: void; response: IpcResult<void> };

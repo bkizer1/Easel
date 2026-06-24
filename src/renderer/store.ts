@@ -58,6 +58,28 @@ export function normalizePreviewUrl(raw: string): string {
   return `http://${trimmed}`;
 }
 
+/** A warning/error captured from the previewed page's own console. */
+export interface PageLog {
+  id: string;
+  level: 'warn' | 'error';
+  message: string;
+  source?: string;
+  ts: number;
+}
+
+/** Responsive viewport presets for the preview surface. */
+export interface ViewportPreset {
+  label: string;
+  width: number | null; // null = fill available space
+}
+
+export const VIEWPORT_PRESETS: ViewportPreset[] = [
+  { label: 'Fill', width: null },
+  { label: 'Desktop', width: 1280 },
+  { label: 'Tablet', width: 834 },
+  { label: 'Mobile', width: 390 },
+];
+
 /* -------------------------------------------------------------------------- */
 /*  State shape                                                               */
 /* -------------------------------------------------------------------------- */
@@ -73,6 +95,16 @@ export interface EaselState {
   devServer: DevServerStatePayload | null;
   /** URL currently loaded in the preview <webview> (browser-style address bar). */
   previewUrl: string | null;
+  /** Bumped to force the preview <webview> to reload (e.g. after a revert). */
+  previewReloadNonce: number;
+  /** Bumped to toggle the preview <webview> devtools. */
+  devToolsNonce: number;
+  /** Constrained preview width (px) for responsive testing; null = fill. */
+  viewportWidth: number | null;
+  /** Warnings/errors captured from the previewed page's console. */
+  pageLogs: PageLog[];
+  /** Whether the checkpoint History panel is open. */
+  historyOpen: boolean;
   /** Current annotation interaction mode for the overlay. */
   mode: 'idle' | 'element-select' | 'freeform';
   /** Freeform annotations accumulated in the current draft batch. */
@@ -128,6 +160,19 @@ export interface EaselActions {
   startDevServer(): Promise<void>;
   /** Stop the dev server Easel started. */
   stopDevServer(): Promise<void>;
+
+  /** Force the preview <webview> to reload (used after reverts). */
+  reloadPreview(): void;
+  /** Toggle the preview <webview> devtools. */
+  toggleDevTools(): void;
+  /** Constrain the preview width for responsive testing (null = fill). */
+  setViewportWidth(width: number | null): void;
+  /** Append a captured page console warning/error. */
+  addPageLog(log: Omit<PageLog, 'id' | 'ts'>): void;
+  /** Clear captured page logs. */
+  clearPageLogs(): void;
+  /** Open or close the checkpoint History panel. */
+  setHistoryOpen(open: boolean): void;
 
   /** Append an annotation to the current draft. */
   addAnnotation(a: Annotation): void;
@@ -213,6 +258,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   previewStatus: null,
   devServer: null,
   previewUrl: null,
+  previewReloadNonce: 0,
+  devToolsNonce: 0,
+  viewportWidth: null,
+  pageLogs: [],
+  historyOpen: false,
   mode: 'idle',
   annotations: [],
   targets: [],
@@ -339,7 +389,12 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   },
 
   setPreviewUrl(url) {
-    set({ previewUrl: normalizePreviewUrl(url) || null });
+    const next = normalizePreviewUrl(url) || null;
+    set((s) => ({
+      previewUrl: next,
+      // Page logs belong to the previously-loaded URL; reset on navigation.
+      pageLogs: next === s.previewUrl ? s.pageLogs : [],
+    }));
   },
 
   async startDevServer() {
@@ -350,6 +405,35 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   async stopDevServer() {
     const result = await easel.devServer.stop();
     if (!result.ok) set({ lastError: result.error });
+  },
+
+  reloadPreview() {
+    set((s) => ({ previewReloadNonce: s.previewReloadNonce + 1 }));
+  },
+
+  toggleDevTools() {
+    set((s) => ({ devToolsNonce: s.devToolsNonce + 1 }));
+  },
+
+  setViewportWidth(width) {
+    set({ viewportWidth: width });
+  },
+
+  addPageLog(log) {
+    set((s) => {
+      const entry: PageLog = { ...log, id: genId(), ts: Date.now() };
+      const next = [...s.pageLogs, entry];
+      // Cap to the most recent 50 to bound memory.
+      return { pageLogs: next.length > 50 ? next.slice(next.length - 50) : next };
+    });
+  },
+
+  clearPageLogs() {
+    set({ pageLogs: [] });
+  },
+
+  setHistoryOpen(open) {
+    set({ historyOpen: open });
   },
 
   /* ---- Annotations --------------------------------------------------------- */
@@ -795,8 +879,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: result.error });
       return;
     }
-    // main will push checkpoint.changed to sync the list; no manual refresh needed.
-    set({ lastError: null });
+    // main pushes checkpoint.changed to sync the list. Reload the preview so the
+    // reverted source is rendered, and close the history panel.
+    set({ lastError: null, historyOpen: false });
+    get().reloadPreview();
   },
 
   async undo() {
@@ -805,8 +891,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: result.error });
       return;
     }
-    // The cursor update arrives via checkpoint.changed push; no manual set needed.
+    // The cursor update arrives via checkpoint.changed push; reload the preview.
     set({ lastError: null });
+    get().reloadPreview();
   },
 
   async redo() {
@@ -816,6 +903,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       return;
     }
     set({ lastError: null });
+    get().reloadPreview();
   },
 
   /* ---- UI helpers ---------------------------------------------------------- */

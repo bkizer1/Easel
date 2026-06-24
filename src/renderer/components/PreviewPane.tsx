@@ -44,6 +44,9 @@ interface WebviewElement extends HTMLElement {
   stop(): void;
   getURL(): string;
   send(channel: string, ...args: unknown[]): void;
+  openDevTools(): void;
+  closeDevTools(): void;
+  isDevToolsOpened(): boolean;
   addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
   removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
 }
@@ -52,6 +55,21 @@ interface WebviewElement extends HTMLElement {
 interface IpcMessageEvent extends Event {
   channel: string;
   args: unknown[];
+}
+
+/** Payload shape of the webview 'console-message' event. */
+interface ConsoleMessageEvent extends Event {
+  level: number;
+  message: string;
+  line: number;
+  sourceId: string;
+}
+
+/** Payload shape of the webview 'did-fail-load' event. */
+interface DidFailLoadEvent extends Event {
+  errorCode: number;
+  errorDescription: string;
+  validatedURL: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -93,6 +111,10 @@ export function PreviewPane(): React.ReactElement {
   const project = useEaselStore((s) => s.project);
   const startDevServer = useEaselStore((s) => s.startDevServer);
   const stopDevServer = useEaselStore((s) => s.stopDevServer);
+  const previewReloadNonce = useEaselStore((s) => s.previewReloadNonce);
+  const devToolsNonce = useEaselStore((s) => s.devToolsNonce);
+  const viewportWidth = useEaselStore((s) => s.viewportWidth);
+  const addPageLog = useEaselStore((s) => s.addPageLog);
   const mode = useEaselStore((s) => s.mode);
 
   const openProject = useEaselStore((s) => s.openProject);
@@ -222,26 +244,65 @@ export function PreviewPane(): React.ReactElement {
     const wv = webviewRef.current;
     if (!wv) return;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const listener = (e: any) => handleIpcMessage(e as IpcMessageEvent);
+    const listener = (e: Event) => handleIpcMessage(e as IpcMessageEvent);
     const domReady = () => {
       setWebviewReady(true);
       sendCommand({ type: 'set-mode', mode });
     };
 
+    // Capture the previewed page's own warnings/errors so a blank screen always
+    // has an explanation (e.g. "ReferenceError: features is not defined").
+    const onConsole = (e: Event) => {
+      const msg = e as ConsoleMessageEvent;
+      const level = typeof msg.level === 'number' ? msg.level : 0;
+      if (level < 1) return; // skip ordinary logs/info
+      addPageLog({
+        level: level >= 2 ? 'error' : 'warn',
+        message: String(msg.message ?? ''),
+        source: msg.sourceId ? `${msg.sourceId.split('/').pop() ?? msg.sourceId}:${msg.line ?? 0}` : undefined,
+      });
+    };
+    const onFailLoad = (e: Event) => {
+      const f = e as DidFailLoadEvent;
+      if (f.errorCode === -3) return; // ERR_ABORTED (benign navigation)
+      addPageLog({
+        level: 'error',
+        message: `Failed to load: ${f.errorDescription || 'unknown error'}`,
+        source: f.validatedURL,
+      });
+    };
+
     wv.addEventListener('ipc-message', listener);
     wv.addEventListener('dom-ready', domReady);
+    wv.addEventListener('console-message', onConsole);
+    wv.addEventListener('did-fail-load', onFailLoad);
     return () => {
       wv.removeEventListener('ipc-message', listener);
       wv.removeEventListener('dom-ready', domReady);
+      wv.removeEventListener('console-message', onConsole);
+      wv.removeEventListener('did-fail-load', onFailLoad);
     };
-  }, [handleIpcMessage, sendCommand, mode, previewUrl]);
+  }, [handleIpcMessage, sendCommand, mode, previewUrl, addPageLog]);
 
   /* ---- Handle highlight command (driven by hoveredSelector) ---- */
   useEffect(() => {
     if (!webviewReady) return;
     sendCommand({ type: 'highlight', selector: hoveredSelector ?? null });
   }, [hoveredSelector, webviewReady, sendCommand]);
+
+  /* ---- Reload the webview when a revert (or the toolbar) bumps the nonce ---- */
+  useEffect(() => {
+    if (previewReloadNonce > 0) webviewRef.current?.reload();
+  }, [previewReloadNonce]);
+
+  /* ---- Toggle the webview devtools on nonce bump ---- */
+  useEffect(() => {
+    if (devToolsNonce === 0) return;
+    const wv = webviewRef.current;
+    if (!wv) return;
+    if (wv.isDevToolsOpened()) wv.closeDevTools();
+    else wv.openDevTools();
+  }, [devToolsNonce]);
 
   /* ---- Reachability dot (only when the status matches what's loaded) ---- */
   const reachable =
@@ -343,25 +404,33 @@ export function PreviewPane(): React.ReactElement {
             onStop={() => void stopDevServer()}
           />
         ) : (
-          <>
-            <webview
-              // Keying by URL forces a fresh element on navigation so the
-              // guest inspector re-initialises cleanly.
-              key={previewUrl}
-              ref={(el) => {
-                webviewRef.current = el as unknown as WebviewElement | null;
-              }}
-              src={previewUrl}
-              preload={easel.webviewPreloadUrl}
-              partition="persist:easel-preview"
-              webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
-              // Electron <webview> ignores percentage height against a flex
-              // parent and collapses to a small intrinsic size — fill the
-              // (relative) surface absolutely instead.
-              style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 'none' }}
-            />
-            <AnnotationOverlay hoverBox={hoverBox} scroll={scroll} sendCommand={sendCommand} />
-          </>
+          // Center a (optionally width-constrained) column for responsive testing.
+          // At full width this just fills the surface; the darker backdrop only
+          // shows when a device preset narrows the column.
+          <div className="absolute inset-0 flex justify-center overflow-hidden bg-black/30">
+            <div
+              className="relative h-full shrink-0 transition-[width] duration-200"
+              style={{ width: viewportWidth ? `${viewportWidth}px` : '100%', maxWidth: '100%' }}
+            >
+              <webview
+                // Keying by URL forces a fresh element on navigation so the
+                // guest inspector re-initialises cleanly.
+                key={previewUrl}
+                ref={(el) => {
+                  webviewRef.current = el as unknown as WebviewElement | null;
+                }}
+                src={previewUrl}
+                preload={easel.webviewPreloadUrl}
+                partition="persist:easel-preview"
+                webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+                // Electron <webview> ignores percentage height against a flex
+                // parent and collapses to a small intrinsic size — fill the
+                // (relative) column absolutely instead.
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 'none' }}
+              />
+              <AnnotationOverlay hoverBox={hoverBox} scroll={scroll} sendCommand={sendCommand} />
+            </div>
+          </div>
         )}
       </div>
     </div>

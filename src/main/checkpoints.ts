@@ -148,6 +148,14 @@ export async function initCheckpoints(root: string): Promise<void> {
     log.info('Loaded existing checkpoints', { count: _timeline.length });
   } else {
     log.info('No existing Easel checkpoints for this project');
+    // Capture the original (pre-Easel) state as checkpoint 0 so the user can
+    // always revert all the way back. Best-effort — a git hiccup here must not
+    // block opening the project.
+    try {
+      await createCheckpoint('Original — before Easel edits');
+    } catch (err) {
+      log.warn('Could not create the initial checkpoint', { err: String(err) });
+    }
   }
 
   _broadcastChanged();
