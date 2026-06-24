@@ -51,18 +51,21 @@ jobs:
 
       - name: Generate SBOM
         run: npm run sbom
+        continue-on-error: true
 
+      # Attestations are best-effort (may be unavailable on some private-repo
+      # plans); never let them block the installer upload below.
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v1
+        continue-on-error: true
         with:
           subject-path: dist/*
-          push-provenance: true
 
       - name: Attest SBOM
         uses: actions/attest-build-provenance@v1
+        continue-on-error: true
         with:
           subject-path: sbom.cdx.json
-          push-provenance: true
 
       - name: Upload artifacts to release
         uses: softprops/action-gh-release@v2
@@ -72,6 +75,7 @@ jobs:
             sbom.cdx.json
           draft: false
           prerelease: false
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

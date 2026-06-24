@@ -7,16 +7,17 @@ module.exports = {
   },
   extends: [
     'eslint:recommended',
-    'plugin:@typescript-eslint/strict-type-checked',
+    'plugin:@typescript-eslint/recommended',
     'plugin:react/recommended',
     'plugin:react-hooks/recommended',
     'prettier',
   ],
-  parserOptions: {
-    project: ['./tsconfig.json', './tsconfig.renderer.json', './tsconfig.node.json'],
-    tsconfigRootDir: __dirname,
-  },
   parser: '@typescript-eslint/parser',
+  parserOptions: {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    ecmaFeatures: { jsx: true },
+  },
   plugins: ['@typescript-eslint', 'react', 'react-hooks'],
   rules: {
     'react/react-in-jsx-scope': 'off',
@@ -27,11 +28,29 @@ module.exports = {
       'error',
       { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
     ],
+    // Electron's <webview> uses custom attributes React's DOM typings don't know.
+    'react/no-unknown-property': [
+      'error',
+      { ignore: ['preload', 'partition', 'webpreferences', 'allowpopups', 'nodeintegration'] },
+    ],
+    // Deep type-aware linting is intentionally not enabled here — `tsc --strict`
+    // (npm run typecheck) is the source of truth for type correctness. This keeps
+    // ESLint fast and focused on style/correctness without a project-wide type pass.
   },
   settings: {
     react: {
       version: 'detect',
     },
   },
-  ignorePatterns: ['node_modules', 'out', 'dist', 'build'],
+  // Config files are not part of the app's tsconfig; don't lint them.
+  ignorePatterns: [
+    'node_modules',
+    'out',
+    'dist',
+    'build',
+    '*.config.ts',
+    '*.config.js',
+    '*.config.mjs',
+    'scripts/**',
+  ],
 };

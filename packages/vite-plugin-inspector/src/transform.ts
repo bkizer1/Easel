@@ -21,6 +21,8 @@ import path from 'node:path';
  */
 export interface TransformResult {
   code: string;
+  // Babel sourcemap object, passed through to Vite; its shape varies by version.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   map: any;
 }
 

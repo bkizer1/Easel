@@ -18,7 +18,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "npm run typecheck && npm run lint && electron-vite build && electron-builder",
+    "build": "npm run typecheck && npm run lint && electron-vite build && electron-builder --publish never",
     "build:mac": "npm run build -- --mac",
     "build:win": "npm run build -- --win",
     "build:linux": "npm run build -- --linux",

@@ -367,7 +367,6 @@ function _computeUnifiedDiff(
   const contextLines = 3;
 
   // Find changed line ranges.
-  const changes: Array<{ type: '-' | '+'; line: string }> = [];
   const maxLen = Math.max(origLines.length, nextLines.length);
   const changeBlocks: Array<{ origStart: number; origEnd: number; nextStart: number; nextEnd: number }> = [];
   let i = 0;
@@ -447,8 +446,6 @@ function _computeUnifiedDiff(
 
     hunks.push(`@@ -${origCtxStart + 1},${origCount} +${origCtxStart + 1},${nextCount} @@\n${hunkLines.join('\n')}`);
   }
-
-  changes.length; // suppress lint
 
   const unifiedDiff = changeBlocks.length === 0
     ? ''
