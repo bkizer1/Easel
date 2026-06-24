@@ -136,6 +136,10 @@ The window that opens **is** the browser — there's no separate Chrome. Then:
 4. Toggle **Select** or **Markup** in the toolbar, mark something, and describe the
    change in the chat panel. Watch it apply and hot-reload.
 
+> **No project handy?** A ready-made demo lives in [`examples/demo-app`](examples/demo-app):
+> `cd examples/demo-app && npm install && npm run dev`, then point Easel at `localhost:3000`.
+> It's full of things to try ("make this grey text white", "replace this image with a golden doodle").
+
 ### Build an installable app
 
 ```bash

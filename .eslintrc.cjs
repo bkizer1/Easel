@@ -52,5 +52,6 @@ module.exports = {
     '*.config.js',
     '*.config.mjs',
     'scripts/**',
+    'examples/**',
   ],
 };
