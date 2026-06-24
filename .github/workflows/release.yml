@@ -45,20 +45,48 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Code signing is OPTIONAL (see docs/SIGNING.md). It activates only when the
+      # matching cert secret exists. We must NOT define CSC_LINK at all in the
+      # unsigned path — an empty-but-defined CSC_LINK makes electron-builder try
+      # (and fail) to sign. GitHub Actions can't conditionally omit an `env:` key,
+      # so we write the signing vars into $GITHUB_ENV from this conditional step.
+      - name: Configure code signing
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ "$PLATFORM" = "macos" ] && [ -n "$MAC_CSC_LINK" ]; then
+            echo "macOS cert present — signing + notarizing."
+            {
+              echo "CSC_LINK=$MAC_CSC_LINK"
+              echo "CSC_KEY_PASSWORD=$MAC_CSC_KEY_PASSWORD"
+              echo "CSC_IDENTITY_AUTO_DISCOVERY=true"
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_APP_SPECIFIC_PASSWORD=$APPLE_APP_SPECIFIC_PASSWORD"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
+          elif [ "$PLATFORM" = "windows" ] && [ -n "$WIN_CSC_LINK" ]; then
+            echo "Windows cert present — signing."
+            {
+              echo "CSC_LINK=$WIN_CSC_LINK"
+              echo "CSC_KEY_PASSWORD=$WIN_CSC_KEY_PASSWORD"
+            } >> "$GITHUB_ENV"
+          else
+            echo "No signing cert for $PLATFORM — building unsigned."
+            echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+          fi
+
       - name: Build and package
         run: npm run build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # --- Code signing (optional; see docs/SIGNING.md) ------------------
-          # Builds stay UNSIGNED until you add the matching repo secrets.
-          # Auto-discovery is enabled only when a macOS cert is present, so the
-          # unsigned path never attempts (and never fails) signing.
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_LINK != '' && 'true' || 'false' }}
-          CSC_LINK: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_LINK || matrix.platform == 'windows' && secrets.WIN_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || matrix.platform == 'windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Generate SBOM
         run: npm run sbom
@@ -94,6 +122,8 @@ jobs:
     name: Generate & Verify SBOM
     runs-on: ubuntu-latest
     needs: build-and-release
+    # Run even if a build leg failed, so SBOM verification isn't skipped.
+    if: always()
     steps:
       - uses: actions/checkout@v4
 
