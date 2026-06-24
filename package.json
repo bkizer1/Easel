@@ -95,7 +95,8 @@
         "AppImage",
         "deb"
       ],
-      "category": "Development"
+      "category": "Development",
+      "maintainer": "Blake Kizer <blake.kizer@gmail.com>"
     }
   },
   "dependencies": {
