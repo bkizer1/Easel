@@ -13,6 +13,10 @@
   <img alt="Status" src="https://img.shields.io/badge/status-beta-febc2e">
 </p>
 
+<p align="center">
+  <img src="docs/media/demo.gif" alt="Easel in action — pointing at a live page and editing its source by description" width="100%">
+</p>
+
 ---
 
 Easel is a desktop **browser for web developers**. It loads your running dev
@@ -109,15 +113,25 @@ A git checkpoint is recorded  →  undo / redo anytime
 
 ## Quick start
 
-### Prerequisites
+### Download a prebuilt app
 
-- **Node.js 20+**
-- **A web project with a running dev server** (e.g. `npm run dev` → `http://localhost:3000`)
-- **Git** in that project (used for undo/redo checkpoints)
-- **Claude access** — a Pro/Max subscription (recommended) *or* an Anthropic API key.
-  See [Connecting Claude](#connecting-claude).
+Grab the latest installer from the [**Releases**](https://github.com/bkizer1/Easel/releases/latest) page:
 
-### Run it
+| Platform | File |
+| --- | --- |
+| **macOS** (Apple Silicon) | `.dmg` |
+| **Windows** | `.exe` installer (or portable `.zip`) |
+| **Linux** | `.AppImage` or `.deb` |
+
+> **First launch (unsigned builds).** Easel isn't code-signed yet, so your OS warns
+> the first time. **macOS:** right-click the app → **Open** → **Open**; if it's still
+> blocked, run `xattr -dr com.apple.quarantine /Applications/Easel.app`.
+> **Windows:** **More info → Run anyway** on the SmartScreen prompt.
+
+### …or run from source
+
+**Prerequisites:** Node.js 20+, Git (for undo/redo checkpoints), and
+[Claude access](#connecting-claude) — a Pro/Max subscription (recommended) or an API key.
 
 ```bash
 git clone https://github.com/bkizer1/Easel.git
@@ -126,19 +140,24 @@ npm install
 npm run dev      # launches the Easel desktop app
 ```
 
-The window that opens **is** the browser — there's no separate Chrome. Then:
+### Then — point it at your project
 
-1. **Start your project's dev server** in a terminal (e.g. `localhost:3000`).
-2. In Easel's **address bar**, type `localhost:3000` and press Enter — your app loads
-   in the preview.
-3. Click the **📁 folder icon** and choose that project's directory, so Claude can
-   edit its source.
-4. Toggle **Select** or **Markup** in the toolbar, mark something, and describe the
-   change in the chat panel. Watch it apply and hot-reload.
+The window that opens **is** the browser; there's no separate Chrome.
 
-> **No project handy?** A ready-made demo lives in [`examples/demo-app`](examples/demo-app):
-> `cd examples/demo-app && npm install && npm run dev`, then point Easel at `localhost:3000`.
-> It's full of things to try ("make this grey text white", "replace this image with a golden doodle").
+1. Click the **📁 folder icon** and choose your project's directory. Easel detects the
+   framework and dev port, **starts your dev server for you**, and loads it in the
+   preview. *(Already running your own dev server? Easel just uses it.)*
+2. Toggle **Select** or **Markup** in the toolbar, mark something, and describe the
+   change in the chat. Watch the AI edit your source and the page hot-reload.
+3. Don't like how it landed? Open **History** (the clock icon) and revert to any
+   earlier state — the preview re-renders instantly.
+
+> You can also type any URL (e.g. `localhost:3000`) into the address bar to point at
+> something Easel didn't start.
+
+> **No project handy?** A ready-made demo lives in [`examples/demo-app`](examples/demo-app).
+> Open that folder in Easel and it auto-starts the dev server and loads — full of
+> things to try ("make this grey text white", "replace this image with a golden doodle").
 
 ### Build an installable app
 
@@ -204,11 +223,15 @@ the renderer or the logs.
 - **Select mode** — click an element, see its source, edit by instruction; multi-select supported.
 - **Markup mode** — rectangle / ellipse / arrow / freehand / pin, in any color.
 - **Editable annotations** — drag to move, corner-handles to resize, hover-× to remove.
-- **Browser chrome** — address bar, back / forward / reload, live-status indicator.
+- **Auto-started dev server** — open a project and Easel detects the framework, picks the dev port, and runs your dev command for you (or uses a server you already have).
+- **Revert anything** — a visual **History** timeline of git checkpoints (including the original pre-Easel state); jump back to any point and the preview re-renders. ⌘Z / ⌘⇧Z too.
+- **Page console** — warnings and errors from the previewed page surface in Easel with an error badge, so a blank screen always has an explanation.
+- **Responsive viewport** — Desktop / Tablet / Mobile presets to check layouts.
+- **DevTools & open-in-browser** — pop Chrome DevTools for the preview, or open the current URL in your real browser.
+- **Browser chrome** — address bar, back / forward / reload, live reachability indicator.
 - **Voice or text** input (Web Speech API).
-- **Streaming chat** — watch the agent's messages and tool calls in real time.
-- **Diff review + git checkpoints** — every edit is recorded; undo / redo from the toolbar.
-- **Image tool** — agent can swap images via a pluggable image provider (stub ships by default).
+- **Streaming chat + diffs** — watch the agent's messages, tool calls, and file diffs in real time.
+- **Image tool** — swap images via a pluggable provider: fetch-by-URL out of the box, or generate with an OpenAI key.
 - **Provider matrix** — subscription, API key, Bedrock, Vertex, gateway, or local models.
 - **Polished, dark "Midnight Atelier" UI** — Bricolage Grotesque + Geist, a jade accent, built to disappear behind your work.
 - **Cross-platform** — macOS, Windows, Linux.
@@ -217,18 +240,9 @@ the renderer or the logs.
 
 ## Screenshots
 
-<p align="center"><img src="docs/media/banner.svg" alt="Easel" width="85%"></p>
-
-<!--
-  Real screenshots aren't committed yet. Drop PNGs into docs/media/ (see
-  docs/media/README.md for the recommended names) and uncomment these:
-
-  <p align="center"><img src="docs/media/screenshot-app.png" alt="Easel editing a live site" width="90%"></p>
-  <p align="center">
-    <img src="docs/media/screenshot-select.png" alt="Select mode" width="45%">
-    <img src="docs/media/screenshot-markup.png" alt="Markup mode" width="45%">
-  </p>
--->
+The demo at the top of this README shows the full loop — select an element,
+describe the change, watch the source update live. To add stills, drop PNGs into
+`docs/media/` (suggested names in [`docs/media/README.md`](docs/media/README.md)).
 
 ---
 

@@ -8,13 +8,52 @@
  *   • a feature card          → "move this card to the front and add a border"
  */
 
-import React from 'react';
+import React, { useRef, useState } from 'react';
 
 const features = [
   { title: 'Lightning fast', body: 'Ship in milliseconds with our edge-native runtime and zero cold starts.' },
   { title: 'Secure by default', body: 'End-to-end encryption, SOC 2, and least-privilege access on every request.' },
   { title: 'Scales with you', body: 'From a side project to millions of users without changing a line of code.' },
 ];
+
+function TiltImage({ src, alt, width, height }: { src: string; alt: string; width: number; height: number }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [tilt, setTilt] = useState({ rotateX: 0, rotateY: 0, scale: 1 });
+
+  function handleMouseMove(e: React.MouseEvent<HTMLDivElement>) {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width - 0.5;   // -0.5 to 0.5
+    const y = (e.clientY - rect.top) / rect.height - 0.5;
+    setTilt({ rotateX: -y * 20, rotateY: x * 20, scale: 1.06 });
+  }
+
+  function handleMouseLeave() {
+    setTilt({ rotateX: 0, rotateY: 0, scale: 1 });
+  }
+
+  return (
+    <div
+      ref={ref}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+      style={{ perspective: '800px', cursor: 'pointer' }}
+    >
+      <img
+        src={src}
+        alt={alt}
+        width={width}
+        height={height}
+        style={{
+          transform: `rotateX(${tilt.rotateX}deg) rotateY(${tilt.rotateY}deg) scale(${tilt.scale})`,
+          transition: tilt.scale === 1 ? 'transform 0.6s cubic-bezier(0.23,1,0.32,1)' : 'transform 0.1s ease-out',
+          willChange: 'transform',
+        }}
+      />
+    </div>
+  );
+}
 
 export default function App(): React.ReactElement {
   return (
@@ -53,7 +92,7 @@ export default function App(): React.ReactElement {
         </div>
 
         <div className="hero-art">
-          <img
+          <TiltImage
             src="https://picsum.photos/seed/nimbus/640/440"
             alt="Product preview"
             width={640}
