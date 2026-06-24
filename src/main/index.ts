@@ -8,6 +8,7 @@ import { app, BrowserWindow } from 'electron';
 import { createMainWindow, getMainWindow } from '@main/window';
 import { registerIpcHandlers } from '@main/ipc';
 import { initSettings } from '@main/settings';
+import { stopDevServer } from '@main/devServer';
 import { rootLogger } from '@main/logger';
 
 const log = rootLogger;
@@ -44,5 +45,10 @@ if (!gotLock) {
   app.on('window-all-closed', () => {
     // Quit on all platforms except macOS, where apps stay active until Cmd+Q.
     if (process.platform !== 'darwin') app.quit();
+  });
+
+  // Never leave a dev server we started orphaned when Easel exits.
+  app.on('before-quit', () => {
+    stopDevServer();
   });
 }

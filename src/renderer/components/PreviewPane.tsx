@@ -21,6 +21,7 @@ import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { useEaselStore, normalizePreviewUrl } from '../store';
 import { easel } from '../lib/api';
 import { AnnotationOverlay } from './AnnotationOverlay';
+import { DevServerOverlay } from './DevServerOverlay';
 
 /* -------------------------------------------------------------------------- */
 /*  Webview element typing                                                    */
@@ -88,6 +89,10 @@ export function PreviewPane(): React.ReactElement {
   const previewUrl = useEaselStore((s) => s.previewUrl);
   const setPreviewUrl = useEaselStore((s) => s.setPreviewUrl);
   const previewStatus = useEaselStore((s) => s.previewStatus);
+  const devServer = useEaselStore((s) => s.devServer);
+  const project = useEaselStore((s) => s.project);
+  const startDevServer = useEaselStore((s) => s.startDevServer);
+  const stopDevServer = useEaselStore((s) => s.stopDevServer);
   const mode = useEaselStore((s) => s.mode);
 
   const openProject = useEaselStore((s) => s.openProject);
@@ -242,6 +247,18 @@ export function PreviewPane(): React.ReactElement {
   const reachable =
     previewStatus && previewStatus.url === previewUrl ? previewStatus.reachable : null;
 
+  /* ---- Decide whether to show the live webview or the dev-server overlay ----
+   * Gate the webview on the dev server actually serving, so we never render a
+   * blank/connection-refused page. When the open project's dev server isn't up
+   * yet, the overlay (which Easel auto-starts) takes over until it responds.
+   * URLs that aren't the project's dev server are shown optimistically. */
+  const isProjectUrl =
+    !!project?.devServerUrl && previewUrl === normalizePreviewUrl(project.devServerUrl);
+  const dsState = devServer?.state ?? 'idle';
+  const dsActive = dsState === 'starting' || dsState === 'running';
+  const showDevServerOverlay =
+    !!previewUrl && reachable !== true && (dsActive || reachable === false || isProjectUrl);
+
   /* ---- Render ---- */
   return (
     <div className="absolute inset-0 flex flex-col bg-gray-950 min-w-0">
@@ -312,7 +329,20 @@ export function PreviewPane(): React.ReactElement {
 
       {/* Preview surface */}
       <div className="flex-1 relative overflow-hidden bg-gray-950">
-        {previewUrl ? (
+        {!previewUrl ? (
+          <EmptyState onOpen={() => void openProject()} />
+        ) : showDevServerOverlay ? (
+          <DevServerOverlay
+            url={previewUrl}
+            state={dsState}
+            reachable={reachable}
+            command={devServer?.command ?? project?.devCommand}
+            logTail={devServer?.logTail ?? []}
+            canStart={isProjectUrl && !!project?.devCommand}
+            onStart={() => void startDevServer()}
+            onStop={() => void stopDevServer()}
+          />
+        ) : (
           <>
             <webview
               // Keying by URL forces a fresh element on navigation so the
@@ -332,8 +362,6 @@ export function PreviewPane(): React.ReactElement {
             />
             <AnnotationOverlay hoverBox={hoverBox} scroll={scroll} sendCommand={sendCommand} />
           </>
-        ) : (
-          <EmptyState onOpen={() => void openProject()} />
         )}
       </div>
     </div>

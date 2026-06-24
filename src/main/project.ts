@@ -295,7 +295,7 @@ const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 2500;
 
 /** Make a simple HEAD request and return whether it succeeded. */
-async function probe(url: string): Promise<{ reachable: boolean; detail?: string }> {
+export async function probe(url: string): Promise<{ reachable: boolean; detail?: string }> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       resolve({ reachable: false, detail: 'timeout' });

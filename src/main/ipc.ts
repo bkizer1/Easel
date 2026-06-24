@@ -39,6 +39,12 @@ import {
   closeProject,
 } from '@main/project';
 import {
+  startDevServer,
+  stopDevServer,
+  getDevServerState,
+  maybeAutoStartDevServer,
+} from '@main/devServer';
+import {
   initCheckpoints,
   createCheckpoint,
   listCheckpoints,
@@ -92,6 +98,11 @@ export function registerIpcHandlers(): void {
       await initCheckpoints(project.root).catch((err) =>
         log.warn('Checkpoint init failed', { err: String(err) }),
       );
+      // A freshly opened project supersedes any prior managed dev server.
+      stopDevServer();
+      // Auto-start its dev server when one isn't already reachable (fire-and-forget;
+      // the renderer reflects progress via devServer.event + the reachability poll).
+      void maybeAutoStartDevServer(project);
     }
     return ok({ project });
   });
@@ -101,6 +112,7 @@ export function registerIpcHandlers(): void {
   });
 
   handle(IpcChannels.projectClose, () => {
+    stopDevServer();
     closeProject();
     return okVoid();
   });
@@ -230,6 +242,25 @@ export function registerIpcHandlers(): void {
     const provider = getActiveImageProvider();
     const result = await provider.request(req.request);
     return ok({ result });
+  });
+
+  // ── devServer.* ───────────────────────────────────────────────────────────
+
+  handle(IpcChannels.devServerStart, () => {
+    const project = getCurrentProject();
+    if (!project) return fail('No project open', 'no-project');
+    if (!project.devCommand) return fail('No dev command detected for this project', 'no-command');
+    startDevServer({ command: project.devCommand, cwd: project.root, url: project.devServerUrl });
+    return okVoid();
+  });
+
+  handle(IpcChannels.devServerStop, () => {
+    stopDevServer();
+    return okVoid();
+  });
+
+  handle(IpcChannels.devServerGet, () => {
+    return ok(getDevServerState());
   });
 
   log.info('IPC handlers registered');

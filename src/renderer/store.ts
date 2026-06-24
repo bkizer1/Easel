@@ -27,7 +27,7 @@ import type {
   FileDiff,
   ProjectConfig,
 } from '@shared/types';
-import type { PreviewStatusPayload } from '@shared/ipc';
+import type { DevServerStatePayload, PreviewStatusPayload } from '@shared/ipc';
 
 /* -------------------------------------------------------------------------- */
 /*  ID generation                                                             */
@@ -69,6 +69,8 @@ export interface EaselState {
   settings: AppSettings | null;
   /** Latest dev-server reachability status pushed by main. */
   previewStatus: PreviewStatusPayload | null;
+  /** Latest dev-server lifecycle state (auto-start); null until the first event. */
+  devServer: DevServerStatePayload | null;
   /** URL currently loaded in the preview <webview> (browser-style address bar). */
   previewUrl: string | null;
   /** Current annotation interaction mode for the overlay. */
@@ -121,6 +123,11 @@ export interface EaselActions {
 
   /** Point the embedded preview at a URL (browser-style address bar). */
   setPreviewUrl(url: string): void;
+
+  /** Start the current project's dev server (runs its detected command). */
+  startDevServer(): Promise<void>;
+  /** Stop the dev server Easel started. */
+  stopDevServer(): Promise<void>;
 
   /** Append an annotation to the current draft. */
   addAnnotation(a: Annotation): void;
@@ -204,6 +211,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   project: null,
   settings: null,
   previewStatus: null,
+  devServer: null,
   previewUrl: null,
   mode: 'idle',
   annotations: [],
@@ -239,6 +247,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ previewStatus: payload });
     });
 
+    const unsubDevServer = easel.devServer.onEvent((payload) => {
+      set({ devServer: payload });
+    });
+
     const unsubEdit = easel.edit.onEvent(({ event }) => {
       get().applyAgentEvent(event);
     });
@@ -259,6 +271,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         set({ lastError: projResult.error });
       }
 
+      const dsResult = await easel.devServer.get();
+      if (dsResult.ok) set({ devServer: dsResult.value });
+
       await get().listCheckpoints();
     })();
 
@@ -268,6 +283,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       unsubSettings();
       unsubCheckpoint();
       unsubPreview();
+      unsubDevServer();
       unsubEdit();
     };
   },
@@ -301,6 +317,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     set({
       project: null,
       previewUrl: null,
+      devServer: null,
       annotations: [],
       targets: [],
       hoveredSelector: null,
@@ -323,6 +340,16 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   setPreviewUrl(url) {
     set({ previewUrl: normalizePreviewUrl(url) || null });
+  },
+
+  async startDevServer() {
+    const result = await easel.devServer.start();
+    if (!result.ok) set({ lastError: result.error });
+  },
+
+  async stopDevServer() {
+    const result = await easel.devServer.stop();
+    if (!result.ok) set({ lastError: result.error });
   },
 
   /* ---- Annotations --------------------------------------------------------- */

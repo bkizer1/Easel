@@ -87,6 +87,16 @@ export const IpcChannels = {
   previewRequestImage: 'preview.requestImage',
   /** Emitted by main to report dev-server reachability status. */
   previewStatus: 'preview.status',
+
+  // Dev server (auto-start) -------------------------------------------------
+  /** Start the current project's dev server (runs its detected devCommand). */
+  devServerStart: 'devServer.start',
+  /** Stop the dev server Easel started. */
+  devServerStop: 'devServer.stop',
+  /** Get the current dev-server state + recent log tail. */
+  devServerGet: 'devServer.get',
+  /** Emitted by main on dev-server state / log changes. */
+  devServerEvent: 'devServer.event',
 } as const;
 
 /** Union of every channel-name literal. */
@@ -236,6 +246,22 @@ export interface PreviewStatusPayload {
   detail?: string;
 }
 
+/** Lifecycle state of the dev server Easel manages. */
+export type DevServerState = 'idle' | 'starting' | 'running' | 'stopped' | 'error';
+
+/** Dev-server status + recent output, pushed on {@link IpcChannels.devServerEvent}. */
+export interface DevServerStatePayload {
+  state: DevServerState;
+  /** The command being run (e.g. `npm run dev`), when one is active. */
+  command?: string;
+  /** Working directory the command runs in. */
+  cwd?: string;
+  /** The dev-server URL Easel is waiting on. */
+  url?: string;
+  /** Most recent output lines (ANSI-stripped, capped). */
+  logTail: string[];
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Event payloads (push channels, main -> renderer)                          */
 /* -------------------------------------------------------------------------- */
@@ -306,6 +332,17 @@ export interface EaselApi {
     requestImage(req: PreviewRequestImageRequest): Promise<IpcResult<PreviewRequestImageResponse>>;
     onStatus(handler: (payload: PreviewStatusPayload) => void): Unsubscribe;
   };
+
+  devServer: {
+    /** Start the current project's dev server (idempotent if already running). */
+    start(): Promise<IpcResult<void>>;
+    /** Stop the dev server Easel started. */
+    stop(): Promise<IpcResult<void>>;
+    /** Read the current dev-server state + recent log tail. */
+    get(): Promise<IpcResult<DevServerStatePayload>>;
+    /** Subscribe to dev-server state / log updates. */
+    onEvent(handler: (payload: DevServerStatePayload) => void): Unsubscribe;
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -340,6 +377,10 @@ export interface IpcInvokeMap {
   [IpcChannels.previewReload]: { request: PreviewReloadRequest | void; response: IpcResult<void> };
   [IpcChannels.previewCapture]: { request: PreviewCaptureRequest | void; response: IpcResult<PreviewCaptureResponse> };
   [IpcChannels.previewRequestImage]: { request: PreviewRequestImageRequest; response: IpcResult<PreviewRequestImageResponse> };
+
+  [IpcChannels.devServerStart]: { request: void; response: IpcResult<void> };
+  [IpcChannels.devServerStop]: { request: void; response: IpcResult<void> };
+  [IpcChannels.devServerGet]: { request: void; response: IpcResult<DevServerStatePayload> };
 }
 
 /**
@@ -353,6 +394,7 @@ export interface IpcEventMap {
   [IpcChannels.settingsChanged]: SettingsChangedPayload;
   [IpcChannels.checkpointChanged]: CheckpointChangedPayload;
   [IpcChannels.previewStatus]: PreviewStatusPayload;
+  [IpcChannels.devServerEvent]: DevServerStatePayload;
 }
 
 /* -------------------------------------------------------------------------- */

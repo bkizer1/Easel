@@ -162,6 +162,22 @@ const api: EaselApi = {
       return subscribe(IpcChannels.previewStatus, handler);
     },
   },
+
+  // ── devServer.* ───────────────────────────────────────────────────────────
+  devServer: {
+    start() {
+      return ipcRenderer.invoke(IpcChannels.devServerStart);
+    },
+    stop() {
+      return ipcRenderer.invoke(IpcChannels.devServerStop);
+    },
+    get() {
+      return ipcRenderer.invoke(IpcChannels.devServerGet);
+    },
+    onEvent(handler) {
+      return subscribe(IpcChannels.devServerEvent, handler);
+    },
+  },
 };
 
 /* -------------------------------------------------------------------------- */
