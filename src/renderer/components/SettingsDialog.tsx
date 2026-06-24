@@ -640,6 +640,27 @@ export function SettingsDialog(): React.ReactElement | null {
               </div>
             </section>
 
+            {/* ---- Image generation key (shown when enabled) ---- */}
+            {draft.featureFlags.imageGeneration && (
+              <section>
+                <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">
+                  Image provider
+                </h3>
+                <Label>OpenAI API key (for image generation)</Label>
+                <SecretInput
+                  placeholder="sk-…"
+                  hint={draft.imageApiKeyRef?.hint}
+                  isSet={draft.imageApiKeyRef?.isSet ?? false}
+                  onSave={(v) => setSecret('image-provider', v)}
+                  onClear={() => clearSecret('image-provider')}
+                />
+                <p className="mt-1.5 text-xs text-gray-500">
+                  Used by the agent&rsquo;s replace-image tool to generate images. Fetching an image by URL works
+                  without a key.
+                </p>
+              </section>
+            )}
+
             {/* ---- Theme ---- */}
             <section>
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-3">

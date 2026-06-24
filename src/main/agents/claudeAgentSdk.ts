@@ -22,11 +22,100 @@
  * own `process.env` is NEVER mutated permanently.
  */
 
-import type { AgentBackend, AgentCapabilities, AgentBackendContext, ValidateContext } from '@shared/agent';
-import type { AgentEvent, AppSettings, EditRequest } from '@shared/types';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import type { AgentBackend, AgentBackendContext, AgentCapabilities, ProjectFs, ValidateContext } from '@shared/agent';
+import type { AgentEvent, AppSettings, EditRequest, FileDiff } from '@shared/types';
 import { createLogger } from '@main/logger';
 
 const log = createLogger('backend:claude-agent-sdk');
+
+/* -------------------------------------------------------------------------- */
+/*  Diff synthesis from the SDK's Edit / Write / MultiEdit tool calls          */
+/* -------------------------------------------------------------------------- */
+
+function linesOf(s: string): string[] {
+  return s.length ? s.split('\n') : [];
+}
+
+/** Build a unified FileDiff from an old → new string replacement. */
+function buildEditDiff(
+  relPath: string,
+  oldStr: string,
+  newStr: string,
+  changeType: FileDiff['changeType'] = 'modified',
+): FileDiff {
+  const oldLines = linesOf(oldStr);
+  const newLines = linesOf(newStr);
+  const body = [...oldLines.map((l) => `-${l}`), ...newLines.map((l) => `+${l}`)].join('\n');
+  const unifiedDiff = `--- a/${relPath}\n+++ b/${relPath}\n@@ -1,${oldLines.length} +1,${newLines.length} @@\n${body}`;
+  return { filePath: relPath, changeType, unifiedDiff, additions: newLines.length, deletions: oldLines.length };
+}
+
+/** Append b's hunks onto a (same file) so repeated edits accumulate visibly. */
+function mergeFileDiff(a: FileDiff, b: FileDiff): FileDiff {
+  const bHunks = b.unifiedDiff.split('\n').slice(2).join('\n'); // drop the --- / +++ header
+  return {
+    ...a,
+    unifiedDiff: `${a.unifiedDiff}\n${bHunks}`,
+    additions: a.additions + b.additions,
+    deletions: a.deletions + b.deletions,
+  };
+}
+
+/** Turn an Edit / MultiEdit / Write tool-use input into FileDiff(s). */
+async function toolUseToDiffs(
+  toolName: string,
+  input: Record<string, unknown>,
+  projectRoot: string,
+  fs: ProjectFs,
+): Promise<FileDiff[]> {
+  const rawPath = String(input['file_path'] ?? input['path'] ?? '');
+  if (!rawPath) return [];
+  const rel = rawPath.startsWith(projectRoot) ? rawPath.slice(projectRoot.length).replace(/^\/+/, '') : rawPath;
+
+  if (toolName === 'Edit') {
+    return [buildEditDiff(rel, String(input['old_string'] ?? ''), String(input['new_string'] ?? ''))];
+  }
+  if (toolName === 'MultiEdit') {
+    const edits = Array.isArray(input['edits']) ? (input['edits'] as Array<Record<string, unknown>>) : [];
+    let combined: FileDiff | null = null;
+    for (const e of edits) {
+      const d = buildEditDiff(rel, String(e['old_string'] ?? ''), String(e['new_string'] ?? ''));
+      combined = combined ? mergeFileDiff(combined, d) : d;
+    }
+    return combined ? [combined] : [];
+  }
+  if (toolName === 'Write') {
+    const content = String(input['content'] ?? '');
+    try {
+      // At tool-use time the write usually hasn't hit disk yet, so this diffs
+      // the on-disk (old) content against the new content.
+      const d = await fs.diff(rel, content);
+      if (d.unifiedDiff) return [d];
+    } catch {
+      /* fall through to all-additions */
+    }
+    return [buildEditDiff(rel, '', content, 'created')];
+  }
+  return [];
+}
+
+/** Decode a data-URL screenshot to a temp file the agent can Read (for vision). */
+async function prepareScreenshot(
+  dataUrl: string,
+  requestId: string,
+): Promise<{ filePath: string; dir: string } | null> {
+  const m = /^data:image\/([a-zA-Z]+);base64,(.+)$/s.exec(dataUrl);
+  if (!m) return null;
+  const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+  const dir = path.join(os.tmpdir(), 'easel-vision');
+  await mkdir(dir, { recursive: true });
+  const filePath = path.join(dir, `selection-${requestId}.${ext}`);
+  await writeFile(filePath, Buffer.from(m[2], 'base64'));
+  return { filePath, dir };
+}
 
 const CAPABILITIES: AgentCapabilities = {
   streamsThinking: true,
@@ -172,7 +261,20 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         return;
       }
 
-      const prompt = buildPrompt(request);
+      let prompt = buildPrompt(request);
+      let screenshot: { filePath: string; dir: string } | null = null;
+      if (request.screenshotDataUrl) {
+        try {
+          screenshot = await prepareScreenshot(request.screenshotDataUrl, request.id);
+        } catch (err) {
+          ctx.logger.warn('Could not stage screenshot for vision', { err: String(err) });
+        }
+      }
+      if (screenshot) {
+        prompt +=
+          `\n\nVISUAL CONTEXT: a screenshot of the region the user marked on the live page is saved at:\n  ${screenshot.filePath}\n` +
+          `Use the Read tool to view it — it shows what they're pointing at and the surrounding layout. Let it guide your edit.`;
+      }
 
       log.info('Starting Claude Agent SDK edit', {
         requestId: request.id,
@@ -209,7 +311,7 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         model: settings.model,
         maxTurns: 20,
         cwd: request.projectRoot,
-        additionalDirectories: [request.projectRoot],
+        additionalDirectories: screenshot ? [request.projectRoot, screenshot.dir] : [request.projectRoot],
         // Auto-apply file edits (no interactive permission prompt is possible
         // here) and restrict to safe file tools so the agent can't hang on a
         // Bash permission request.
@@ -224,7 +326,7 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         abortController,
       };
 
-      const changedFiles = new Set<string>();
+      const diffsByFile = new Map<string, FileDiff>();
       let resultText = '';
 
       try {
@@ -260,9 +362,15 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
                   callId: String(block['id'] ?? crypto.randomUUID()),
                 };
                 const input = (block['input'] ?? {}) as Record<string, unknown>;
-                const fp = input['file_path'] ?? input['path'];
-                if (typeof fp === 'string' && /^(Edit|Write|MultiEdit|NotebookEdit)$/.test(toolName)) {
-                  changedFiles.add(fp.replace(request.projectRoot + '/', ''));
+                if (/^(Edit|MultiEdit|Write)$/.test(toolName)) {
+                  const fileDiffs = await toolUseToDiffs(toolName, input, request.projectRoot, ctx.fs);
+                  for (const d of fileDiffs) {
+                    const merged = diffsByFile.has(d.filePath)
+                      ? mergeFileDiff(diffsByFile.get(d.filePath)!, d)
+                      : d;
+                    diffsByFile.set(d.filePath, merged);
+                    yield { type: 'file-edit', requestId: request.id, diff: merged };
+                  }
                 }
               }
             }
@@ -297,6 +405,10 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         return;
       }
 
+      if (screenshot) {
+        await rm(screenshot.filePath, { force: true }).catch(() => undefined);
+      }
+
       if (signal.aborted) {
         yield { type: 'error', requestId: request.id, message: 'Edit cancelled', code: 'cancelled', recoverable: false };
         return;
@@ -312,7 +424,8 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         yield { type: 'warning', requestId: request.id, message: `Checkpoint failed: ${String(err)}`, code: 'checkpoint-failed' };
       }
 
-      const changed = checkpoint?.changedFiles?.length ?? changedFiles.size;
+      const diffs = Array.from(diffsByFile.values());
+      const changed = diffs.length || checkpoint?.changedFiles?.length || 0;
       const fileWord = changed === 1 ? 'file' : 'files';
       const summary =
         resultText.trim() ||
@@ -322,7 +435,7 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         type: 'done',
         requestId: request.id,
         summary,
-        diffs: [],
+        diffs,
       };
     },
 
