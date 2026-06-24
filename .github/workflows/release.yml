@@ -49,6 +49,16 @@ jobs:
         run: npm run build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Code signing (optional; see docs/SIGNING.md) ------------------
+          # Builds stay UNSIGNED until you add the matching repo secrets.
+          # Auto-discovery is enabled only when a macOS cert is present, so the
+          # unsigned path never attempts (and never fails) signing.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_LINK != '' && 'true' || 'false' }}
+          CSC_LINK: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_LINK || matrix.platform == 'windows' && secrets.WIN_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || matrix.platform == 'windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
       - name: Generate SBOM
         run: npm run sbom

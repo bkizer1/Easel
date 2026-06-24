@@ -62,7 +62,7 @@
         "zip"
       ],
       "category": "public.app-category.developer-tools",
-      "identity": null
+      "hardenedRuntime": true
     },
     "dmg": {
       "contents": [
