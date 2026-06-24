@@ -60,12 +60,7 @@
         "zip"
       ],
       "category": "public.app-category.developer-tools",
-      "hardenedRuntime": true,
-      "gatekeeperAssess": false,
-      "identity": null,
-      "certificateFile": null,
-      "certificatePassword": null,
-      "notarize": false
+      "identity": null
     },
     "dmg": {
       "contents": [
@@ -87,11 +82,6 @@
         "nsis",
         "portable",
         "zip"
-      ],
-      "certificateFile": null,
-      "certificatePassword": null,
-      "signingHashAlgorithms": [
-        "sha256"
       ]
     },
     "nsis": {
