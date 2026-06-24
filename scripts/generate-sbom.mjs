@@ -34,6 +34,9 @@ try {
     'npx @cyclonedx/cyclonedx-npm@latest',
     '--output-file', outputFile,
     '--spec-version', '1.4',
+    // npm ls exits non-zero on benign workspace/peer noise; don't let that
+    // abort the SBOM (the component graph is still complete).
+    '--ignore-npm-errors',
   ].join(' ');
 
   console.log(`Running: ${command}`);
