@@ -29,6 +29,8 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx,json}\" \"packages/**/*.{ts,tsx,json}\" \"./**/*.{json,md}\"",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
     "typecheck:watch": "tsc -p tsconfig.renderer.json --noEmit --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "precommit": "npm run format:check && npm run lint && npm run typecheck",
     "sbom": "node scripts/generate-sbom.mjs",
     "notice": "node scripts/generate-notice.mjs"
@@ -129,6 +131,7 @@
     "prettier": "^3.3.3",
     "tailwindcss": "^3.4.7",
     "typescript": "^5.5.4",
-    "vite": "^5.3.4"
+    "vite": "^5.3.4",
+    "vitest": "^4.1.9"
   }
 }

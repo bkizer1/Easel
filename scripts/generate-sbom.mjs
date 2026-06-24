@@ -15,7 +15,7 @@
  */
 
 import { execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -34,7 +34,6 @@ try {
     'npx @cyclonedx/cyclonedx-npm@latest',
     '--output-file', outputFile,
     '--spec-version', '1.4',
-    '--shallow', 'false',
   ].join(' ');
 
   console.log(`Running: ${command}`);
@@ -45,7 +44,7 @@ try {
   });
 
   if (existsSync(outputFile)) {
-    const stat = require('fs').statSync(outputFile);
+    const stat = statSync(outputFile);
     console.log(`✓ SBOM generated successfully: ${outputFile} (${stat.size} bytes)`);
     process.exit(0);
   } else {
