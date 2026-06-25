@@ -46,6 +46,18 @@ describe('matchGlob', () => {
     expect(matchGlob('migrations/**', 'src/migrations/x.sql')).toBe(false);
   });
 
+  it('dir/** also matches the directory entry itself (gitignore-style)', () => {
+    expect(matchGlob('migrations/**', 'migrations')).toBe(true);
+    expect(matchGlob('.git/**', '.git')).toBe(true);
+    expect(matchGlob('.git/**', '.git/config')).toBe(true);
+    expect(matchGlob('.git/**', 'src/git')).toBe(false);
+  });
+
+  it('treats runs of 3+ stars as a globstar', () => {
+    expect(matchGlob('a***b', 'aXYZb')).toBe(true);
+    expect(matchGlob('a***b', 'aX/Yb')).toBe(true); // globstar crosses /
+  });
+
   it('matches a bare filename at any depth (gitignore-style)', () => {
     expect(matchGlob('package.json', 'package.json')).toBe(true);
     expect(matchGlob('package.json', 'packages/ui/package.json')).toBe(true);
@@ -158,5 +170,11 @@ describe('evaluateWrite', () => {
     expect(evaluateWrite(loaded, '.env', 0).decision).toBe('deny');
     expect(evaluateWrite(loaded, 'pnpm-lock.yaml', 0).decision).toBe('deny');
     expect(evaluateWrite(loaded, 'src/components/Hero.tsx', 0).decision).toBe('allow');
+  });
+
+  it('default policy blocks writes anywhere under .git (and .git itself)', () => {
+    const loaded: LoadedPolicy = { policy: DEFAULT_POLICY, source: 'default' };
+    expect(evaluateWrite(loaded, '.git/config', 0).decision).toBe('deny');
+    expect(evaluateWrite(loaded, '.git', 0).decision).toBe('deny');
   });
 });

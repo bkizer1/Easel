@@ -91,7 +91,7 @@ describe('createCheckpoint provenance trailers', () => {
     expect(latest.requestId).toBe('req-99');
   });
 
-  it('omits the trailer paragraph entirely when there is no provenance', async () => {
+  it('records only the source fallback when called with no provenance', async () => {
     const dir = freshRepo();
     await initCheckpoints(dir);
 
@@ -104,5 +104,15 @@ describe('createCheckpoint provenance trailers', () => {
     expect(parsed.instruction).toBeUndefined();
     expect(parsed.model).toBeUndefined();
     expect(parsed.sources).toContain('app.tsx');
+  });
+
+  it('writes no trailer paragraph for a checkpoint with no provenance and no changes', async () => {
+    const dir = freshRepo();
+    await initCheckpoints(dir); // creates the "Original" checkpoint: nothing changed
+
+    const { checkpoints } = listCheckpoints();
+    const original = checkpoints[0];
+    expect(original.changedFiles).toEqual([]);
+    expect(await getCheckpointProvenance(original.commitSha)).toEqual({});
   });
 });

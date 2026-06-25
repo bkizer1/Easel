@@ -2,13 +2,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtempSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentEvent } from '@shared/types';
+import type { AgentEvent, AppSettings, EditRequest, ElementTarget } from '@shared/types';
 import type { LoadedPolicy } from './policy';
 
 // editRunner pulls in the main window for event push; stub it for Node tests.
 vi.mock('@main/window', () => ({ getMainWindow: () => null }));
 
-import { buildProjectFs, createWriteGate, respondPolicyConfirm, type WriteGate } from './editRunner';
+import {
+  buildProjectFs,
+  buildProvenance,
+  createWriteGate,
+  respondPolicyConfirm,
+  type WriteGate,
+} from './editRunner';
 
 const tmpDirs: string[] = [];
 function projectDir(): string {
@@ -124,5 +130,62 @@ describe('createWriteGate decisions', () => {
     expect((await gate.check('c.ts')).allow).toBe(false);
     // Re-writing an already-counted file is still allowed (not a new file).
     expect((await gate.check('a.ts')).allow).toBe(true);
+  });
+});
+
+describe('buildProvenance', () => {
+  const settings = { model: 'claude-opus-4-8', agentBackend: 'claude-agent-sdk' } as AppSettings;
+
+  function target(over: Partial<ElementTarget>): ElementTarget {
+    return {
+      id: 't1',
+      selector: 'div#root',
+      tagName: 'div',
+      boundingBox: { x: 0, y: 0, width: 1, height: 1 },
+      textSnippet: '',
+      attributes: {},
+      pluginPresent: false,
+      confidence: 'high',
+      ...over,
+    };
+  }
+
+  function request(targets: ElementTarget[]): EditRequest {
+    return {
+      id: 'req-1',
+      instruction: 'Do the thing',
+      annotations: [],
+      targets,
+      projectRoot: '/proj',
+      devServerUrl: 'http://localhost:3000',
+    };
+  }
+
+  it('maps instruction/model/backend and the latest confidence', () => {
+    const p = buildProvenance(request([]), settings, 'medium');
+    expect(p.instruction).toBe('Do the thing');
+    expect(p.model).toBe('claude-opus-4-8');
+    expect(p.backend).toBe('claude-agent-sdk');
+    expect(p.confidence).toBe('medium');
+  });
+
+  it('derives Easel-Target selectors and Easel-Source file:line from targets', () => {
+    const p = buildProvenance(
+      request([
+        target({ selector: 'h1.hero', dataEaselSource: { filePath: 'src/Hero.tsx', line: 12, column: 3 } }),
+        target({ selector: 'button#cta' }), // no data-easel-source → no source entry
+      ]),
+      settings,
+      undefined,
+    );
+    expect(p.targets).toEqual(['h1.hero', 'button#cta']);
+    expect(p.sources).toEqual(['src/Hero.tsx:12']);
+    expect(p.confidence).toBeUndefined(); // omitted when not reported
+  });
+
+  it('omits targets/sources entirely when there are no element targets', () => {
+    const p = buildProvenance(request([]), settings, undefined);
+    expect(p.targets).toBeUndefined();
+    expect(p.sources).toBeUndefined();
   });
 });

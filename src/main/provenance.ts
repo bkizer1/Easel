@@ -44,7 +44,11 @@ const MAX_VALUE_LEN = 500;
 /** Collapse a value to a single trimmed line (trailers are line-oriented). */
 function sanitizeValue(raw: string): string {
   const oneLine = raw.replace(/\s+/g, ' ').trim();
-  return oneLine.length > MAX_VALUE_LEN ? oneLine.slice(0, MAX_VALUE_LEN - 1) + '…' : oneLine;
+  // Code-point-aware truncation so we never split a surrogate pair (emoji etc.).
+  const codePoints = Array.from(oneLine);
+  return codePoints.length > MAX_VALUE_LEN
+    ? codePoints.slice(0, MAX_VALUE_LEN - 1).join('') + '…'
+    : oneLine;
 }
 
 /**

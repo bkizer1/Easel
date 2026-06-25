@@ -156,19 +156,31 @@ function escapeLiteral(s: string): string {
  *  - `**` matches any run of characters, including `/`
  *  - `*`  matches any run of characters except `/`
  *  - `?`  matches a single character except `/`
- * A `**\/` segment also matches zero directories (so `**\/x` matches `x`).
+ * A leading `**\/` segment also matches zero directories (so `**\/x` matches
+ * `x`). A trailing `/**` matches the directory itself and everything under it
+ * (so `dir/**` matches both `dir` and `dir/a/b`, gitignore-style). Runs of more
+ * than two `*` are treated as `**`.
  */
 function globToRegExp(glob: string): RegExp {
   let re = '';
-  for (let i = 0; i < glob.length; i++) {
+  let i = 0;
+  while (i < glob.length) {
     const c = glob[i];
     if (c === '*') {
-      if (glob[i + 1] === '*') {
-        // `**` — consume the second star (and an optional following slash).
+      // Consume the whole run of stars; a run of 2+ is a globstar.
+      let stars = 0;
+      while (glob[i] === '*') {
+        stars++;
         i++;
-        if (glob[i + 1] === '/') {
+      }
+      if (stars >= 2) {
+        if (glob[i] === '/') {
+          // `**/` — also matches zero leading directories.
           i++;
-          re += '(?:.*/)?'; // `**/` also matches zero leading directories
+          re += '(?:.*/)?';
+        } else if (re.endsWith('/')) {
+          // Trailing `…/**` — match the directory itself or anything below it.
+          re = re.slice(0, -1) + '(?:/.*)?';
         } else {
           re += '.*';
         }
@@ -177,8 +189,10 @@ function globToRegExp(glob: string): RegExp {
       }
     } else if (c === '?') {
       re += '[^/]';
+      i++;
     } else {
       re += escapeLiteral(c);
+      i++;
     }
   }
   return new RegExp(`^${re}$`);

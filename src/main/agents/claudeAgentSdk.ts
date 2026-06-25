@@ -378,6 +378,37 @@ function buildPrompt(request: EditRequest): string {
   return lines.join('\n');
 }
 
+/**
+ * Decide whether an SDK file-tool call (`Edit`/`Write`/`MultiEdit`) is permitted
+ * by the project's guardrail policy, via the host's shared write gate. Extracted
+ * from the PreToolUse hook so the deny/allow + path-resolution logic is
+ * unit-testable without driving the real SDK.
+ *
+ * Returns a PreToolUse deny payload (`permissionDecision: 'deny'` + reason) when
+ * blocked, or `null` to allow (non-file tools and unknown paths always allow).
+ */
+export async function evaluateSdkWrite(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  projectRoot: string,
+  checkWrite: ((rel: string) => Promise<{ allow: boolean; reason?: string }>) | undefined,
+): Promise<{ permissionDecision: 'deny'; permissionDecisionReason: string } | null> {
+  if (!/^(Edit|MultiEdit|Write)$/.test(toolName) || !checkWrite) return null;
+
+  const rawPath = String(toolInput['file_path'] ?? toolInput['path'] ?? '');
+  if (!rawPath) return null;
+
+  const rel = path.isAbsolute(rawPath) ? path.relative(projectRoot, rawPath) : rawPath;
+  const verdict = await checkWrite(rel);
+  if (verdict.allow) return null;
+
+  return {
+    permissionDecision: 'deny',
+    permissionDecisionReason:
+      verdict.reason ?? `Blocked by Easel policy (.easel/policy.json): ${rel}`,
+  };
+}
+
 export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
   return {
     id: 'claude-agent-sdk',
@@ -471,26 +502,42 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         env: buildChildEnv(authEnv),
         // Guardrail enforcement: the SDK writes via its own Edit/Write tools
         // (not ProjectFs), so this is the chokepoint where `.easel/policy.json`
-        // is applied for this backend. It funnels through the host's shared
+        // is applied for this backend, funnelling through the host's shared
         // write gate (ctx.checkWrite) so deny/blast-radius/requireConfirm match
-        // the hand-built backends exactly. Non-write tools are always allowed.
-        canUseTool: async (toolName: string, input: Record<string, unknown>) => {
-          if (/^(Edit|MultiEdit|Write)$/.test(toolName) && ctx.checkWrite) {
-            const rawPath = String(input['file_path'] ?? input['path'] ?? '');
-            if (rawPath) {
-              const rel = path.isAbsolute(rawPath)
-                ? path.relative(request.projectRoot, rawPath)
-                : rawPath;
-              const verdict = await ctx.checkWrite(rel);
-              if (!verdict.allow) {
-                return {
-                  behavior: 'deny',
-                  message: verdict.reason ?? `Blocked by Easel policy (.easel/policy.json): ${rel}`,
-                };
-              }
-            }
-          }
-          return { behavior: 'allow' };
+        // the hand-built backends exactly.
+        //
+        // We use a PreToolUse HOOK rather than `canUseTool`: with `Edit`/`Write`
+        // in `allowedTools` and `permissionMode: 'acceptEdits'`, the permission
+        // is auto-resolved as "allow" before the `canUseTool` "ask" path, so
+        // canUseTool never fires for edits. A PreToolUse hook's deny runs
+        // regardless of permission mode (it bypasses canUseTool). The generous
+        // timeout lets a `requireConfirm` prompt wait for the user.
+        hooks: {
+          PreToolUse: [
+            {
+              timeout: 3600,
+              hooks: [
+                async (hookInput: unknown) => {
+                  const inp = hookInput as {
+                    tool_name?: string;
+                    tool_input?: Record<string, unknown>;
+                  };
+                  const deny = await evaluateSdkWrite(
+                    String(inp.tool_name ?? ''),
+                    (inp.tool_input ?? {}) as Record<string, unknown>,
+                    request.projectRoot,
+                    ctx.checkWrite,
+                  );
+                  if (deny) {
+                    return {
+                      hookSpecificOutput: { hookEventName: 'PreToolUse', ...deny },
+                    };
+                  }
+                  return {};
+                },
+              ],
+            },
+          ],
         },
         abortController,
       };

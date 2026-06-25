@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { buildChildEnv } from './claudeAgentSdk';
+import { buildChildEnv, evaluateSdkWrite } from './claudeAgentSdk';
 
 /**
  * Regression tests for the "use the Claude Code subscription, not the metered
@@ -35,5 +35,50 @@ describe('buildChildEnv', () => {
 
     expect(env.ANTHROPIC_API_KEY).toBe('sk-explicit'); // explicit api-key mode
     expect(env.ANTHROPIC_BASE_URL).toBeUndefined(); // ambient proxy still removed
+  });
+});
+
+/**
+ * The default backend writes via the SDK's own Edit/Write tools, so policy is
+ * enforced in the PreToolUse hook through `evaluateSdkWrite`. These cover the
+ * deny/allow mapping + path resolution the hook relies on (the SDK wiring itself
+ * is verified manually against a live backend).
+ */
+describe('evaluateSdkWrite (SDK guardrail hook decision)', () => {
+  const root = '/proj';
+  const allowGate = async () => ({ allow: true });
+  const denyGate = async () => ({ allow: false, reason: 'blocked: .env' });
+
+  it('returns null (allow) for non-file tools', async () => {
+    expect(await evaluateSdkWrite('Read', { file_path: '/proj/.env' }, root, denyGate)).toBeNull();
+    expect(await evaluateSdkWrite('Grep', { pattern: 'x' }, root, denyGate)).toBeNull();
+  });
+
+  it('denies a blocked Write with the gate reason', async () => {
+    const decision = await evaluateSdkWrite('Write', { file_path: '/proj/.env' }, root, denyGate);
+    expect(decision).toEqual({
+      permissionDecision: 'deny',
+      permissionDecisionReason: 'blocked: .env',
+    });
+  });
+
+  it('relativizes an absolute file_path against the project root before checking', async () => {
+    const seen: string[] = [];
+    await evaluateSdkWrite('Edit', { file_path: '/proj/src/App.tsx' }, root, async (rel) => {
+      seen.push(rel);
+      return { allow: true };
+    });
+    expect(seen).toEqual(['src/App.tsx']);
+  });
+
+  it('handles MultiEdit (also keyed by file_path) and allows when the gate allows', async () => {
+    expect(
+      await evaluateSdkWrite('MultiEdit', { file_path: '/proj/src/x.ts', edits: [] }, root, allowGate),
+    ).toBeNull();
+  });
+
+  it('allows when no path or no gate is present', async () => {
+    expect(await evaluateSdkWrite('Write', {}, root, denyGate)).toBeNull();
+    expect(await evaluateSdkWrite('Write', { file_path: '/proj/.env' }, root, undefined)).toBeNull();
   });
 });

@@ -301,13 +301,18 @@ export type AgentEvent =
       /** Non-fatal warning surfaced mid-edit (e.g. "ambiguous match; picked best"). */
       message: string;
       /**
-       * Optional stable code for programmatic handling. `policy-confirm` means a
-       * guardrail policy (`.easel/policy.json`) requires the user to approve the
-       * write to {@link path} before it proceeds; the edit pauses until the
-       * renderer replies via `edit.policyRespond`.
+       * Optional stable code for programmatic handling. Guardrail policy
+       * (`.easel/policy.json`) writes surface here — both are NON-terminal, so
+       * the edit stream continues after them:
+       *  - `policy-confirm` — a `requireConfirm` path needs the user to approve
+       *    the write to {@link path}; the edit pauses until the renderer replies
+       *    via `edit.policyRespond`.
+       *  - `policy-blocked` — a write to {@link path} was denied (deny rule,
+       *    blast-radius cap, or the user declined). The agent's tool call fails,
+       *    no file changed, but the edit is NOT terminated.
        */
       code?: string;
-      /** Project-relative path this warning concerns (e.g. for `policy-confirm`). */
+      /** Project-relative path this warning concerns (`policy-confirm`/`policy-blocked`). */
       path?: string;
     }
   | {
@@ -335,16 +340,10 @@ export type AgentEvent =
       requestId: string;
       /** Human-readable error message. */
       message: string;
-      /**
-       * Stable error code for programmatic handling (e.g. `auth`, `cancelled`,
-       * `needs-file`, `policy-blocked`). `policy-blocked` means a guardrail policy
-       * (`.easel/policy.json`) denied the write to {@link path}; no file changed.
-       */
+      /** Stable error code for programmatic handling (e.g. `auth`, `cancelled`, `needs-file`). */
       code?: string;
       /** Whether the caller may retry the same request. */
       recoverable: boolean;
-      /** Project-relative path this error concerns (e.g. for `policy-blocked`). */
-      path?: string;
       /**
        * For `code: 'needs-file'` (confidence `none`): candidate source files the
        * user can disambiguate between. The renderer re-submits the EditRequest
