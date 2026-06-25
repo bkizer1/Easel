@@ -21,7 +21,10 @@ const sharedAlias = { '@shared': resolve(__dirname, 'src/shared') };
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    // The Claude Agent SDK is an optionalDependency that is NOT bundled into
+    // installers (it's proprietary; resolved at runtime from the user's own
+    // Claude Code). Force-externalize it so it's never inlined into out/main.
+    plugins: [externalizeDepsPlugin({ include: ['@anthropic-ai/claude-agent-sdk'] })],
     resolve: { alias: { ...sharedAlias, '@main': resolve(__dirname, 'src/main') } },
     build: {
       lib: { entry: resolve(__dirname, 'src/main/index.ts') },

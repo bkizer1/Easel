@@ -214,6 +214,12 @@ provider matrix — pick what fits:
 > your machine already has. If the agent reports it isn't authenticated, Easel
 > shows a banner: run `claude` → `/login` (or `claude setup-token`), or add a key.
 
+> **The Claude Agent SDK isn't bundled.** Easel does not redistribute Anthropic's
+> proprietary SDK inside its installers — it uses the copy on *your* machine. From
+> source (`npm install`) it's already there; for a downloaded build, install it once
+> with `npm install -g @anthropic-ai/claude-agent-sdk`. If it's missing, Easel tells
+> you exactly that — and the other backends (API key, local model) still work.
+
 Secrets you enter are encrypted at rest via Electron `safeStorage` and never touch
 the renderer or the logs.
 

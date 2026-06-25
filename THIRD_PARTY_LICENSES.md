@@ -83,7 +83,7 @@ Easel and its dependencies are primarily under:
 - **Zustand**: MIT License
 - **TailwindCSS**: MIT License
 - **@anthropic-ai/sdk**: MIT License
-- **@anthropic-ai/claude-agent-sdk**: Proprietary (see package documentation)
+- **@anthropic-ai/claude-agent-sdk**: Proprietary — **not bundled** in Easel installers; resolved at runtime from the user's own Claude Code install (see below)
 
 For a complete list, see the `NOTICE` file.
 
@@ -100,13 +100,17 @@ Before each release, we:
 
 ### @anthropic-ai/claude-agent-sdk
 
-This is Anthropic's official SDK for building agentic applications. It:
+This is Anthropic's official, proprietary SDK for building agentic applications. It
+powers Easel's default backend (authentication, tool-use, extended thinking).
 
-- Handles authentication and credential management
-- Provides tool-use and extended thinking capabilities
-- Is installed as a production dependency
-
-**Note**: The CLI binary from this SDK may be included in packaged binaries. The build process includes `asarUnpack` entries to ensure the binary remains executable within the Electron app.
+**It is NOT bundled or redistributed in Easel's installers.** It is an
+`optionalDependency`, explicitly excluded from packaged builds (see `build.files` in
+`package.json`), and resolved at runtime from the user's own Claude Code install —
+locally when running Easel from source, or from a global
+`npm install -g @anthropic-ai/claude-agent-sdk` for downloaded builds. If it isn't
+installed, Easel surfaces a clear prompt to install it, and the API-key / local-model
+backends remain available. This keeps Easel's redistributed binaries free of
+proprietary third-party code.
 
 ## Contributing & License Compliance
 

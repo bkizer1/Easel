@@ -51,10 +51,8 @@
       "out/preload/**/*",
       "out/renderer/**/*",
       "node_modules/**/*",
+      "!node_modules/@anthropic-ai/claude-agent-sdk/**/*",
       "package.json"
-    ],
-    "asarUnpack": [
-      "node_modules/@anthropic-ai/claude-agent-sdk/**/*"
     ],
     "mac": {
       "target": [
@@ -102,7 +100,6 @@
     }
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.187",
     "@anthropic-ai/sdk": "^0.105.0",
     "@fontsource-variable/bricolage-grotesque": "^5.2.10",
     "@fontsource-variable/geist": "^5.2.9",
@@ -111,6 +108,9 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "zustand": "^4.5.5"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.187"
   },
   "devDependencies": {
     "@types/node": "^20.14.11",

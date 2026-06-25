@@ -25,11 +25,67 @@
  */
 
 import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import type { AgentBackend, AgentBackendContext, AgentCapabilities, ProjectFs, ValidateContext } from '@shared/agent';
 import type { AgentEvent, AppSettings, EditRequest, FileDiff } from '@shared/types';
 import { createLogger } from '@main/logger';
+
+/* -------------------------------------------------------------------------- */
+/*  Claude Agent SDK resolution — NOT bundled; uses the user's own install     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The package specifier is held in a variable so the bundler can't statically
+ * resolve (and inline) it — Easel deliberately does not ship the proprietary
+ * Claude Agent SDK. It's resolved at runtime instead.
+ */
+const SDK_PKG = '@anthropic-ai/claude-agent-sdk';
+
+/** Shown when the SDK can't be found — Easel doesn't bundle Claude Code. */
+const CLAUDE_NOT_INSTALLED =
+  "Claude Code isn't installed. Easel uses your own Claude Code rather than bundling it. " +
+  'Install it with:  npm install -g @anthropic-ai/claude-agent-sdk  — then sign in by running ' +
+  '`claude` in a terminal and restart Easel. (Or switch to the API key / local model backend in Settings.)';
+
+type ClaudeQuery = (args: { prompt: string; options?: Record<string, unknown> }) => AsyncIterable<unknown>;
+
+/** Best-effort lookup of the global npm root (requires npm on PATH). */
+function globalNodeModules(): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile('npm', ['root', '-g'], { timeout: 5000 }, (err, stdout) => {
+      resolve(err ? null : stdout.toString().trim() || null);
+    });
+  });
+}
+
+/**
+ * Resolve the Claude Agent SDK without bundling it. Tries normal module
+ * resolution first (present when running Easel from source / `npm install`),
+ * then the user's GLOBAL npm install (for packaged builds). Returns null when
+ * Claude Code isn't installed anywhere we can find it.
+ */
+async function resolveClaudeSdk(): Promise<{ query: ClaudeQuery } | null> {
+  try {
+    return (await import(SDK_PKG)) as unknown as { query: ClaudeQuery };
+  } catch {
+    /* not resolvable locally — fall through to the user's global install */
+  }
+  try {
+    const root = await globalNodeModules();
+    if (root) {
+      const req = createRequire(path.join(root, '_resolve.js'));
+      const entry = req.resolve(SDK_PKG);
+      return (await import(pathToFileURL(entry).href)) as unknown as { query: ClaudeQuery };
+    }
+  } catch {
+    /* not installed globally either */
+  }
+  return null;
+}
 
 const log = createLogger('backend:claude-agent-sdk');
 
@@ -326,17 +382,17 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
 
       yield { type: 'thinking', requestId: request.id, text: 'Analysing your request...' };
 
-      // Import the SDK lazily to avoid bundling it in dev when it may not be needed.
-      let sdk: typeof import('@anthropic-ai/claude-agent-sdk');
-      try {
-        sdk = await import('@anthropic-ai/claude-agent-sdk');
-      } catch (err) {
+      // Resolve the SDK at runtime — Easel does NOT bundle it (it's proprietary).
+      // Present when running from source; for packaged builds it comes from the
+      // user's own global Claude Code install. See resolveClaudeSdk.
+      const sdk = await resolveClaudeSdk();
+      if (!sdk) {
         yield {
           type: 'error',
           requestId: request.id,
-          message: `Claude Agent SDK not available: ${String(err)}`,
+          message: CLAUDE_NOT_INSTALLED,
           code: 'sdk-missing',
-          recoverable: false,
+          recoverable: true,
         };
         return;
       }
@@ -374,10 +430,7 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
       try {
         // The SDK exposes `query({ prompt, options })` returning an async
         // iterable of SDKMessages; we normalise them into our AgentEvent union.
-        const queryFn = (sdk as unknown as {
-          query: (args: { prompt: string; options?: Record<string, unknown> }) => AsyncIterable<unknown>;
-        }).query;
-        const runner = queryFn({ prompt, options: sdkOptions });
+        const runner = sdk.query({ prompt, options: sdkOptions });
 
         for await (const rawEvent of runner as AsyncIterable<unknown>) {
           if (signal.aborted) break;
@@ -487,6 +540,8 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
 
     async validate(ctx: ValidateContext): Promise<{ ok: boolean; problem?: string }> {
       const cfg = ctx.settings.backends['claude-agent-sdk'];
+      // Easel doesn't bundle the SDK — confirm the user's Claude Code is present.
+      if (!(await resolveClaudeSdk())) return { ok: false, problem: CLAUDE_NOT_INSTALLED };
       if (cfg.authMode === 'api-key') {
         const key = ctx.secrets['anthropic'] ?? '';
         if (!key) return { ok: false, problem: 'API key not set. Configure it in Settings → Provider.' };
