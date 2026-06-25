@@ -126,6 +126,34 @@ export interface ElementTarget {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Alignment grid (issue #5)                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One element the off-grid detector flagged as misaligned against the active
+ * alignment grid. Carries enough provenance for the host to list it and, on
+ * "snap to grid", to build an {@link EditRequest} that points the agent at the
+ * right source. Produced guest-side by `src/preload/webview/inspector.ts`.
+ */
+export interface OffGridElement {
+  /** Stable id within one scan (mirrors {@link ElementTarget.id} semantics). */
+  id: string;
+  /** A robust CSS selector for the element (same builder as element-select). */
+  selector: string;
+  /** Lowercased tag name, e.g. `div`, `section`, `button`. */
+  tagName: string;
+  /** Parsed `data-easel-source` if the inspector plugin stamped this element. */
+  dataEaselSource?: SourceLocation;
+  /** Element bounding box in preview-viewport CSS pixels. */
+  boundingBox: BoundingBox;
+  /**
+   * The single largest edge-to-grid distance in px (max of left/right vs.
+   * column edges and top/bottom vs. baseline). Drives ranking + the UI label.
+   */
+  worstOffsetPx: number;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Annotations                                                                */
 /* -------------------------------------------------------------------------- */
 

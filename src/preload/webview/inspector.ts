@@ -34,8 +34,15 @@
  */
 
 import { ipcRenderer } from 'electron';
-import type { BoundingBox, ConfidenceLevel, ElementTarget, SourceLocation } from '@shared/types';
+import type {
+  BoundingBox,
+  ConfidenceLevel,
+  ElementTarget,
+  OffGridElement,
+  SourceLocation,
+} from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
+import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
 
 /* -------------------------------------------------------------------------- */
 /*  Channel names (single source — PreviewPane must match these)              */
@@ -57,6 +64,12 @@ let mode: InspectorMode = 'idle';
 
 /** The overlay div used to highlight the currently hovered / commanded element. */
 let highlightEl: HTMLDivElement | null = null;
+
+/** The alignment-grid overlay container (issue #5), or null when hidden. */
+let gridEl: HTMLDivElement | null = null;
+
+/** The grid config the overlay is currently drawn with, so we can redraw on resize. */
+let gridConfig: GridConfig | null = null;
 
 /* -------------------------------------------------------------------------- */
 /*  Helpers — messaging                                                        */
@@ -317,6 +330,155 @@ function drawHighlight(el: Element, color = '#3b82f6'): void {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Helpers — alignment grid overlay (issue #5)                                */
+/* -------------------------------------------------------------------------- */
+
+/** Remove the alignment-grid overlay if present. */
+function removeGrid(): void {
+  if (gridEl) {
+    gridEl.remove();
+    gridEl = null;
+  }
+}
+
+/**
+ * Draw a column + baseline alignment grid over the full document, appended to
+ * `document.documentElement` (same pattern as {@link drawHighlight}). Columns
+ * are vertical bands at the computed {@link columnEdges}; the baseline rhythm is
+ * a repeating horizontal hairline every `grid.baseline` px. Purely visual and
+ * non-interactive — `pointer-events:none` so it never intercepts the page.
+ */
+function drawGrid(grid: GridConfig): void {
+  removeGrid();
+  gridConfig = grid;
+
+  // Size to the scrollable document, not just the viewport, so the grid covers
+  // the whole page as the user scrolls.
+  const docWidth = Math.max(
+    document.documentElement.scrollWidth,
+    document.documentElement.clientWidth,
+  );
+  const docHeight = Math.max(
+    document.documentElement.scrollHeight,
+    document.documentElement.clientHeight,
+  );
+  const viewportWidth = document.documentElement.clientWidth;
+
+  const container = document.createElement('div');
+  container.setAttribute('data-easel-overlay', 'true');
+  container.setAttribute('data-easel-grid', 'true');
+  container.style.cssText = [
+    'position:absolute',
+    'top:0',
+    'left:0',
+    `width:${docWidth}px`,
+    `height:${docHeight}px`,
+    'pointer-events:none',
+    'z-index:2147483646', // just below the element highlight
+  ].join(';');
+
+  // Column bands: shade each column lightly between its start/end edges.
+  const edges = columnEdges(grid, viewportWidth);
+  for (let i = 0; i + 1 < edges.length; i += 2) {
+    const start = edges[i];
+    const end = edges[i + 1];
+    const band = document.createElement('div');
+    band.style.cssText = [
+      'position:absolute',
+      'top:0',
+      'bottom:0',
+      `left:${start}px`,
+      `width:${end - start}px`,
+      'background:rgba(59,130,246,0.08)',
+      'box-shadow:inset 1px 0 0 rgba(59,130,246,0.35),inset -1px 0 0 rgba(59,130,246,0.35)',
+    ].join(';');
+    container.appendChild(band);
+  }
+
+  // Baseline rhythm: a single repeating-linear-gradient hairline layer is far
+  // cheaper than one element per row on a long page.
+  if (grid.baseline > 0) {
+    const baselines = document.createElement('div');
+    baselines.style.cssText = [
+      'position:absolute',
+      'inset:0',
+      `background-image:repeating-linear-gradient(to bottom, rgba(236,72,153,0.18) 0, rgba(236,72,153,0.18) 1px, transparent 1px, transparent ${grid.baseline}px)`,
+    ].join(';');
+    container.appendChild(baselines);
+  }
+
+  document.documentElement.appendChild(container);
+  gridEl = container;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Helpers — off-grid detector (issue #5)                                     */
+/* -------------------------------------------------------------------------- */
+
+/** Stable id counter for off-grid offenders within one scan. */
+let offGridIdCounter = 0;
+
+/** Whether an element is currently visible (has a non-trivial painted box). */
+function isVisibleElement(el: Element): boolean {
+  if (el === document.documentElement || el === document.body) return false;
+  if (el.hasAttribute('data-easel-overlay')) return false;
+  const rect = el.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return false;
+  // Skip elements scrolled entirely out of (or above) the document viewport
+  // area; measuring those adds noise without helping the user.
+  if (rect.bottom < 0 || rect.right < 0) return false;
+  const style = window.getComputedStyle(el);
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Walk visible elements and flag those whose edges miss `grid` by more than
+ * `threshold` px. Returns offenders worst-first, each tagged with its
+ * `data-easel-source` (when the inspector plugin stamped it) so the host can
+ * route a "snap to grid" edit to the right source. Capped so a giant DOM can't
+ * flood the host.
+ */
+function scanOffGrid(grid: GridConfig, threshold: number): OffGridElement[] {
+  const MAX_OFFENDERS = 100;
+  const viewportWidth = document.documentElement.clientWidth;
+
+  const offenders: OffGridElement[] = [];
+  const all = document.querySelectorAll('body *');
+  for (const el of Array.from(all)) {
+    if (!isVisibleElement(el)) continue;
+
+    const rect = el.getBoundingClientRect();
+    const box: BoundingBox = {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    const m = measureMisalignment(box, grid, viewportWidth);
+    if (m.worst <= threshold) continue;
+
+    const sourceEl = findSourceElement(el);
+    const rawSource = sourceEl?.getAttribute('data-easel-source') ?? null;
+    const dataEaselSource = rawSource ? parseSourceAttr(rawSource) : undefined;
+
+    offenders.push({
+      id: `og-${++offGridIdCounter}`,
+      selector: buildSelector(el),
+      tagName: el.tagName.toLowerCase(),
+      dataEaselSource,
+      boundingBox: box,
+      worstOffsetPx: Math.round(m.worst * 100) / 100,
+    });
+  }
+
+  offenders.sort((a, b) => b.worstOffsetPx - a.worstOffsetPx);
+  return offenders.slice(0, MAX_OFFENDERS);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Mouse event handlers (element-select mode)                                */
 /* -------------------------------------------------------------------------- */
 
@@ -397,6 +559,9 @@ let viewportThrottleTimer: ReturnType<typeof setTimeout> | null = null;
 const VIEWPORT_THROTTLE_MS = 100;
 
 function sendViewportChanged(): void {
+  // Keep the alignment grid sized/positioned to the (possibly resized) document.
+  if (gridConfig) drawGrid(gridConfig);
+
   send({
     type: 'viewport-changed',
     scrollX: window.scrollX,
@@ -520,6 +685,18 @@ ipcRenderer.on(
         case 'query-region': {
           const targets = queryRegion(cmd.box);
           send({ type: 'region-resolved', queryId: cmd.queryId, targets });
+          break;
+        }
+
+        case 'set-grid': {
+          if (cmd.grid === null) removeGrid();
+          else drawGrid(cmd.grid);
+          break;
+        }
+
+        case 'scan-off-grid': {
+          const offenders = scanOffGrid(cmd.grid, cmd.threshold);
+          send({ type: 'off-grid-result', scanId: cmd.scanId, offenders });
           break;
         }
 

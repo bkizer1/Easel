@@ -23,6 +23,9 @@ import {
   Code2,
   Terminal,
   ExternalLink,
+  Grid3x3,
+  ScanLine,
+  Wand2,
 } from 'lucide-react';
 import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
@@ -195,6 +198,92 @@ function ViewportMenu({
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Alignment-grid panel (issue #5)                                           */
+/* -------------------------------------------------------------------------- */
+
+function GridPanel(): React.ReactElement {
+  const offGridElements = useEaselStore((s) => s.offGridElements);
+  const scanningOffGrid = useEaselStore((s) => s.scanningOffGrid);
+  const streaming = useEaselStore((s) => s.streaming);
+  const gridConfig = useEaselStore((s) => s.gridConfig);
+  const scanOffGrid = useEaselStore((s) => s.scanOffGrid);
+  const snapToGrid = useEaselStore((s) => s.snapToGrid);
+  const setHover = useEaselStore((s) => s.setHover);
+
+  return (
+    <div className="absolute right-0 top-full mt-1.5 z-30 w-80 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+      <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 hairline-b">
+        <div className="flex flex-col">
+          <span className="text-[12.5px] font-medium text-gray-200">Alignment grid</span>
+          <span className="font-mono text-[10.5px] text-gray-500">
+            {gridConfig.columns} cols · {gridConfig.gutter}px gutter · {gridConfig.baseline}px baseline
+          </span>
+        </div>
+        <button
+          onClick={() => scanOffGrid()}
+          disabled={scanningOffGrid || streaming}
+          className="flex items-center gap-1.5 rounded-lg bg-ink-800/80 px-2.5 py-1.5 text-[11.5px] font-medium text-gray-200 hover:bg-ink-700/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Scan the page for elements whose edges miss the grid"
+        >
+          <ScanLine className="w-3.5 h-3.5" />
+          {scanningOffGrid ? 'Scanning…' : 'Scan'}
+        </button>
+      </div>
+
+      <div className="max-h-64 overflow-y-auto py-1">
+        {offGridElements.length === 0 ? (
+          <p className="px-3.5 py-3 text-[11.5px] text-gray-500">
+            {scanningOffGrid
+              ? 'Scanning the preview…'
+              : 'No off-grid elements found yet. Click Scan to check alignment.'}
+          </p>
+        ) : (
+          offGridElements.map((o) => {
+            const label = o.dataEaselSource
+              ? `${o.dataEaselSource.filePath}:${o.dataEaselSource.line}`
+              : o.selector;
+            return (
+              <div
+                key={o.id}
+                onMouseEnter={() => setHover(o.selector)}
+                onMouseLeave={() => setHover(null)}
+                className="flex items-center justify-between gap-2 px-3.5 py-1.5 hover:bg-white/[0.05]"
+              >
+                <div className="min-w-0 flex flex-col">
+                  <span className="truncate text-[11.5px] text-gray-300" title={label}>
+                    {`<${o.tagName}>`} {label}
+                  </span>
+                  {!o.dataEaselSource && (
+                    <span className="text-[10px] text-amber-400/80">no source map — grep fallback</span>
+                  )}
+                </div>
+                <span className="shrink-0 font-mono text-[10.5px] text-rose-300/90" title="Worst edge offset">
+                  {o.worstOffsetPx}px
+                </span>
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      {offGridElements.length > 0 && (
+        <div className="hairline-t px-3.5 py-2.5">
+          <button
+            onClick={() => void snapToGrid(offGridElements.map((o) => o.id))}
+            disabled={streaming}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-700 px-3 py-2 text-[12px] font-medium text-white hover:bg-brand-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            title="Ask the agent to align all listed elements in one edit (one checkpoint)"
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            Snap {offGridElements.length} to grid
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Toolbar                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -220,7 +309,11 @@ export function Toolbar(): React.ReactElement {
   const setViewportWidth = useEaselStore((s) => s.setViewportWidth);
   const setHistoryOpen = useEaselStore((s) => s.setHistoryOpen);
 
-  const [menu, setMenu] = useState<'viewport' | 'console' | null>(null);
+  const gridVisible = useEaselStore((s) => s.gridVisible);
+  const offGridElements = useEaselStore((s) => s.offGridElements);
+  const setGridVisible = useEaselStore((s) => s.setGridVisible);
+
+  const [menu, setMenu] = useState<'viewport' | 'console' | 'grid' | null>(null);
 
   // Timeline is oldest-first; the cursor is the checkpoint the tree matches.
   const currentIdx = checkpoints.findIndex((c) => c.id === currentCheckpointId);
@@ -233,7 +326,7 @@ export function Toolbar(): React.ReactElement {
     setMenu(null);
     setHistoryOpen(false);
   };
-  const toggleMenu = (m: 'viewport' | 'console'): void => {
+  const toggleMenu = (m: 'viewport' | 'console' | 'grid'): void => {
     setHistoryOpen(false);
     setMenu((cur) => (cur === m ? null : m));
   };
@@ -346,6 +439,27 @@ export function Toolbar(): React.ReactElement {
       <IconButton onClick={() => toggleDevTools()} title="Toggle DevTools for the preview" disabled={!previewUrl}>
         <Code2 className="w-[17px] h-[17px]" />
       </IconButton>
+      <div className="relative no-drag">
+        <IconButton
+          onClick={() => {
+            // Toggling the button shows/hides the grid AND opens/closes its panel.
+            const opening = menu !== 'grid';
+            setGridVisible(opening);
+            toggleMenu('grid');
+          }}
+          title="Alignment grid — overlay a column/baseline grid and flag off-grid elements"
+          active={menu === 'grid' || gridVisible}
+          disabled={!previewUrl}
+        >
+          <Grid3x3 className="w-[17px] h-[17px]" />
+        </IconButton>
+        {offGridElements.length > 0 && menu !== 'grid' && (
+          <span className="pointer-events-none absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-full bg-amber-500 px-1 text-[9px] font-bold text-white ring-2 ring-ink-900">
+            {offGridElements.length > 9 ? '9+' : offGridElements.length}
+          </span>
+        )}
+        {menu === 'grid' && <GridPanel />}
+      </div>
       <div className="relative no-drag">
         <IconButton
           onClick={() => toggleMenu('console')}

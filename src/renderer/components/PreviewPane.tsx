@@ -18,6 +18,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, RotateCw, FolderOpen, Globe } from 'lucide-react';
 import type { BoundingBox, ElementTarget, Point } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
+import { DEFAULT_OFF_GRID_THRESHOLD } from '@shared/grid';
 import { useEaselStore, normalizePreviewUrl } from '../store';
 import { easel } from '../lib/api';
 import { AnnotationOverlay } from './AnnotationOverlay';
@@ -124,6 +125,13 @@ export function PreviewPane(): React.ReactElement {
   const clearTargets = useEaselStore((s) => s.clearTargets);
   const hoveredSelector = useEaselStore((s) => s.hoveredSelector);
 
+  // Alignment grid (issue #5): display state is driven into the guest inspector.
+  const gridVisible = useEaselStore((s) => s.gridVisible);
+  const gridConfig = useEaselStore((s) => s.gridConfig);
+  const offGridScanNonce = useEaselStore((s) => s.offGridScanNonce);
+  const setOffGridResult = useEaselStore((s) => s.setOffGridResult);
+  const setScanningOffGrid = useEaselStore((s) => s.setScanningOffGrid);
+
   const webviewRef = useRef<WebviewElement | null>(null);
 
   // Address-bar text (synced to previewUrl, but editable while typing).
@@ -218,12 +226,16 @@ export function PreviewPane(): React.ReactElement {
           break;
         }
 
+        case 'off-grid-result':
+          setOffGridResult(msg.offenders);
+          break;
+
         case 'viewport-changed':
           setScroll({ x: msg.scrollX, y: msg.scrollY });
           break;
       }
     },
-    [addTarget, setHover, addAnnotation, scroll],
+    [addTarget, setHover, addAnnotation, scroll, setOffGridResult],
   );
 
   /* ---- Sync mode changes to the guest inspector ---- */
@@ -289,6 +301,28 @@ export function PreviewPane(): React.ReactElement {
     if (!webviewReady) return;
     sendCommand({ type: 'highlight', selector: hoveredSelector ?? null });
   }, [hoveredSelector, webviewReady, sendCommand]);
+
+  /* ---- Drive the alignment-grid overlay into the guest (issue #5) ---- */
+  useEffect(() => {
+    if (!webviewReady) return;
+    sendCommand({ type: 'set-grid', grid: gridVisible ? gridConfig : null });
+  }, [gridVisible, gridConfig, webviewReady, sendCommand]);
+
+  /* ---- Run an off-grid scan when the toolbar bumps the nonce (issue #5) ---- */
+  useEffect(() => {
+    if (offGridScanNonce === 0) return;
+    if (!webviewReady) {
+      // Guest not ready yet — drop the scanning flag so the UI doesn't hang.
+      setScanningOffGrid(false);
+      return;
+    }
+    sendCommand({
+      type: 'scan-off-grid',
+      grid: gridConfig,
+      threshold: DEFAULT_OFF_GRID_THRESHOLD,
+      scanId: `scan-${offGridScanNonce}`,
+    });
+  }, [offGridScanNonce, webviewReady, gridConfig, sendCommand, setScanningOffGrid]);
 
   /* ---- Reload the webview when a revert (or the toolbar) bumps the nonce ---- */
   useEffect(() => {
