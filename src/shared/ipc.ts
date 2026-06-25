@@ -22,7 +22,9 @@ import type {
   ImageRequest,
   ImageResult,
   OffGridElement,
+  InstructionMacro,
   ProjectConfig,
+  SourceLocation,
 } from './types';
 import type { GridConfig } from './grid';
 
@@ -67,6 +69,10 @@ export const IpcChannels = {
   settingsClearSecret: 'settings.clearSecret',
   /** Validate that the selected backend is usable with current settings. */
   settingsValidateBackend: 'settings.validateBackend',
+  /** Read the saved instruction macros (convenience over the full settings get). */
+  settingsGetMacros: 'settings.getMacros',
+  /** Persist the full ordered list of instruction macros. */
+  settingsSetMacros: 'settings.setMacros',
   /** Emitted by main when settings change (e.g. from another window). */
   settingsChanged: 'settings.changed',
 
@@ -193,6 +199,19 @@ export interface SettingsClearSecretResponse {
 export interface SettingsValidateBackendResponse {
   ok: boolean;
   problem?: string;
+}
+
+export interface SettingsGetMacrosResponse {
+  macros: InstructionMacro[];
+}
+
+export interface SettingsSetMacrosRequest {
+  /** The full, ordered macro list to persist (replaces the stored list). */
+  macros: InstructionMacro[];
+}
+export interface SettingsSetMacrosResponse {
+  /** Updated settings (so the renderer can refresh its single source of truth). */
+  settings: AppSettings;
 }
 
 // checkpoint.* --------------------------------------------------------------
@@ -340,6 +359,10 @@ export interface EaselApi {
     setSecret(req: SettingsSetSecretRequest): Promise<IpcResult<SettingsSetSecretResponse>>;
     clearSecret(req: SettingsClearSecretRequest): Promise<IpcResult<SettingsClearSecretResponse>>;
     validateBackend(): Promise<IpcResult<SettingsValidateBackendResponse>>;
+    /** Read the saved instruction macros. */
+    getMacros(): Promise<IpcResult<SettingsGetMacrosResponse>>;
+    /** Persist the full ordered list of instruction macros. */
+    setMacros(req: SettingsSetMacrosRequest): Promise<IpcResult<SettingsSetMacrosResponse>>;
     onChanged(handler: (payload: SettingsChangedPayload) => void): Unsubscribe;
   };
 
@@ -395,6 +418,8 @@ export interface IpcInvokeMap {
   [IpcChannels.settingsSetSecret]: { request: SettingsSetSecretRequest; response: IpcResult<SettingsSetSecretResponse> };
   [IpcChannels.settingsClearSecret]: { request: SettingsClearSecretRequest; response: IpcResult<SettingsClearSecretResponse> };
   [IpcChannels.settingsValidateBackend]: { request: void; response: IpcResult<SettingsValidateBackendResponse> };
+  [IpcChannels.settingsGetMacros]: { request: void; response: IpcResult<SettingsGetMacrosResponse> };
+  [IpcChannels.settingsSetMacros]: { request: SettingsSetMacrosRequest; response: IpcResult<SettingsSetMacrosResponse> };
 
   [IpcChannels.checkpointList]: { request: void; response: IpcResult<CheckpointListResponse> };
   [IpcChannels.checkpointRestore]: { request: CheckpointRestoreRequest; response: IpcResult<CheckpointRestoreResponse> };
@@ -478,6 +503,31 @@ export type InspectorMessage =
       scrollY: number;
       width: number;
       height: number;
+    }
+  | {
+      /**
+       * An UNCAUGHT runtime error (or unhandled promise rejection) thrown by the
+       * previewed page. Surfaced in the Page Console with a one-click "Fix"
+       * affordance that dispatches an AI edit at {@link sources}. Emitted by the
+       * guest's `window` `error` / `unhandledrejection` listeners — distinct from
+       * the host `console-message` path, which only carries an unstructured string.
+       */
+      type: 'page-error';
+      /** The error's `message` (e.g. `features is not defined`). */
+      message: string;
+      /**
+       * The sourcemapped stack trace as a single string, when the runtime
+       * provided one (dev builds symbolicate to original source). Used verbatim
+       * in the edit instruction so the agent can locate the throwing call.
+       */
+      stack?: string;
+      /**
+       * Project-relative source locations parsed from the top stack frames,
+       * best-guess first. Drives the edit's {@link EditRequest.targets}. Empty
+       * when no frame could be mapped to a project file (e.g. minified prod
+       * bundle); the agent then falls back to grepping {@link message}.
+       */
+      sources: SourceLocation[];
     };
 
 /** Commands the host renderer sends down into the guest inspector. */

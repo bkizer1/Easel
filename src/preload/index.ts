@@ -126,6 +126,12 @@ const api: EaselApi = {
     validateBackend() {
       return ipcRenderer.invoke(IpcChannels.settingsValidateBackend);
     },
+    getMacros() {
+      return ipcRenderer.invoke(IpcChannels.settingsGetMacros);
+    },
+    setMacros(req) {
+      return ipcRenderer.invoke(IpcChannels.settingsSetMacros, req);
+    },
     onChanged(handler) {
       return subscribe(IpcChannels.settingsChanged, handler);
     },

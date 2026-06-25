@@ -26,10 +26,13 @@ import type {
   ElementTarget,
   FileDiff,
   OffGridElement,
+  InstructionMacro,
   ProjectConfig,
+  SourceLocation,
 } from '@shared/types';
 import type { DevServerStatePayload, PreviewStatusPayload } from '@shared/ipc';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
+import { resolveMacroInstruction } from '@shared/macros';
 
 /* -------------------------------------------------------------------------- */
 /*  ID generation                                                             */
@@ -60,6 +63,32 @@ export function normalizePreviewUrl(raw: string): string {
   return `http://${trimmed}`;
 }
 
+/**
+ * Tracks the lifecycle of a one-click "Fix this" attempt on a page error:
+ *  - `fixing`        : an edit is in flight against the error's source.
+ *  - `resolved`      : the edit finished and no equivalent error re-fired.
+ *  - `still-erroring`: an equivalent error re-fired after the edit completed.
+ */
+export type PageErrorFixState = 'fixing' | 'resolved' | 'still-erroring';
+
+/**
+ * Structured payload for an UNCAUGHT page error (from the guest inspector's
+ * `page-error` message). Present only on `level: 'error'` logs that originated
+ * as runtime exceptions / unhandled rejections — these get a "Fix" button.
+ * Plain `console.error(...)` logs (from the host `console-message` path) carry
+ * no `error` field and so render without the affordance.
+ */
+export interface PageErrorInfo {
+  /** Sourcemapped stack trace, when the runtime provided one. */
+  stack?: string;
+  /** Project-relative source locations parsed from the top stack frames. */
+  sources: SourceLocation[];
+  /** Lifecycle of the most recent "Fix" attempt; undefined until clicked. */
+  fixState?: PageErrorFixState;
+  /** EditRequest.id of the in-flight fix, used to correlate resolution. */
+  fixRequestId?: string;
+}
+
 /** A warning/error captured from the previewed page's own console. */
 export interface PageLog {
   id: string;
@@ -67,7 +96,18 @@ export interface PageLog {
   message: string;
   source?: string;
   ts: number;
+  /**
+   * Structured data for an uncaught runtime error. When present, ConsolePanel
+   * renders a "Fix" button that dispatches an AI edit at {@link PageErrorInfo.sources}.
+   */
+  error?: PageErrorInfo;
 }
+
+/**
+ * Window (ms) after a fix's terminal `done` during which a re-fired equivalent
+ * error marks the fix `still-erroring`. Generous enough to cover an HMR reload.
+ */
+const FIX_RESOLUTION_WINDOW_MS = 5000;
 
 /**
  * A pending guardrail approval: the agent tried to write a `requireConfirm`
@@ -198,6 +238,20 @@ export interface EaselActions {
   setViewportWidth(width: number | null): void;
   /** Append a captured page console warning/error. */
   addPageLog(log: Omit<PageLog, 'id' | 'ts'>): void;
+  /**
+   * Record an uncaught page error (from the guest's `page-error` message) as a
+   * fixable error-level {@link PageLog}. If an equivalent error is currently
+   * being fixed, this is treated as a re-fire and marks that fix
+   * `still-erroring` instead of stacking a duplicate entry.
+   */
+  addPageError(info: { message: string; source?: string } & PageErrorInfo): void;
+  /**
+   * Dispatch a one-click "Fix this" AI edit for a captured page error: assemble
+   * an instruction from the error message + stack, target the error's source
+   * files, and submit via {@link submitEdit}. Marks the log `fixing`; resolution
+   * is tracked in {@link applyAgentEvent} / {@link addPageError}.
+   */
+  fixPageError(logId: string): Promise<void>;
   /** Clear captured page logs. */
   clearPageLogs(): void;
   /** Open or close the checkpoint History panel. */
@@ -259,6 +313,25 @@ export interface EaselActions {
    * Sets lastError on failure.
    */
   validateBackend(): Promise<{ ok: boolean; problem?: string }>;
+
+  /* ---- Instruction macros -------------------------------------------------- */
+
+  /**
+   * Save a new macro from a name + instruction template (and optional hotkey).
+   * The macro is appended to the persisted list and the store's settings are
+   * refreshed. Returns the created macro's id, or null if persistence failed.
+   */
+  saveMacro(input: { name: string; instructionTemplate: string; hotkey?: string }): Promise<string | null>;
+  /** Patch an existing macro by id (name / template / hotkey) and persist. */
+  updateMacro(id: string, patch: Partial<Omit<InstructionMacro, 'id'>>): Promise<void>;
+  /** Remove a macro by id and persist the new list. */
+  deleteMacro(id: string): Promise<void>;
+  /**
+   * Invoke a macro by id: interpolate its template against the first selected
+   * element target ({@link interpolateMacro}) and submit via the existing
+   * {@link submitEdit}. No-op (sets lastError) if the macro id is unknown.
+   */
+  runMacro(id: string): Promise<void>;
 
   /** Refresh the checkpoint list from main. */
   listCheckpoints(): Promise<void>;
@@ -495,6 +568,101 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       // Cap to the most recent 50 to bound memory.
       return { pageLogs: next.length > 50 ? next.slice(next.length - 50) : next };
     });
+  },
+
+  addPageError(info) {
+    set((s) => {
+      // Resolution detection: if this error matches one we're actively fixing,
+      // it's a re-fire — mark that attempt `still-erroring` rather than adding a
+      // duplicate row. Equivalence is by message text (post-HMR line numbers may
+      // shift, so the message is the stable key).
+      const fixingIdx = s.pageLogs.findIndex(
+        (l) => l.error?.fixState === 'fixing' && l.message === info.message,
+      );
+      if (fixingIdx >= 0) {
+        const pageLogs = s.pageLogs.map((l, i) =>
+          i === fixingIdx
+            ? { ...l, error: { ...l.error!, fixState: 'still-erroring' as const } }
+            : l,
+        );
+        return { pageLogs };
+      }
+
+      const entry: PageLog = {
+        id: genId(),
+        ts: Date.now(),
+        level: 'error',
+        message: info.message,
+        source: info.source,
+        error: { stack: info.stack, sources: info.sources },
+      };
+      const next = [...s.pageLogs, entry];
+      return { pageLogs: next.length > 50 ? next.slice(next.length - 50) : next };
+    });
+  },
+
+  async fixPageError(logId) {
+    const log = get().pageLogs.find((l) => l.id === logId);
+    if (!log || !log.error) return;
+
+    // Don't dispatch a second fix while one is already in flight for this error.
+    if (log.error.fixState === 'fixing' || get().streaming) return;
+
+    const { stack, sources } = log.error;
+
+    // Build a precise instruction: the error, its sourcemapped stack, and (when
+    // resolved) the exact source locations so the agent goes straight to the
+    // throwing line instead of guessing.
+    const locationList =
+      sources.length > 0
+        ? '\n\nLikely source (top stack frames):\n' +
+          sources.map((s) => `  • ${s.filePath}:${s.line}:${s.column}`).join('\n')
+        : '';
+    const stackBlock = stack ? `\n\nStack trace:\n${stack}` : '';
+    const instruction =
+      `The previewed page throws an uncaught runtime error:\n\n${log.message}` +
+      `${stackBlock}${locationList}\n\nFind the root cause and fix it.`;
+
+    // Convert parsed stack frames into ElementTargets so submitEdit's existing
+    // pipeline carries them through as EditRequest.targets. These are source-only
+    // targets (no DOM node), so DOM-specific fields are empty/sentinel.
+    const targets: ElementTarget[] = sources.map((src, i) => ({
+      id: `page-error-${logId}-${i}`,
+      selector: '',
+      tagName: '',
+      dataEaselSource: src,
+      boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+      textSnippet: '',
+      attributes: {},
+      pluginPresent: true,
+      confidence: 'high',
+    }));
+
+    // Capture the requestId submitEdit will mint so we can correlate the fix.
+    // submitEdit generates its own id internally; we mirror its generation by
+    // reading activeRequestId right after it sets streaming state.
+    set((s) => ({
+      pageLogs: s.pageLogs.map((l) =>
+        l.id === logId ? { ...l, error: { ...l.error!, fixState: 'fixing' as const } } : l,
+      ),
+    }));
+
+    // Stage the source targets, then submit. submitEdit clears targets afterward.
+    set({ targets });
+    await get().submitEdit(instruction);
+
+    // Record the active request id onto the log so applyAgentEvent can detect
+    // the terminal `done` and arm the resolution timer.
+    const requestId = get().activeRequestId;
+    if (requestId) {
+      set((s) => ({
+        pageLogs: s.pageLogs.map((l) =>
+          l.id === logId && l.error
+            ? { ...l, error: { ...l.error, fixRequestId: requestId } }
+            : l,
+        ),
+      }));
+    }
   },
 
   clearPageLogs() {
@@ -883,6 +1051,29 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             ),
           };
         });
+
+        // Resolution check for a "Fix this" edit: if this `done` belongs to a
+        // page-error fix that is still in `fixing` state, give the page a few
+        // seconds to re-render via HMR. If no equivalent error re-fires in that
+        // window (which would flip it to `still-erroring` via addPageError),
+        // mark the fix `resolved`.
+        {
+          const fixedLog = get().pageLogs.find(
+            (l) => l.error?.fixRequestId === e.requestId && l.error.fixState === 'fixing',
+          );
+          if (fixedLog) {
+            const logId = fixedLog.id;
+            setTimeout(() => {
+              set((s) => ({
+                pageLogs: s.pageLogs.map((l) =>
+                  l.id === logId && l.error?.fixState === 'fixing'
+                    ? { ...l, error: { ...l.error, fixState: 'resolved' as const } }
+                    : l,
+                ),
+              }));
+            }, FIX_RESOLUTION_WINDOW_MS);
+          }
+        }
         break;
       }
 
@@ -919,6 +1110,16 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             ),
           };
         });
+
+        // If the failed edit was a "Fix this" attempt, clear its `fixing` state
+        // so the Page Console offers the button again (the error is unchanged).
+        set((s) => ({
+          pageLogs: s.pageLogs.map((l) =>
+            l.error?.fixRequestId === e.requestId && l.error.fixState === 'fixing'
+              ? { ...l, error: { ...l.error, fixState: undefined, fixRequestId: undefined } }
+              : l,
+          ),
+        }));
 
         // For 'needs-file': surface candidate paths inline so the user can
         // pick one and the ChatPanel can offer a re-submit affordance.
@@ -995,6 +1196,67 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: null });
     }
     return result.value;
+  },
+
+  /* ---- Instruction macros -------------------------------------------------- */
+
+  async saveMacro(input) {
+    const name = input.name.trim();
+    const instructionTemplate = input.instructionTemplate.trim();
+    if (!name || !instructionTemplate) {
+      set({ lastError: 'Macro name and instruction are required.' });
+      return null;
+    }
+    const macro: InstructionMacro = {
+      id: genId(),
+      name,
+      instructionTemplate,
+      ...(input.hotkey?.trim() ? { hotkey: input.hotkey.trim() } : {}),
+    };
+    const current = get().settings?.macros ?? [];
+    const next = [...current, macro];
+    const result = await easel.settings.setMacros({ macros: next });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return null;
+    }
+    set({ settings: result.value.settings });
+    return macro.id;
+  },
+
+  async updateMacro(id, patch) {
+    const current = get().settings?.macros ?? [];
+    const next = current.map((m) => (m.id === id ? { ...m, ...patch } : m));
+    const result = await easel.settings.setMacros({ macros: next });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ settings: result.value.settings });
+  },
+
+  async deleteMacro(id) {
+    const current = get().settings?.macros ?? [];
+    const next = current.filter((m) => m.id !== id);
+    const result = await easel.settings.setMacros({ macros: next });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ settings: result.value.settings });
+  },
+
+  async runMacro(id) {
+    const { settings, targets } = get();
+    const macro = settings?.macros.find((m) => m.id === id);
+    if (!macro) {
+      set({ lastError: 'Macro not found.' });
+      return;
+    }
+    // Interpolate against the first selected target (if any) and reuse the
+    // existing edit pipeline unchanged.
+    const instruction = resolveMacroInstruction(macro, targets[0]);
+    await get().submitEdit(instruction);
   },
 
   /* ---- Checkpoints --------------------------------------------------------- */

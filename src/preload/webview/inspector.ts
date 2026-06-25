@@ -191,6 +191,80 @@ function parseSourceAttr(value: string): SourceLocation | undefined {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Helpers — stack-frame parsing (uncaught page errors)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Convert a stack-frame URL into a project-relative file path, or `undefined`
+ * when the frame is not a project source file.
+ *
+ * Dev-server stacks point at served module URLs, e.g.
+ *   `http://localhost:3000/src/App.tsx`
+ *   `http://localhost:5173/src/components/Hero.tsx?t=1700000000000` (Vite HMR)
+ * We strip the origin (so the path is rooted at the served web root, which the
+ * agent treats as project-relative) and any `?query`/`#hash` suffix. Frames in
+ * `node_modules`, Vite's `/@`-prefixed internals, or non-http(s) schemes
+ * (`<anonymous>`, `eval`, browser extensions) are rejected.
+ */
+function frameUrlToFilePath(rawUrl: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return undefined; // not an absolute URL (e.g. "<anonymous>")
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
+
+  // Drop the leading slash so the path is project-relative (`src/App.tsx`).
+  const path = url.pathname.replace(/^\/+/, '');
+  if (!path) return undefined;
+
+  // Vite internals (`/@vite/...`, `/@react-refresh`) and dependencies are not
+  // editable project source — skip them so we target the user's own file.
+  if (path.startsWith('@') || path.includes('node_modules')) return undefined;
+
+  return path;
+}
+
+/**
+ * Parse the `Error.stack` string into ordered {@link SourceLocation}s for the
+ * project's own frames (top frame first). Handles both V8/Chromium formats:
+ *   `    at fnName (http://host/src/App.tsx:12:5)`
+ *   `    at http://host/src/App.tsx:12:5`
+ * Non-project frames are dropped; the result is de-duplicated by file:line and
+ * capped to keep the edit instruction focused on the most likely culprits.
+ */
+function parseStackFrames(stack: string | undefined): SourceLocation[] {
+  if (!stack) return [];
+
+  const FRAME_RE = /\(?((?:https?:)\/\/[^\s()]+?):(\d+):(\d+)\)?\s*$/;
+  const out: SourceLocation[] = [];
+  const seen = new Set<string>();
+  const MAX_FRAMES = 5;
+
+  for (const line of stack.split('\n')) {
+    const m = FRAME_RE.exec(line.trim());
+    if (!m) continue;
+
+    const filePath = frameUrlToFilePath(m[1]);
+    if (!filePath) continue;
+
+    const lineNo = parseInt(m[2], 10);
+    const column = parseInt(m[3], 10);
+    if (isNaN(lineNo) || isNaN(column) || lineNo < 1 || column < 1) continue;
+
+    const key = `${filePath}:${lineNo}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({ filePath, line: lineNo, column });
+    if (out.length >= MAX_FRAMES) break;
+  }
+
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Helpers — ElementTarget construction                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -552,6 +626,53 @@ function onClick(event: MouseEvent): void {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Uncaught page-error reporting                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Serialize an uncaught error into a `page-error` message and post it to the
+ * host. Shared by the `error` and `unhandledrejection` listeners. `error` is
+ * the thrown value (any type — promise rejections can reject with non-Errors),
+ * `fallbackMessage` is used when no `.message` is available.
+ */
+function reportPageError(error: unknown, fallbackMessage: string): void {
+  try {
+    // `error` may be an Error, a string, or any rejected value; normalize both
+    // the message and the (optional) stack defensively.
+    const isErr = error instanceof Error;
+    const message = isErr
+      ? error.message || fallbackMessage
+      : typeof error === 'string'
+        ? error
+        : fallbackMessage;
+    const stack = isErr && typeof error.stack === 'string' ? error.stack : undefined;
+
+    send({
+      type: 'page-error',
+      message,
+      stack,
+      // Stacks are sourcemapped to original files in dev, so the parsed
+      // locations point at the user's actual source.
+      sources: parseStackFrames(stack),
+    });
+  } catch (err) {
+    console.error('[Easel:inspector] reportPageError failed:', err);
+  }
+}
+
+/** `window.onerror` — synchronous uncaught exceptions. */
+function onWindowError(event: ErrorEvent): void {
+  // Prefer the rich Error object (carries a sourcemapped stack); fall back to
+  // the plain message string ErrorEvent always provides.
+  reportPageError(event.error ?? event.message, event.message || 'Uncaught error');
+}
+
+/** `window.onunhandledrejection` — promises that reject with no `.catch`. */
+function onUnhandledRejection(event: PromiseRejectionEvent): void {
+  reportPageError(event.reason, 'Unhandled promise rejection');
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Viewport change reporting                                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -722,6 +843,12 @@ document.addEventListener('click', onClick, { capture: true });
 
 window.addEventListener('scroll', onViewportChanged, { passive: true });
 window.addEventListener('resize', onViewportChanged, { passive: true });
+
+// Uncaught runtime errors and unhandled rejections → Page Console "Fix" button.
+// We only observe (never preventDefault) so the page's own error handling and
+// the host `console-message` capture are unaffected.
+window.addEventListener('error', onWindowError);
+window.addEventListener('unhandledrejection', onUnhandledRejection);
 
 /* -------------------------------------------------------------------------- */
 /*  DOMContentLoaded — initial ready signal                                    */
