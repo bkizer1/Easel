@@ -49,6 +49,8 @@ export const IpcChannels = {
   editSubmit: 'edit.submit',
   /** Cancel an in-flight edit by request id. */
   editCancel: 'edit.cancel',
+  /** Answer a guardrail `requireConfirm` prompt (allow-once / deny) for a path. */
+  editPolicyRespond: 'edit.policyRespond',
   /** Streamed AgentEvents for in-flight edits (main -> renderer). */
   editEvent: 'edit.event',
 
@@ -136,6 +138,18 @@ export interface EditSubmitResponse {
 
 export interface EditCancelRequest {
   requestId: string;
+}
+
+/**
+ * The renderer's answer to a guardrail `policy-confirm` prompt for one path.
+ * `allow-once` lets this single write through for the rest of the edit; `deny`
+ * blocks it (the agent's tool call fails, leaving the file unchanged).
+ */
+export interface EditPolicyRespondRequest {
+  requestId: string;
+  /** Project-relative path from the `policy-confirm` warning. */
+  path: string;
+  decision: 'allow-once' | 'deny';
 }
 
 /** Payload pushed on {@link IpcChannels.editEvent}. */
@@ -312,6 +326,8 @@ export interface EaselApi {
   edit: {
     submit(req: EditSubmitRequest): Promise<IpcResult<EditSubmitResponse>>;
     cancel(req: EditCancelRequest): Promise<IpcResult<void>>;
+    /** Answer a guardrail `policy-confirm` prompt (allow-once / deny) for a path. */
+    policyRespond(req: EditPolicyRespondRequest): Promise<IpcResult<void>>;
     /** Subscribe to streamed AgentEvents for all in-flight edits. */
     onEvent(handler: (payload: EditEventPayload) => void): Unsubscribe;
   };
@@ -370,6 +386,7 @@ export interface IpcInvokeMap {
 
   [IpcChannels.editSubmit]: { request: EditSubmitRequest; response: IpcResult<EditSubmitResponse> };
   [IpcChannels.editCancel]: { request: EditCancelRequest; response: IpcResult<void> };
+  [IpcChannels.editPolicyRespond]: { request: EditPolicyRespondRequest; response: IpcResult<void> };
 
   [IpcChannels.settingsGet]: { request: void; response: IpcResult<SettingsGetResponse> };
   [IpcChannels.settingsUpdate]: { request: SettingsUpdateRequest; response: IpcResult<SettingsUpdateResponse> };

@@ -24,6 +24,7 @@ import { PreviewPane } from './components/PreviewPane';
 import { ChatPanel } from './components/ChatPanel';
 import { DiffViewer } from './components/DiffViewer';
 import { SettingsDialog } from './components/SettingsDialog';
+import { PolicyPrompt } from './components/PolicyPrompt';
 
 /* -------------------------------------------------------------------------- */
 /*  Theme management                                                           */
@@ -217,6 +218,9 @@ export default function App(): JSX.Element {
 
       {/* Settings dialog: modal overlay */}
       {settingsOpen && <SettingsDialog />}
+
+      {/* Guardrail allow-once prompt (when a requireConfirm write is paused) */}
+      <PolicyPrompt />
 
       {/* Error toast */}
       {lastError && <ErrorToast message={lastError} onDismiss={handleDismissError} />}

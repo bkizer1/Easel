@@ -167,6 +167,17 @@ export interface AgentBackendContext {
    * (see `src/main/checkpoints.ts`); the backend only requests one.
    */
   createCheckpoint(message: string, requestId: string): Promise<Checkpoint>;
+
+  /**
+   * Host-provided guardrail check against the project's `.easel/policy.json`.
+   * Backends that write through {@link ProjectFs} are guarded automatically at
+   * that chokepoint and need not call this. Backends that write via their own
+   * tools (e.g. the Claude Agent SDK's `Edit`/`Write`) MUST call this from their
+   * permission hook so the same policy is enforced. Resolves
+   * `{ allow: false, reason }` for a blocked path (a `requireConfirm` path may
+   * resolve only after the user approves). Absent when no policy is wired.
+   */
+  checkWrite?(relativePath: string): Promise<{ allow: boolean; reason?: string }>;
 }
 
 /**

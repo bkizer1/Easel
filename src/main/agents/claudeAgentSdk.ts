@@ -469,6 +469,29 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         // uses the Claude Code subscription login rather than a stray
         // ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL. See CLAUDE_AUTH_ENV_KEYS.
         env: buildChildEnv(authEnv),
+        // Guardrail enforcement: the SDK writes via its own Edit/Write tools
+        // (not ProjectFs), so this is the chokepoint where `.easel/policy.json`
+        // is applied for this backend. It funnels through the host's shared
+        // write gate (ctx.checkWrite) so deny/blast-radius/requireConfirm match
+        // the hand-built backends exactly. Non-write tools are always allowed.
+        canUseTool: async (toolName: string, input: Record<string, unknown>) => {
+          if (/^(Edit|MultiEdit|Write)$/.test(toolName) && ctx.checkWrite) {
+            const rawPath = String(input['file_path'] ?? input['path'] ?? '');
+            if (rawPath) {
+              const rel = path.isAbsolute(rawPath)
+                ? path.relative(request.projectRoot, rawPath)
+                : rawPath;
+              const verdict = await ctx.checkWrite(rel);
+              if (!verdict.allow) {
+                return {
+                  behavior: 'deny',
+                  message: verdict.reason ?? `Blocked by Easel policy (.easel/policy.json): ${rel}`,
+                };
+              }
+            }
+          }
+          return { behavior: 'allow' };
+        },
         abortController,
       };
 

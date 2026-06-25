@@ -16,6 +16,7 @@ import { ipcMain, shell } from 'electron';
 import type {
   EditSubmitRequest,
   EditCancelRequest,
+  EditPolicyRespondRequest,
   SettingsUpdateRequest,
   SettingsSetSecretRequest,
   SettingsClearSecretRequest,
@@ -140,7 +141,7 @@ export function registerIpcHandlers(): void {
       settings,
       secrets,
       projectRoot: project.root,
-      createCheckpointFn: (msg, rid) => createCheckpoint(msg, rid),
+      createCheckpointFn: (msg, rid, provenance) => createCheckpoint(msg, rid, provenance),
     });
 
     return ok({ requestId });
@@ -152,6 +153,18 @@ export function registerIpcHandlers(): void {
     // We delegate to the runner's cancel registry.
     const { cancelEdit } = await import('@main/editRunner');
     cancelEdit(req.requestId);
+    return okVoid();
+  });
+
+  handle(IpcChannels.editPolicyRespond, async (req: EditPolicyRespondRequest) => {
+    if (!req.requestId || !req.path) return fail('requestId and path are required', 'validation');
+    log.info('Policy confirm response', {
+      requestId: req.requestId,
+      path: req.path,
+      decision: req.decision,
+    });
+    const { respondPolicyConfirm } = await import('@main/editRunner');
+    respondPolicyConfirm(req.requestId, req.path, req.decision === 'allow-once');
     return okVoid();
   });
 

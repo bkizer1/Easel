@@ -300,8 +300,15 @@ export type AgentEvent =
       requestId: string;
       /** Non-fatal warning surfaced mid-edit (e.g. "ambiguous match; picked best"). */
       message: string;
-      /** Optional stable code for programmatic handling. */
+      /**
+       * Optional stable code for programmatic handling. `policy-confirm` means a
+       * guardrail policy (`.easel/policy.json`) requires the user to approve the
+       * write to {@link path} before it proceeds; the edit pauses until the
+       * renderer replies via `edit.policyRespond`.
+       */
       code?: string;
+      /** Project-relative path this warning concerns (e.g. for `policy-confirm`). */
+      path?: string;
     }
   | {
       type: 'diff';
@@ -328,10 +335,16 @@ export type AgentEvent =
       requestId: string;
       /** Human-readable error message. */
       message: string;
-      /** Stable error code for programmatic handling (e.g. `auth`, `cancelled`, `needs-file`). */
+      /**
+       * Stable error code for programmatic handling (e.g. `auth`, `cancelled`,
+       * `needs-file`, `policy-blocked`). `policy-blocked` means a guardrail policy
+       * (`.easel/policy.json`) denied the write to {@link path}; no file changed.
+       */
       code?: string;
       /** Whether the caller may retry the same request. */
       recoverable: boolean;
+      /** Project-relative path this error concerns (e.g. for `policy-blocked`). */
+      path?: string;
       /**
        * For `code: 'needs-file'` (confidence `none`): candidate source files the
        * user can disambiguate between. The renderer re-submits the EditRequest
@@ -364,6 +377,36 @@ export interface Checkpoint {
   createdAt: number;
   /** Files changed by the edit, for timeline display. */
   changedFiles: string[];
+}
+
+/**
+ * Structured "why this edit happened" metadata recorded onto a checkpoint commit
+ * as git trailers (see `src/main/provenance.ts`). Makes every Easel edit
+ * auditable via `git log`/`git blame`, and lets the data ride onto real commits
+ * when the Branch/PR feature promotes a checkpoint. Every field is optional so a
+ * checkpoint created outside the edit pipeline (e.g. the initial snapshot) can
+ * still be recorded.
+ */
+export interface CheckpointProvenance {
+  /** The user's natural-language instruction that drove the edit. */
+  instruction?: string;
+  /**
+   * DOM target descriptors the user pointed at (selector or tag), one per
+   * {@link ElementTarget}. Recorded as `Easel-Target` trailers.
+   */
+  targets?: string[];
+  /**
+   * Source locations the edit resolved to (e.g. `src/Hero.tsx:42`), derived from
+   * {@link ElementTarget.dataEaselSource} or the changed files. Recorded as
+   * `Easel-Source` trailers.
+   */
+  sources?: string[];
+  /** The resolved {@link ConfidenceLevel} for the edit, if known. */
+  confidence?: ConfidenceLevel;
+  /** The model id that produced the edit (e.g. `claude-opus-4-8`). */
+  model?: string;
+  /** The {@link AgentBackendId} that produced the edit. */
+  backend?: AgentBackendId;
 }
 
 /* -------------------------------------------------------------------------- */
