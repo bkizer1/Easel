@@ -190,6 +190,31 @@ const api: EaselApi = {
       return subscribe(IpcChannels.devServerEvent, handler);
     },
   },
+
+  // ── xray.* (State X-Ray cockpit) ───────────────────────────────────────────
+  xray: {
+    getNetworkLog() {
+      return ipcRenderer.invoke(IpcChannels.xrayGetNetworkLog);
+    },
+    clearNetworkLog() {
+      return ipcRenderer.invoke(IpcChannels.xrayClearNetworkLog);
+    },
+    setNetworkCapture(req) {
+      return ipcRenderer.invoke(IpcChannels.xraySetNetworkCapture, req);
+    },
+    saveSnapshot(req) {
+      return ipcRenderer.invoke(IpcChannels.xraySaveSnapshot, req);
+    },
+    getSnapshot(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayGetSnapshot, req);
+    },
+    listSnapshots() {
+      return ipcRenderer.invoke(IpcChannels.xrayListSnapshots);
+    },
+    onNetworkEvent(handler) {
+      return subscribe(IpcChannels.networkEvent, handler);
+    },
+  },
 };
 
 /* -------------------------------------------------------------------------- */

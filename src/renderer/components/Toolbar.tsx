@@ -26,6 +26,7 @@ import {
   Grid3x3,
   ScanLine,
   Wand2,
+  ScanEye,
 } from 'lucide-react';
 import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
@@ -313,6 +314,9 @@ export function Toolbar(): React.ReactElement {
   const offGridElements = useEaselStore((s) => s.offGridElements);
   const setGridVisible = useEaselStore((s) => s.setGridVisible);
 
+  const xrayOpen = useEaselStore((s) => s.xrayOpen);
+  const setXrayOpen = useEaselStore((s) => s.setXrayOpen);
+
   const [menu, setMenu] = useState<'viewport' | 'console' | 'grid' | null>(null);
 
   // Timeline is oldest-first; the cursor is the checkpoint the tree matches.
@@ -477,6 +481,14 @@ export function Toolbar(): React.ReactElement {
         )}
         {menu === 'console' && <ConsolePanel />}
       </div>
+      <IconButton
+        onClick={() => setXrayOpen(!xrayOpen)}
+        title="State X-Ray — live state, network & time-travel for the page"
+        active={xrayOpen}
+        disabled={!previewUrl}
+      >
+        <ScanEye className="w-[17px] h-[17px]" />
+      </IconButton>
       <IconButton
         onClick={() => {
           if (previewUrl) void easel.preview.openExternal({ url: previewUrl });

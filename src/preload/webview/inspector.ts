@@ -43,6 +43,14 @@ import type {
 } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
+import {
+  serializeValue,
+  formatSerializedValue,
+  type ElementStateSnapshot,
+  type StateEntry,
+  type DetectedFramework,
+  type RenderCause,
+} from '@shared/xray';
 
 /* -------------------------------------------------------------------------- */
 /*  Channel names (single source — PreviewPane must match these)              */
@@ -620,6 +628,14 @@ function onClick(event: MouseEvent): void {
 
     const target = buildElementTarget(el);
     send({ type: 'element-picked', target });
+
+    // State X-Ray: also capture and post the element's live framework state.
+    // Guarded separately so any failure here never blocks `element-picked`.
+    try {
+      send({ type: 'element-state', snapshot: buildElementStateSnapshot(el) });
+    } catch (stateErr) {
+      console.error('[Easel:inspector] element-state on pick failed:', stateErr);
+    }
   } catch (err) {
     console.error('[Easel:inspector] click error:', err);
   }
@@ -765,6 +781,383 @@ function queryRegion(box: BoundingBox): ElementTarget[] {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  State X-Ray — framework state tap (issue #13)                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A minimal structural view of a React fiber node. The real fiber has hundreds
+ * of internal fields; we only narrow the few we walk. Everything is optional
+ * because we are reaching into private internals that vary across React
+ * versions, so each access is guarded.
+ */
+interface ReactFiber {
+  type?: unknown;
+  return?: ReactFiber | null;
+  memoizedProps?: unknown;
+  memoizedState?: ReactHook | unknown;
+}
+
+/** One node in React's hook linked list (`fiber.memoizedState.next…`). */
+interface ReactHook {
+  memoizedState?: unknown;
+  next?: ReactHook | null;
+  /** `useState`/`useReducer` hooks carry an update queue with a `dispatch`. */
+  queue?: { dispatch?: (value: unknown) => void } | null;
+}
+
+/** Vue's internal component instance hung off a host element. */
+interface VueComponentInternal {
+  props?: Record<string, unknown>;
+  setupState?: Record<string, unknown>;
+  type?: { name?: string; __name?: string };
+}
+
+/** Read an arbitrary own property off a value without tripping `any` lint. */
+function readProp(obj: unknown, key: string): unknown {
+  if (obj === null || (typeof obj !== 'object' && typeof obj !== 'function')) return undefined;
+  try {
+    return (obj as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** Find the React fiber object hung off a DOM element, if any. */
+function findReactFiber(el: Element): ReactFiber | undefined {
+  let keys: string[];
+  try {
+    keys = Object.keys(el);
+  } catch {
+    return undefined;
+  }
+  for (const key of keys) {
+    if (key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$')) {
+      const fiber = readProp(el, key);
+      if (fiber && typeof fiber === 'object') return fiber as ReactFiber;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Walk `fiber.return` upward to the nearest fiber whose `type` is a function or
+ * class — i.e. an actual user component (host fibers like `<div>` have a string
+ * `type`). Returns the host-element fiber's nearest component ancestor.
+ */
+function nearestComponentFiber(fiber: ReactFiber): ReactFiber | undefined {
+  let current: ReactFiber | undefined = fiber;
+  let guard = 0;
+  while (current && guard++ < 1000) {
+    if (typeof current.type === 'function') return current;
+    current = current.return ?? undefined;
+  }
+  return undefined;
+}
+
+/** Derive a React component display name from its fiber `type`. */
+function reactComponentName(type: unknown): string | undefined {
+  const display = readProp(type, 'displayName');
+  if (typeof display === 'string' && display) return display;
+  const name = readProp(type, 'name');
+  if (typeof name === 'string' && name) return name;
+  return undefined;
+}
+
+/** Cap on entries posted per snapshot, across all groups. */
+const MAX_STATE_ENTRIES = 50;
+
+/**
+ * Module-level render-cause cache: selector → (entry label → compact formatted
+ * value) as of the last snapshot. The guest is the source of truth for
+ * change-detection; the host's `previousKeys` is only an optional hint.
+ */
+const renderCauseCache = new Map<string, Map<string, string>>();
+
+/** Compact, comparable string for one serialized entry value. */
+function formatEntryValue(entry: StateEntry): string {
+  try {
+    return formatSerializedValue(entry.value);
+  } catch {
+    return '';
+  }
+}
+
+/** Computed-style declarations highlighted in the cockpit's State tab. */
+const HIGHLIGHTED_STYLE_PROPS: readonly string[] = [
+  'color',
+  'backgroundColor',
+  'fontSize',
+  'fontFamily',
+  'fontWeight',
+  'lineHeight',
+  'padding',
+  'margin',
+  'borderRadius',
+  'display',
+  'width',
+  'height',
+];
+
+/** Collect the highlighted computed-style declarations for `el`. */
+function collectComputedStyle(el: Element): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const cs = getComputedStyle(el as HTMLElement);
+    for (const prop of HIGHLIGHTED_STYLE_PROPS) {
+      const val = cs.getPropertyValue(toKebabCase(prop)) || (cs as unknown as Record<string, string>)[prop];
+      if (typeof val === 'string' && val) out[prop] = val.trim();
+    }
+  } catch {
+    // getComputedStyle can throw on detached nodes — leave the set partial.
+  }
+  return out;
+}
+
+/** `backgroundColor` → `background-color` for `getPropertyValue`. */
+function toKebabCase(camel: string): string {
+  return camel.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+}
+
+/** Collect React props + hook-state entries off a component fiber. */
+function collectReactEntries(componentFiber: ReactFiber, entries: StateEntry[]): void {
+  // Props (read-only).
+  const props = componentFiber.memoizedProps;
+  if (props && typeof props === 'object') {
+    let propKeys: string[] = [];
+    try {
+      propKeys = Object.keys(props as Record<string, unknown>);
+    } catch {
+      propKeys = [];
+    }
+    for (const key of propKeys) {
+      if (entries.length >= MAX_STATE_ENTRIES) return;
+      if (key === 'children') continue; // noisy React element tree
+      entries.push({
+        group: 'props',
+        label: key,
+        value: serializeValue(readProp(props, key)),
+        path: ['props', key],
+        writable: false,
+      });
+    }
+  }
+
+  // Hook chain: fiber.memoizedState is the head of a linked list of hooks.
+  // Each hook's `.memoizedState` is the slice's value; useState/useReducer
+  // hooks expose `.queue.dispatch` so we can scrub them live.
+  let hook = componentFiber.memoizedState as ReactHook | undefined;
+  let index = 0;
+  let stateIndex = 0;
+  let guard = 0;
+  while (hook && typeof hook === 'object' && guard++ < 200) {
+    if (entries.length >= MAX_STATE_ENTRIES) return;
+    const value = hook.memoizedState;
+    // Skip hooks whose slot holds a function (effects/refs/callbacks) — they are
+    // not meaningful "state" rows for the cockpit.
+    if (typeof value !== 'function') {
+      const writable = typeof hook.queue?.dispatch === 'function';
+      entries.push({
+        group: 'hooks',
+        label: `state[${stateIndex}]`,
+        value: serializeValue(value),
+        path: ['hooks', String(index)],
+        writable,
+      });
+      stateIndex++;
+    }
+    hook = hook.next ?? undefined;
+    index++;
+  }
+}
+
+/** Collect Vue props + setupState entries off a component instance. */
+function collectVueEntries(comp: VueComponentInternal, entries: StateEntry[]): void {
+  if (comp.props && typeof comp.props === 'object') {
+    for (const key of Object.keys(comp.props)) {
+      if (entries.length >= MAX_STATE_ENTRIES) return;
+      entries.push({
+        group: 'props',
+        label: key,
+        value: serializeValue(comp.props[key]),
+        path: ['props', key],
+        writable: false,
+      });
+    }
+  }
+  if (comp.setupState && typeof comp.setupState === 'object') {
+    for (const key of Object.keys(comp.setupState)) {
+      if (entries.length >= MAX_STATE_ENTRIES) return;
+      if (key.startsWith('__') || key.startsWith('$')) continue; // internals
+      entries.push({
+        group: 'state',
+        label: key,
+        value: serializeValue(comp.setupState[key]),
+        path: ['setupState', key],
+        writable: true,
+      });
+    }
+  }
+}
+
+/**
+ * Build the live {@link ElementStateSnapshot} for a DOM element: detect the
+ * framework, lower its props/state into source-anchored {@link StateEntry}s,
+ * highlight key computed styles, and compute best-effort render-cause by diffing
+ * against the last snapshot of the same selector. Total: never throws — on any
+ * failure it returns a snapshot with `error` set and empty `entries`.
+ */
+function buildElementStateSnapshot(el: Element, previousKeys?: string[]): ElementStateSnapshot {
+  let selector = '';
+  try {
+    const target = buildElementTarget(el);
+    selector = target.selector;
+
+    let framework: DetectedFramework = 'unknown';
+    let componentName: string | undefined;
+    const entries: StateEntry[] = [];
+
+    // React.
+    const fiber = findReactFiber(el);
+    if (fiber) {
+      framework = 'react';
+      const componentFiber = nearestComponentFiber(fiber);
+      if (componentFiber) {
+        componentName = reactComponentName(componentFiber.type);
+        collectReactEntries(componentFiber, entries);
+      }
+    }
+
+    // Vue.
+    if (framework === 'unknown') {
+      const vueComp = readProp(el, '__vueParentComponent');
+      if (vueComp && typeof vueComp === 'object') {
+        framework = 'vue';
+        const comp = vueComp as VueComponentInternal;
+        componentName = comp.type?.name || comp.type?.__name || undefined;
+        collectVueEntries(comp, entries);
+      }
+    }
+
+    // Svelte (best-effort — internals are mostly closure-bound; we only surface
+    // the component name when the dev compiler stamped `__svelte_meta`).
+    if (framework === 'unknown') {
+      const meta = readProp(el, '__svelte_meta');
+      if (meta && typeof meta === 'object') {
+        framework = 'svelte';
+        const loc = readProp(meta, 'loc');
+        const file = readProp(loc, 'file');
+        if (typeof file === 'string' && file) componentName = file.split('/').pop();
+      }
+    }
+
+    const computedStyle = collectComputedStyle(el);
+
+    // Render-cause: diff the current label→value map against the cached prior
+    // one for this selector. Only meaningful when a prior snapshot exists.
+    const currentMap = new Map<string, string>();
+    for (const entry of entries) currentMap.set(entry.label, formatEntryValue(entry));
+    const priorMap = renderCauseCache.get(selector);
+    let renderCause: RenderCause | undefined;
+    if (priorMap) {
+      const changedKeys: string[] = [];
+      for (const [label, formatted] of currentMap) {
+        const prior = priorMap.get(label);
+        if (prior !== undefined && prior !== formatted) changedKeys.push(label);
+      }
+      // The host's hint can only narrow what it already knows changed; the cache
+      // remains authoritative, so we intersect when a hint is supplied.
+      const filtered = previousKeys
+        ? changedKeys.filter((k) => previousKeys.includes(k))
+        : changedKeys;
+      renderCause = { changedKeys: filtered.length ? filtered : changedKeys };
+    }
+    renderCauseCache.set(selector, currentMap);
+
+    return {
+      targetId: target.id,
+      selector,
+      tagName: target.tagName,
+      dataEaselSource: target.dataEaselSource,
+      componentName,
+      framework,
+      entries,
+      computedStyle,
+      ...(renderCause ? { renderCause } : {}),
+      capturedAt: Date.now(),
+    };
+  } catch (err) {
+    console.error('[Easel:inspector] buildElementStateSnapshot error:', err);
+    return {
+      targetId: `et-error`,
+      selector,
+      tagName: (() => {
+        try {
+          return el.tagName.toLowerCase();
+        } catch {
+          return 'unknown';
+        }
+      })(),
+      framework: 'unknown',
+      entries: [],
+      computedStyle: {},
+      capturedAt: Date.now(),
+      error: err instanceof Error ? err.message : 'failed to read element state',
+    };
+  }
+}
+
+/**
+ * Best-effort live "scrub": write `value` into the framework state of `el` at
+ * the given machine `path` (from a {@link StateEntry}). React hooks are written
+ * via their `queue.dispatch`; Vue setupState/props by assignment. Returns true
+ * when a write was attempted. Never throws.
+ */
+function applySetValue(el: Element, path: string[], value: unknown): boolean {
+  try {
+    const [group, key] = path;
+    if (group === 'hooks') {
+      const fiber = findReactFiber(el);
+      const componentFiber = fiber ? nearestComponentFiber(fiber) : undefined;
+      if (!componentFiber) return false;
+      const wantIndex = Number(key);
+      let hook = componentFiber.memoizedState as ReactHook | undefined;
+      let index = 0;
+      let guard = 0;
+      while (hook && typeof hook === 'object' && guard++ < 200) {
+        if (index === wantIndex) {
+          const dispatch = hook.queue?.dispatch;
+          if (typeof dispatch === 'function') {
+            dispatch(value);
+            return true;
+          }
+          return false;
+        }
+        hook = hook.next ?? undefined;
+        index++;
+      }
+      return false;
+    }
+
+    if (group === 'setupState' || group === 'props') {
+      const vueComp = readProp(el, '__vueParentComponent') as VueComponentInternal | undefined;
+      if (vueComp) {
+        const bag = group === 'setupState' ? vueComp.setupState : vueComp.props;
+        if (bag && typeof bag === 'object' && key) {
+          (bag as Record<string, unknown>)[key] = value;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    return false;
+  } catch (err) {
+    console.error('[Easel:inspector] applySetValue error:', err);
+    return false;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  InspectorCommand handler                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -818,6 +1211,40 @@ ipcRenderer.on(
         case 'scan-off-grid': {
           const offenders = scanOffGrid(cmd.grid, cmd.threshold);
           send({ type: 'off-grid-result', scanId: cmd.scanId, offenders });
+          break;
+        }
+
+        case 'request-element-state': {
+          let el: Element | null = null;
+          try {
+            el = document.querySelector(cmd.selector);
+          } catch {
+            el = null;
+          }
+          if (el) {
+            send({
+              type: 'element-state',
+              snapshot: buildElementStateSnapshot(el, cmd.previousKeys),
+            });
+          }
+          break;
+        }
+
+        case 'set-value': {
+          let el: Element | null = null;
+          try {
+            el = document.querySelector(cmd.selector);
+          } catch {
+            el = null;
+          }
+          if (el) {
+            const wrote = applySetValue(el, cmd.path, cmd.value);
+            // Re-emit so the panel reflects the (possibly framework-coerced)
+            // value after a successful scrub.
+            if (wrote) {
+              send({ type: 'element-state', snapshot: buildElementStateSnapshot(el) });
+            }
+          }
           break;
         }
 
