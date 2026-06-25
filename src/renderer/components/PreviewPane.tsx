@@ -169,14 +169,14 @@ export function PreviewPane(): React.ReactElement {
   /* ---- Send a command to the guest inspector ---- */
   const sendCommand = useCallback((cmd: InspectorCommand) => {
     if (webviewRef.current) {
-      webviewRef.current.send('easel:inspector-command', cmd);
+      webviewRef.current.send('inspector-command', cmd);
     }
   }, []);
 
   /* ---- Relay inspector messages from the guest ---- */
   const handleIpcMessage = useCallback(
     (event: IpcMessageEvent) => {
-      if (event.channel !== 'easel:inspector-message') return;
+      if (event.channel !== 'inspector-message') return;
       const msg = event.args[0] as InspectorMessage;
 
       switch (msg.type) {
