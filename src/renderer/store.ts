@@ -30,9 +30,18 @@ import type {
   ProjectConfig,
   SourceLocation,
 } from '@shared/types';
-import type { DevServerStatePayload, PreviewStatusPayload } from '@shared/ipc';
+import type { DevServerStatePayload, InspectorCommand, PreviewStatusPayload } from '@shared/ipc';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
+import {
+  diffSerialized,
+  formatSerializedValue,
+  type ElementStateSnapshot,
+  type NetworkEntry,
+  type SerializedValue,
+  type StateDiffEntry,
+  type StateEntry,
+} from '@shared/xray';
 
 /* -------------------------------------------------------------------------- */
 /*  ID generation                                                             */
@@ -200,6 +209,22 @@ export interface EaselState {
   offGridElements: OffGridElement[];
   /** Bumped to ask PreviewPane to run an off-grid scan in the guest. */
   offGridScanNonce: number;
+
+  /* ---- State X-Ray cockpit (issue #13) ---------------------------------- */
+  /** Whether the State X-Ray cockpit panel is open. */
+  xrayOpen: boolean;
+  /** Active cockpit tab. */
+  xrayTab: 'state' | 'network' | 'time-travel';
+  /** Live state of the most recently picked element (State tap), or null. */
+  currentElementState: ElementStateSnapshot | null;
+  /** Observed network requests (newest last), streamed from the CDP tap. */
+  networkEntries: NetworkEntry[];
+  /** Whether the CDP network tap is attached + capturing. */
+  networkCapturing: boolean;
+  /** A one-shot InspectorCommand for the guest, drained by PreviewPane. */
+  pendingInspectorCommand: InspectorCommand | null;
+  /** Bumped whenever {@link pendingInspectorCommand} is set, to trigger send. */
+  inspectorCommandNonce: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -371,6 +396,45 @@ export interface EaselActions {
    * edit pipeline (one edit → one checkpoint). Reuses {@link submitEdit}.
    */
   snapToGrid(ids: string[]): Promise<void>;
+
+  /* ---- State X-Ray cockpit (issue #13) ---------------------------------- */
+  /** Open/close the cockpit panel. */
+  setXrayOpen(open: boolean): void;
+  /** Switch the active cockpit tab (refreshes the network log when relevant). */
+  setXrayTab(tab: 'state' | 'network' | 'time-travel'): void;
+  /** Queue a one-shot InspectorCommand for the guest (drained by PreviewPane). */
+  sendInspectorCommand(cmd: InspectorCommand): void;
+  /** Record the live element-state snapshot relayed from the guest. */
+  setElementState(snapshot: ElementStateSnapshot): void;
+  /** Re-request the current element's live state (also computes render-cause). */
+  refreshElementState(): void;
+  /** Scrub a value live in the guest (ephemeral until baked into a source edit). */
+  scrubValue(path: string[], value: string | number | boolean | null): void;
+  /**
+   * "Change this": bridge an inspected state value into a source edit. Builds an
+   * instruction + source-anchored target from the current element snapshot and
+   * submits through the existing pipeline. Reuses {@link submitEdit}.
+   */
+  bridgeElementStateToEdit(entry: StateEntry): Promise<void>;
+  /**
+   * Bridge a network request into a source edit ("add loading/error states"),
+   * carrying the request's URL/status + initiator source location.
+   */
+  bridgeNetworkToEdit(entryId: string): Promise<void>;
+  /** Enable/disable the CDP network tap on the guest webview. */
+  setNetworkCapture(enabled: boolean): Promise<void>;
+  /** Refresh the buffered network log + capture state from main. */
+  loadNetworkLog(): Promise<void>;
+  /** Clear the buffered network log. */
+  clearNetworkLog(): Promise<void>;
+  /**
+   * Deep-diff two checkpoints' persisted state snapshots for the time-travel
+   * view. Returns null when either checkpoint lacks a snapshot.
+   */
+  compareSnapshots(
+    fromCheckpointId: string,
+    toCheckpointId: string,
+  ): Promise<StateDiffEntry[] | null>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -414,6 +478,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   scanningOffGrid: false,
   offGridElements: [],
   offGridScanNonce: 0,
+  xrayOpen: false,
+  xrayTab: 'state',
+  currentElementState: null,
+  networkEntries: [],
+  networkCapturing: false,
+  pendingInspectorCommand: null,
+  inspectorCommandNonce: 0,
 
   /* ---- Init / subscriptions ------------------------------------------------ */
 
@@ -441,6 +512,22 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
     const unsubEdit = easel.edit.onEvent(({ event }) => {
       get().applyAgentEvent(event);
+    });
+
+    // State X-Ray: stream observed network requests from the CDP tap. Keep the
+    // most recent 200 to bound memory; entries with the same id are coalesced
+    // (request started → response received updates the same row).
+    const unsubNetwork = easel.xray.onNetworkEvent(({ entry }) => {
+      set((s) => {
+        const idx = s.networkEntries.findIndex((e) => e.id === entry.id);
+        if (idx >= 0) {
+          const next = [...s.networkEntries];
+          next[idx] = { ...next[idx], ...entry };
+          return { networkEntries: next };
+        }
+        const next = [...s.networkEntries, entry];
+        return { networkEntries: next.length > 200 ? next.slice(next.length - 200) : next };
+      });
     });
 
     // Load initial data from main (fire-and-forget; errors set lastError).
@@ -473,6 +560,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       unsubPreview();
       unsubDevServer();
       unsubEdit();
+      unsubNetwork();
     };
   },
 
@@ -521,6 +609,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       gridVisible: false,
       offGridElements: [],
       scanningOffGrid: false,
+      xrayOpen: false,
+      currentElementState: null,
+      networkEntries: [],
     });
   },
 
@@ -1004,6 +1095,31 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             ),
           };
         });
+
+        // Time-travel (State X-Ray): persist the live inspected state alongside
+        // the checkpoint so any two points can be deep-diffed later. Best-effort:
+        // only when an element is currently inspected. The snapshot lives in
+        // userData (main), never in the user's tree.
+        {
+          const cur = get().currentElementState;
+          if (cur) {
+            // Build a SerializedValue tree directly from the inspected entries so
+            // the persisted snapshot diffs cleanly against another checkpoint's.
+            const data: SerializedValue = {
+              kind: 'object',
+              entries: cur.entries.map((entry) => ({ key: entry.label, value: entry.value })),
+              truncated: false,
+            };
+            void easel.xray.saveSnapshot({
+              snapshot: {
+                checkpointId: e.checkpoint.id,
+                capturedAt: Date.now(),
+                label: e.checkpoint.message,
+                data,
+              },
+            });
+          }
+        }
         break;
       }
 
@@ -1381,5 +1497,169 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     // The scan reflects the pre-snap layout; clear it so the user re-scans after
     // the edit re-renders.
     set({ offGridElements: [] });
+  },
+
+  /* ---- State X-Ray cockpit (issue #13) ------------------------------------ */
+
+  setXrayOpen(open) {
+    set({ xrayOpen: open });
+    // Opening the Network tab implicitly refreshes the log.
+    if (open && get().xrayTab === 'network') void get().loadNetworkLog();
+  },
+
+  setXrayTab(tab) {
+    set({ xrayTab: tab });
+    if (tab === 'network') void get().loadNetworkLog();
+  },
+
+  sendInspectorCommand(cmd) {
+    set((s) => ({
+      pendingInspectorCommand: cmd,
+      inspectorCommandNonce: s.inspectorCommandNonce + 1,
+    }));
+  },
+
+  setElementState(snapshot) {
+    set({ currentElementState: snapshot });
+  },
+
+  refreshElementState() {
+    const cur = get().currentElementState;
+    if (!cur) return;
+    get().sendInspectorCommand({
+      type: 'request-element-state',
+      selector: cur.selector,
+      previousKeys: cur.entries.map((e) => e.label),
+    });
+  },
+
+  scrubValue(path, value) {
+    const cur = get().currentElementState;
+    if (!cur) return;
+    get().sendInspectorCommand({ type: 'set-value', selector: cur.selector, path, value });
+  },
+
+  async bridgeElementStateToEdit(entry) {
+    const cur = get().currentElementState;
+    if (!cur) {
+      set({ lastError: 'No inspected element to change.' });
+      return;
+    }
+    if (get().streaming) return;
+
+    const label =
+      cur.componentName ?? (cur.dataEaselSource ? cur.dataEaselSource.filePath : cur.selector);
+    const where = cur.dataEaselSource
+      ? `${cur.dataEaselSource.filePath}:${cur.dataEaselSource.line}:${cur.dataEaselSource.column}`
+      : `the element matching \`${cur.selector}\``;
+    const valueText = formatSerializedValue(entry.value);
+    const pathText = entry.path.join('.');
+    const instruction =
+      `In ${where}, change the ${cur.framework} ${entry.group} \`${pathText}\` ` +
+      `(currently ${valueText}) on the \`${label}\` component. ` +
+      `Edit the SOURCE so the new value is the durable default/binding — ` +
+      `do not just patch the rendered DOM.`;
+
+    // Build a source-anchored target so the agent goes straight to the file.
+    const target: ElementTarget = {
+      id: `xray-state-${cur.targetId}-${pathText || 'value'}`,
+      selector: cur.selector,
+      tagName: cur.tagName,
+      dataEaselSource: cur.dataEaselSource,
+      boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+      textSnippet: '',
+      attributes: {},
+      pluginPresent: cur.dataEaselSource !== undefined,
+      confidence: cur.dataEaselSource !== undefined ? 'high' : 'medium',
+    };
+    set({ targets: [target] });
+    await get().submitEdit(instruction);
+  },
+
+  async bridgeNetworkToEdit(entryId) {
+    const entry = get().networkEntries.find((e) => e.id === entryId);
+    if (!entry) {
+      set({ lastError: 'Network request not found.' });
+      return;
+    }
+    if (get().streaming) return;
+
+    const isFailing = entry.failed || (entry.status !== undefined && entry.status >= 400);
+    const statusText = isFailing
+      ? `failing (${entry.failed ? (entry.errorText ?? 'network error') : `HTTP ${entry.status} ${entry.statusText ?? ''}`.trim()})`
+      : `returning HTTP ${entry.status ?? '???'}`;
+    const where = entry.initiator
+      ? ` The request is issued near ${entry.initiator.filePath}:${entry.initiator.line}:${entry.initiator.column}.`
+      : '';
+    const instruction =
+      `The \`${entry.method} ${entry.url}\` request is ${statusText}.${where} ` +
+      `Add proper loading and error states around this request in the source ` +
+      `(handle the failure path, show a spinner/skeleton while pending, and surface ` +
+      `an error message instead of leaving the UI blank or broken).`;
+
+    const targets: ElementTarget[] = entry.initiator
+      ? [
+          {
+            id: `xray-net-${entry.id}`,
+            selector: '',
+            tagName: '',
+            dataEaselSource: entry.initiator,
+            boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+            textSnippet: '',
+            attributes: {},
+            pluginPresent: true,
+            confidence: 'high',
+          },
+        ]
+      : [];
+    set({ targets });
+    await get().submitEdit(instruction);
+  },
+
+  async setNetworkCapture(enabled) {
+    const result = await easel.xray.setNetworkCapture({ enabled });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ networkCapturing: result.value.capturing });
+    if (result.value.detail && enabled && !result.value.capturing) {
+      set({ lastError: result.value.detail });
+    }
+  },
+
+  async loadNetworkLog() {
+    const result = await easel.xray.getNetworkLog();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ networkEntries: result.value.entries, networkCapturing: result.value.capturing });
+  },
+
+  async clearNetworkLog() {
+    const result = await easel.xray.clearNetworkLog();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ networkEntries: [] });
+  },
+
+  async compareSnapshots(fromCheckpointId, toCheckpointId) {
+    const [from, to] = await Promise.all([
+      easel.xray.getSnapshot({ checkpointId: fromCheckpointId }),
+      easel.xray.getSnapshot({ checkpointId: toCheckpointId }),
+    ]);
+    if (!from.ok) {
+      set({ lastError: from.error });
+      return null;
+    }
+    if (!to.ok) {
+      set({ lastError: to.error });
+      return null;
+    }
+    if (!from.value.snapshot || !to.value.snapshot) return null;
+    return diffSerialized(from.value.snapshot.data, to.value.snapshot.data);
   },
 }));

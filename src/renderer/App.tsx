@@ -25,6 +25,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { DiffViewer } from './components/DiffViewer';
 import { SettingsDialog } from './components/SettingsDialog';
 import { PolicyPrompt } from './components/PolicyPrompt';
+import { StateXRayPanel } from './components/StateXRayPanel';
 
 /* -------------------------------------------------------------------------- */
 /*  Theme management                                                           */
@@ -135,6 +136,7 @@ export default function App(): JSX.Element {
   const currentCheckpointId = useEaselStore((s) => s.currentCheckpointId);
   const settingsOpen = useEaselStore((s) => s.settingsOpen);
   const needsAuth = useEaselStore((s) => s.needsAuth);
+  const xrayOpen = useEaselStore((s) => s.xrayOpen);
 
   // Apply theme whenever settings change.
   useTheme(settings?.theme);
@@ -207,6 +209,13 @@ export default function App(): JSX.Element {
             <ChatPanel />
           </div>
         </div>
+
+        {/* State X-Ray cockpit: dockable bottom panel (issue #13) */}
+        {xrayOpen && (
+          <div className="shrink-0 hairline-t h-72 bg-ink-900/60">
+            <StateXRayPanel />
+          </div>
+        )}
 
         {/* DiffViewer: slide-up panel when there are live diffs */}
         {liveDiffs.length > 0 && (

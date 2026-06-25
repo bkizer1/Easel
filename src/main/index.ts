@@ -9,6 +9,7 @@ import { createMainWindow, getMainWindow } from '@main/window';
 import { registerIpcHandlers } from '@main/ipc';
 import { initSettings } from '@main/settings';
 import { stopDevServer } from '@main/devServer';
+import { disposeNetworkTap } from '@main/networkTap';
 import { rootLogger } from '@main/logger';
 
 const log = rootLogger;
@@ -47,8 +48,10 @@ if (!gotLock) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  // Never leave a dev server we started orphaned when Easel exits.
+  // Never leave a dev server we started orphaned, or a CDP debugger attached to
+  // the preview, when Easel exits.
   app.on('before-quit', () => {
     stopDevServer();
+    disposeNetworkTap();
   });
 }

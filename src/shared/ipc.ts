@@ -27,6 +27,7 @@ import type {
   SourceLocation,
 } from './types';
 import type { GridConfig } from './grid';
+import type { ElementStateSnapshot, NetworkEntry, StateSnapshot } from './xray';
 
 /* -------------------------------------------------------------------------- */
 /*  Channel names                                                              */
@@ -109,6 +110,22 @@ export const IpcChannels = {
   devServerGet: 'devServer.get',
   /** Emitted by main on dev-server state / log changes. */
   devServerEvent: 'devServer.event',
+
+  // State X-Ray cockpit (issue #13) -----------------------------------------
+  /** Read the buffered network log + current capture state. */
+  xrayGetNetworkLog: 'xray.getNetworkLog',
+  /** Clear the buffered network log. */
+  xrayClearNetworkLog: 'xray.clearNetworkLog',
+  /** Enable/disable the CDP network tap on the guest webview. */
+  xraySetNetworkCapture: 'xray.setNetworkCapture',
+  /** Persist a serialized state snapshot keyed by checkpoint id (userData). */
+  xraySaveSnapshot: 'xray.saveSnapshot',
+  /** Read a persisted state snapshot for a checkpoint id (or null). */
+  xrayGetSnapshot: 'xray.getSnapshot',
+  /** List checkpoint ids that have a persisted state snapshot. */
+  xrayListSnapshots: 'xray.listSnapshots',
+  /** Emitted by main as network requests are observed (CDP). */
+  networkEvent: 'network.event',
 } as const;
 
 /** Union of every channel-name literal. */
@@ -304,6 +321,45 @@ export interface DevServerStatePayload {
   logTail: string[];
 }
 
+// xray.* (State X-Ray cockpit) ----------------------------------------------
+
+export interface XrayGetNetworkLogResponse {
+  entries: NetworkEntry[];
+  /** Whether the CDP network tap is currently attached + capturing. */
+  capturing: boolean;
+}
+
+export interface XraySetNetworkCaptureRequest {
+  enabled: boolean;
+}
+export interface XraySetNetworkCaptureResponse {
+  /** Effective state after the request (false if attach failed). */
+  capturing: boolean;
+  /** Reason capture could not be enabled (e.g. no guest webview). */
+  detail?: string;
+}
+
+export interface XraySaveSnapshotRequest {
+  snapshot: StateSnapshot;
+}
+
+export interface XrayGetSnapshotRequest {
+  checkpointId: string;
+}
+export interface XrayGetSnapshotResponse {
+  snapshot: StateSnapshot | null;
+}
+
+export interface XrayListSnapshotsResponse {
+  /** Checkpoint ids that have a persisted snapshot. */
+  checkpointIds: string[];
+}
+
+/** Pushed on {@link IpcChannels.networkEvent} as requests are observed. */
+export interface NetworkEventPayload {
+  entry: NetworkEntry;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Event payloads (push channels, main -> renderer)                          */
 /* -------------------------------------------------------------------------- */
@@ -392,6 +448,26 @@ export interface EaselApi {
     /** Subscribe to dev-server state / log updates. */
     onEvent(handler: (payload: DevServerStatePayload) => void): Unsubscribe;
   };
+
+  /** State X-Ray cockpit (issue #13). */
+  xray: {
+    /** Read the buffered network log + capture state. */
+    getNetworkLog(): Promise<IpcResult<XrayGetNetworkLogResponse>>;
+    /** Clear the buffered network log. */
+    clearNetworkLog(): Promise<IpcResult<void>>;
+    /** Enable/disable the CDP network tap on the guest webview. */
+    setNetworkCapture(
+      req: XraySetNetworkCaptureRequest,
+    ): Promise<IpcResult<XraySetNetworkCaptureResponse>>;
+    /** Persist a serialized state snapshot keyed by checkpoint id. */
+    saveSnapshot(req: XraySaveSnapshotRequest): Promise<IpcResult<void>>;
+    /** Read a persisted state snapshot for a checkpoint id. */
+    getSnapshot(req: XrayGetSnapshotRequest): Promise<IpcResult<XrayGetSnapshotResponse>>;
+    /** List checkpoint ids that have a persisted snapshot. */
+    listSnapshots(): Promise<IpcResult<XrayListSnapshotsResponse>>;
+    /** Subscribe to streamed network observations from the CDP tap. */
+    onNetworkEvent(handler: (payload: NetworkEventPayload) => void): Unsubscribe;
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -434,6 +510,19 @@ export interface IpcInvokeMap {
   [IpcChannels.devServerStart]: { request: void; response: IpcResult<void> };
   [IpcChannels.devServerStop]: { request: void; response: IpcResult<void> };
   [IpcChannels.devServerGet]: { request: void; response: IpcResult<DevServerStatePayload> };
+
+  [IpcChannels.xrayGetNetworkLog]: { request: void; response: IpcResult<XrayGetNetworkLogResponse> };
+  [IpcChannels.xrayClearNetworkLog]: { request: void; response: IpcResult<void> };
+  [IpcChannels.xraySetNetworkCapture]: {
+    request: XraySetNetworkCaptureRequest;
+    response: IpcResult<XraySetNetworkCaptureResponse>;
+  };
+  [IpcChannels.xraySaveSnapshot]: { request: XraySaveSnapshotRequest; response: IpcResult<void> };
+  [IpcChannels.xrayGetSnapshot]: {
+    request: XrayGetSnapshotRequest;
+    response: IpcResult<XrayGetSnapshotResponse>;
+  };
+  [IpcChannels.xrayListSnapshots]: { request: void; response: IpcResult<XrayListSnapshotsResponse> };
 }
 
 /**
@@ -448,6 +537,7 @@ export interface IpcEventMap {
   [IpcChannels.checkpointChanged]: CheckpointChangedPayload;
   [IpcChannels.previewStatus]: PreviewStatusPayload;
   [IpcChannels.devServerEvent]: DevServerStatePayload;
+  [IpcChannels.networkEvent]: NetworkEventPayload;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -528,6 +618,17 @@ export type InspectorMessage =
        * bundle); the agent then falls back to grepping {@link message}.
        */
       sources: SourceLocation[];
+    }
+  | {
+      /**
+       * The live runtime state of a picked element (State X-Ray, issue #13):
+       * framework props/hooks/state + highlighted computed styles, each row
+       * source-anchored. Emitted automatically when an element is picked and on
+       * demand for a `request-element-state` command. Distinct from
+       * `element-picked` (which carries only the static {@link ElementTarget}).
+       */
+      type: 'element-state';
+      snapshot: ElementStateSnapshot;
     };
 
 /** Commands the host renderer sends down into the guest inspector. */
@@ -563,4 +664,27 @@ export type InspectorCommand =
       threshold: number;
       /** Correlates the eventual `off-grid-result` reply. */
       scanId: string;
+    }
+  | {
+      /**
+       * State X-Ray: (re)read the live state of the element matching `selector`
+       * and reply with an `element-state` message. The guest compares the new
+       * value set against {@link previousKeys} to compute render-cause.
+       */
+      type: 'request-element-state';
+      selector: string;
+      /** Entry labels from the host's last snapshot, for render-cause diffing. */
+      previousKeys?: string[];
+    }
+  | {
+      /**
+       * State X-Ray "scrub": write a value live into the element's framework
+       * state at `path` for instant exploration (ephemeral until baked into a
+       * source edit). Best-effort; no-op if the path is not writable.
+       */
+      type: 'set-value';
+      selector: string;
+      /** Machine path from a {@link import('./xray').StateEntry}, e.g. `['props','count']`. */
+      path: string[];
+      value: string | number | boolean | null;
     };

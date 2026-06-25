@@ -26,6 +26,9 @@ import type {
   PreviewCaptureRequest,
   PreviewRequestImageRequest,
   PreviewOpenExternalRequest,
+  XraySetNetworkCaptureRequest,
+  XraySaveSnapshotRequest,
+  XrayGetSnapshotRequest,
 } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { ok, okVoid, fail } from '@shared/result';
@@ -58,6 +61,16 @@ import {
 import { getMainWindow, capturePreview } from '@main/window';
 import { createLogger } from '@main/logger';
 import { runEditStream } from '@main/editRunner';
+import {
+  setNetworkCapture,
+  getNetworkLog,
+  clearNetworkLog,
+} from '@main/networkTap';
+import {
+  saveSnapshot,
+  getSnapshot,
+  listSnapshots,
+} from '@main/stateSnapshots';
 
 const log = createLogger('ipc');
 
@@ -294,6 +307,38 @@ export function registerIpcHandlers(): void {
 
   handle(IpcChannels.devServerGet, () => {
     return ok(getDevServerState());
+  });
+
+  // ── xray.* (State X-Ray cockpit) ────────────────────────────────────────────
+
+  handle(IpcChannels.xrayGetNetworkLog, () => {
+    return ok(getNetworkLog());
+  });
+
+  handle(IpcChannels.xrayClearNetworkLog, () => {
+    clearNetworkLog();
+    return okVoid();
+  });
+
+  handle(IpcChannels.xraySetNetworkCapture, (req: XraySetNetworkCaptureRequest) => {
+    return ok(setNetworkCapture(req.enabled));
+  });
+
+  handle(IpcChannels.xraySaveSnapshot, (req: XraySaveSnapshotRequest) => {
+    if (!req.snapshot || !req.snapshot.checkpointId) {
+      return fail('snapshot with a checkpointId is required', 'validation');
+    }
+    saveSnapshot(req.snapshot);
+    return okVoid();
+  });
+
+  handle(IpcChannels.xrayGetSnapshot, (req: XrayGetSnapshotRequest) => {
+    if (!req.checkpointId) return fail('checkpointId is required', 'validation');
+    return ok({ snapshot: getSnapshot(req.checkpointId) });
+  });
+
+  handle(IpcChannels.xrayListSnapshots, () => {
+    return ok({ checkpointIds: listSnapshots() });
   });
 
   log.info('IPC handlers registered');

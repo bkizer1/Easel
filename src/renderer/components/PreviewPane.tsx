@@ -133,6 +133,11 @@ export function PreviewPane(): React.ReactElement {
   const setOffGridResult = useEaselStore((s) => s.setOffGridResult);
   const setScanningOffGrid = useEaselStore((s) => s.setScanningOffGrid);
 
+  // State X-Ray (issue #13): record live element state + drain guest commands.
+  const setElementState = useEaselStore((s) => s.setElementState);
+  const pendingInspectorCommand = useEaselStore((s) => s.pendingInspectorCommand);
+  const inspectorCommandNonce = useEaselStore((s) => s.inspectorCommandNonce);
+
   const webviewRef = useRef<WebviewElement | null>(null);
 
   // Address-bar text (synced to previewUrl, but editable while typing).
@@ -244,9 +249,15 @@ export function PreviewPane(): React.ReactElement {
             sources: msg.sources,
           });
           break;
+
+        case 'element-state':
+          // State X-Ray: live runtime state of the picked element. Feeds the
+          // cockpit's State tab; each row bridges into a precise source edit.
+          setElementState(msg.snapshot);
+          break;
       }
     },
-    [addTarget, setHover, addAnnotation, addPageError, scroll, setOffGridResult],
+    [addTarget, setHover, addAnnotation, addPageError, scroll, setOffGridResult, setElementState],
   );
 
   /* ---- Sync mode changes to the guest inspector ---- */
@@ -334,6 +345,12 @@ export function PreviewPane(): React.ReactElement {
       scanId: `scan-${offGridScanNonce}`,
     });
   }, [offGridScanNonce, webviewReady, gridConfig, sendCommand, setScanningOffGrid]);
+
+  /* ---- Drain a queued InspectorCommand into the guest (State X-Ray) ---- */
+  useEffect(() => {
+    if (inspectorCommandNonce === 0 || !webviewReady) return;
+    if (pendingInspectorCommand) sendCommand(pendingInspectorCommand);
+  }, [inspectorCommandNonce, pendingInspectorCommand, webviewReady, sendCommand]);
 
   /* ---- Reload the webview when a revert (or the toolbar) bumps the nonce ---- */
   useEffect(() => {
