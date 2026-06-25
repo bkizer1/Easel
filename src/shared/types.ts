@@ -542,6 +542,33 @@ export interface BackendConfigs {
   'local-openai': LocalOpenAiConfig;
 }
 
+/**
+ * A reusable, one-click instruction template ("macro"). Saved once, then
+ * invoked on any selected element via the chat-panel macro bar (or its hotkey).
+ *
+ * The {@link instructionTemplate} may contain `{element}` and `{text}`
+ * placeholders that are interpolated from the currently selected
+ * {@link ElementTarget} at invoke time (see `interpolateMacro` in
+ * `src/shared/macros.ts`) before being handed to the existing edit pipeline.
+ */
+export interface InstructionMacro {
+  /** Stable id for this macro within {@link AppSettings.macros}. */
+  id: string;
+  /** Human-readable label shown on the macro bar button. */
+  name: string;
+  /**
+   * The instruction phrasing to submit. May embed `{element}` (the target's
+   * selector/tag) and `{text}` (its text snippet); both are replaced at invoke
+   * time. A macro with no placeholders is submitted verbatim.
+   */
+  instructionTemplate: string;
+  /**
+   * Optional keyboard shortcut to invoke the macro (e.g. `mod+1`), captured as
+   * a normalized chord string. Empty/undefined means no hotkey is bound.
+   */
+  hotkey?: string;
+}
+
 /** Feature flags for capabilities that degrade gracefully. */
 export interface FeatureFlags {
   /** Enable Web Speech API voice input in the renderer. */
@@ -589,6 +616,11 @@ export interface AppSettings {
   featureFlags: FeatureFlags;
   /** UI theme preference. */
   theme: 'system' | 'light' | 'dark';
+  /**
+   * Saved instruction macros, in display order. Persisted to disk alongside the
+   * rest of {@link AppSettings} so they survive restarts.
+   */
+  macros: InstructionMacro[];
 }
 
 /* -------------------------------------------------------------------------- */

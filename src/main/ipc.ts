@@ -20,6 +20,7 @@ import type {
   SettingsUpdateRequest,
   SettingsSetSecretRequest,
   SettingsClearSecretRequest,
+  SettingsSetMacrosRequest,
   CheckpointRestoreRequest,
   PreviewReloadRequest,
   PreviewCaptureRequest,
@@ -200,6 +201,18 @@ export function registerIpcHandlers(): void {
     const { validateActiveBackend } = await import('@main/editRunner');
     const result = await validateActiveBackend();
     return ok(result);
+  });
+
+  handle(IpcChannels.settingsGetMacros, () => {
+    return ok({ macros: getSettings().macros });
+  });
+
+  handle(IpcChannels.settingsSetMacros, (req: SettingsSetMacrosRequest) => {
+    if (!Array.isArray(req.macros)) return fail('macros must be an array', 'validation');
+    // Reuse the existing settings persistence as-is (no separate macro store).
+    const settings = updateSettings({ macros: req.macros });
+    _broadcastSettingsChanged(settings);
+    return ok({ settings });
   });
 
   // ── checkpoint.* ──────────────────────────────────────────────────────────
