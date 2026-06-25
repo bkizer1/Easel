@@ -300,8 +300,20 @@ export type AgentEvent =
       requestId: string;
       /** Non-fatal warning surfaced mid-edit (e.g. "ambiguous match; picked best"). */
       message: string;
-      /** Optional stable code for programmatic handling. */
+      /**
+       * Optional stable code for programmatic handling. Guardrail policy
+       * (`.easel/policy.json`) writes surface here — both are NON-terminal, so
+       * the edit stream continues after them:
+       *  - `policy-confirm` — a `requireConfirm` path needs the user to approve
+       *    the write to {@link path}; the edit pauses until the renderer replies
+       *    via `edit.policyRespond`.
+       *  - `policy-blocked` — a write to {@link path} was denied (deny rule,
+       *    blast-radius cap, or the user declined). The agent's tool call fails,
+       *    no file changed, but the edit is NOT terminated.
+       */
       code?: string;
+      /** Project-relative path this warning concerns (`policy-confirm`/`policy-blocked`). */
+      path?: string;
     }
   | {
       type: 'diff';
@@ -364,6 +376,36 @@ export interface Checkpoint {
   createdAt: number;
   /** Files changed by the edit, for timeline display. */
   changedFiles: string[];
+}
+
+/**
+ * Structured "why this edit happened" metadata recorded onto a checkpoint commit
+ * as git trailers (see `src/main/provenance.ts`). Makes every Easel edit
+ * auditable via `git log`/`git blame`, and lets the data ride onto real commits
+ * when the Branch/PR feature promotes a checkpoint. Every field is optional so a
+ * checkpoint created outside the edit pipeline (e.g. the initial snapshot) can
+ * still be recorded.
+ */
+export interface CheckpointProvenance {
+  /** The user's natural-language instruction that drove the edit. */
+  instruction?: string;
+  /**
+   * DOM target descriptors the user pointed at (selector or tag), one per
+   * {@link ElementTarget}. Recorded as `Easel-Target` trailers.
+   */
+  targets?: string[];
+  /**
+   * Source locations the edit resolved to (e.g. `src/Hero.tsx:42`), derived from
+   * {@link ElementTarget.dataEaselSource} or the changed files. Recorded as
+   * `Easel-Source` trailers.
+   */
+  sources?: string[];
+  /** The resolved {@link ConfidenceLevel} for the edit, if known. */
+  confidence?: ConfidenceLevel;
+  /** The model id that produced the edit (e.g. `claude-opus-4-8`). */
+  model?: string;
+  /** The {@link AgentBackendId} that produced the edit. */
+  backend?: AgentBackendId;
 }
 
 /* -------------------------------------------------------------------------- */

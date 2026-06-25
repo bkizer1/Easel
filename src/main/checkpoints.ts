@@ -30,11 +30,12 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import crypto from 'node:crypto';
-import type { Checkpoint } from '@shared/types';
+import type { Checkpoint, CheckpointProvenance } from '@shared/types';
 import type { CheckpointChangedPayload } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { getMainWindow } from '@main/window';
 import { createLogger } from '@main/logger';
+import { formatProvenanceTrailers, parseProvenance } from '@main/provenance';
 
 const execFileAsync = promisify(execFile);
 const log = createLogger('checkpoints');
@@ -228,6 +229,40 @@ function _parseSubject(subject: string): {
   return { message, requestId, changedFiles };
 }
 
+/**
+ * Ensure the provenance has at least the changed files as `Easel-Source` entries.
+ * When the edit pipeline resolved explicit source locations (file:line) we keep
+ * those; otherwise we fall back to the files git observed as changed so the
+ * source trailer is never empty for a real edit.
+ */
+function _withSourceFallback(
+  provenance: CheckpointProvenance | undefined,
+  changedFiles: string[],
+): CheckpointProvenance {
+  const base = provenance ?? {};
+  if (base.sources && base.sources.length > 0) return base;
+  if (changedFiles.length === 0) return base;
+  return { ...base, sources: changedFiles };
+}
+
+/**
+ * Read and parse the {@link CheckpointProvenance} trailers from a checkpoint
+ * commit. Used by the Branch/PR feature to promote checkpoint metadata onto a
+ * real commit. Returns an empty object if the commit has no Easel trailers.
+ */
+export async function getCheckpointProvenance(
+  commitSha: string,
+): Promise<CheckpointProvenance> {
+  const root = _requireRoot();
+  try {
+    const body = await git(root, 'log', '-1', '--format=%B', commitSha);
+    return parseProvenance(body);
+  } catch (err) {
+    log.warn('Could not read checkpoint provenance', { commitSha, err: String(err) });
+    return {};
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Core checkpoint operations                                                 */
 /* -------------------------------------------------------------------------- */
@@ -247,6 +282,7 @@ function _parseSubject(subject: string): {
 export async function createCheckpoint(
   message: string,
   requestId?: string,
+  provenance?: CheckpointProvenance,
 ): Promise<Checkpoint> {
   const root = _requireRoot();
 
@@ -265,8 +301,13 @@ export async function createCheckpoint(
   const treeHash = await git(root, 'write-tree');
 
   // Build the commit. Parent is the current EASEL_REF if it exists.
+  // The subject carries the legacy requestId/files encoding (still parsed by
+  // _loadTimelineFromGit); structured provenance rides in a trailing trailer
+  // paragraph appended as a second `-m` (git separates them with a blank line).
   const parentSha = await resolveRefFull(root, EASEL_REF);
   const commitArgs = ['commit-tree', treeHash, '-m', _encodeSubject(message, requestId, changedFiles)];
+  const trailers = formatProvenanceTrailers(_withSourceFallback(provenance, changedFiles));
+  if (trailers) commitArgs.push('-m', trailers);
   if (parentSha) commitArgs.push('-p', parentSha);
   const commitSha = await git(root, ...commitArgs);
 

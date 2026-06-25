@@ -67,6 +67,19 @@ export interface PageLog {
   ts: number;
 }
 
+/**
+ * A pending guardrail approval: the agent tried to write a `requireConfirm`
+ * path and the edit is paused until the user clicks allow-once / deny. Surfaced
+ * by a `policy-confirm` warning event; resolved via `respondPolicyConfirm`.
+ */
+export interface PendingPolicyConfirm {
+  requestId: string;
+  /** Project-relative path awaiting approval. */
+  path: string;
+  /** Human-readable reason from the policy (which rule matched). */
+  reason: string;
+}
+
 /** Responsive viewport presets for the preview surface. */
 export interface ViewportPreset {
   label: string;
@@ -131,6 +144,8 @@ export interface EaselState {
   lastError: string | null;
   /** True when the agent failed to authenticate — drives the auth banner. */
   needsAuth: boolean;
+  /** Guardrail writes awaiting the user's allow-once / deny decision. */
+  pendingPolicyConfirms: PendingPolicyConfirm[];
 }
 
 /* -------------------------------------------------------------------------- */
@@ -199,6 +214,13 @@ export interface EaselActions {
 
   /** Cancel the currently in-flight edit (no-op if idle). */
   cancelEdit(): Promise<void>;
+
+  /**
+   * Answer a guardrail `requireConfirm` prompt for a paused write. `allow`
+   * lets the write through (once); otherwise it is denied. Clears the pending
+   * entry either way.
+   */
+  respondPolicyConfirm(requestId: string, path: string, allow: boolean): Promise<void>;
 
   /**
    * Reducer for incoming AgentEvents (called from the edit.onEvent subscription).
@@ -276,6 +298,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   settingsOpen: false,
   lastError: null,
   needsAuth: false,
+  pendingPolicyConfirms: [],
 
   /* ---- Init / subscriptions ------------------------------------------------ */
 
@@ -379,6 +402,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       currentCheckpointId: undefined,
       mode: 'idle',
       lastError: null,
+      pendingPolicyConfirms: [],
     });
   },
 
@@ -574,6 +598,23 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     // event arrives through applyAgentEvent, keeping state transitions atomic.
   },
 
+  /* ---- Guardrail confirm --------------------------------------------------- */
+
+  async respondPolicyConfirm(requestId, path, allow) {
+    // Optimistically clear the prompt; main resolves the paused write.
+    set((s) => ({
+      pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
+        (p) => !(p.requestId === requestId && p.path === path),
+      ),
+    }));
+    const result = await easel.edit.policyRespond({
+      requestId,
+      path,
+      decision: allow ? 'allow-once' : 'deny',
+    });
+    if (!result.ok) set({ lastError: result.error });
+  },
+
   /* ---- AgentEvent reducer -------------------------------------------------- */
 
   applyAgentEvent(e) {
@@ -646,6 +687,49 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
       case 'warning': {
         if (e.requestId !== activeRequestId) return;
+
+        // Guardrail: a requireConfirm path is paused awaiting the user's
+        // allow-once / deny decision. Queue it for the PolicyPrompt UI.
+        if (e.code === 'policy-confirm' && e.path) {
+          set((s) => {
+            if (
+              s.pendingPolicyConfirms.some(
+                (p) => p.requestId === e.requestId && p.path === e.path,
+              )
+            ) {
+              return {}; // already queued (defensive against duplicate events)
+            }
+            const pending: PendingPolicyConfirm = {
+              requestId: e.requestId,
+              path: e.path as string,
+              reason: e.message,
+            };
+            return { pendingPolicyConfirms: [...s.pendingPolicyConfirms, pending] };
+          });
+          break;
+        }
+
+        // Guardrail: a write was blocked outright (deny rule, blast-radius cap,
+        // or the user denied a confirm). Clear any matching pending prompt and
+        // note it in the transcript.
+        if (e.code === 'policy-blocked') {
+          set((s) => {
+            const blockedMsg: ChatMessage = {
+              id: genId(),
+              role: 'system',
+              content: `Blocked by policy: ${e.message}`,
+              createdAt: Date.now(),
+              requestId: e.requestId,
+            };
+            return {
+              chat: [...s.chat, blockedMsg],
+              pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
+                (p) => !(p.requestId === e.requestId && p.path === e.path),
+              ),
+            };
+          });
+          break;
+        }
 
         set((s) => {
           const warnMsg: ChatMessage = {
@@ -730,6 +814,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
               liveDiffs: e.diffs,
               streaming: false,
               activeRequestId: null,
+              pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
+                (p) => p.requestId !== e.requestId,
+              ),
             };
           }
           // No assistant message yet (backend emitted nothing before done).
@@ -746,6 +833,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             liveDiffs: e.diffs,
             streaming: false,
             activeRequestId: null,
+            pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
+              (p) => p.requestId !== e.requestId,
+            ),
           };
         });
         break;
@@ -779,6 +869,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             // Auth failures surface via the banner, not the error toast.
             lastError: isCancelled || isAuth ? null : e.message,
             needsAuth: isAuth ? true : s.needsAuth,
+            pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
+              (p) => p.requestId !== e.requestId,
+            ),
           };
         });
 

@@ -101,6 +101,9 @@ const api: EaselApi = {
     cancel(req) {
       return ipcRenderer.invoke(IpcChannels.editCancel, req);
     },
+    policyRespond(req) {
+      return ipcRenderer.invoke(IpcChannels.editPolicyRespond, req);
+    },
     onEvent(handler) {
       return subscribe(IpcChannels.editEvent, handler);
     },
