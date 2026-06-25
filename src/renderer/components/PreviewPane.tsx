@@ -115,6 +115,7 @@ export function PreviewPane(): React.ReactElement {
   const devToolsNonce = useEaselStore((s) => s.devToolsNonce);
   const viewportWidth = useEaselStore((s) => s.viewportWidth);
   const addPageLog = useEaselStore((s) => s.addPageLog);
+  const addPageError = useEaselStore((s) => s.addPageError);
   const mode = useEaselStore((s) => s.mode);
 
   const openProject = useEaselStore((s) => s.openProject);
@@ -221,9 +222,19 @@ export function PreviewPane(): React.ReactElement {
         case 'viewport-changed':
           setScroll({ x: msg.scrollX, y: msg.scrollY });
           break;
+
+        case 'page-error':
+          // Uncaught runtime error from the guest → record it as a fixable
+          // page log so the Page Console can offer a one-click "Fix" button.
+          addPageError({
+            message: msg.message,
+            stack: msg.stack,
+            sources: msg.sources,
+          });
+          break;
       }
     },
-    [addTarget, setHover, addAnnotation, scroll],
+    [addTarget, setHover, addAnnotation, addPageError, scroll],
   );
 
   /* ---- Sync mode changes to the guest inspector ---- */
