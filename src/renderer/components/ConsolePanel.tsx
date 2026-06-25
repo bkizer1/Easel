@@ -7,12 +7,46 @@
  */
 
 import React from 'react';
-import { Terminal, AlertTriangle, AlertCircle, Trash2 } from 'lucide-react';
+import {
+  Terminal,
+  AlertTriangle,
+  AlertCircle,
+  Trash2,
+  Wrench,
+  Loader2,
+  CheckCircle2,
+} from 'lucide-react';
 import { useEaselStore } from '../store';
+import type { PageLog } from '../store';
+
+/**
+ * Compact resolution badge shown after a "Fix this" edit finishes: a green
+ * check when no equivalent error re-fired, or an amber note when it did.
+ */
+function FixStatus({ state }: { state: NonNullable<PageLog['error']>['fixState'] }): React.ReactElement | null {
+  if (state === 'resolved') {
+    return (
+      <span className="flex items-center gap-1 text-[10.5px] font-medium text-emerald-400">
+        <CheckCircle2 className="h-3 w-3" /> Resolved
+      </span>
+    );
+  }
+  if (state === 'still-erroring') {
+    return (
+      <span className="flex items-center gap-1 text-[10.5px] font-medium text-amber-400">
+        <AlertTriangle className="h-3 w-3" /> Still erroring
+      </span>
+    );
+  }
+  return null;
+}
 
 export function ConsolePanel(): React.ReactElement {
   const pageLogs = useEaselStore((s) => s.pageLogs);
   const clearPageLogs = useEaselStore((s) => s.clearPageLogs);
+  const fixPageError = useEaselStore((s) => s.fixPageError);
+  const streaming = useEaselStore((s) => s.streaming);
+  const hasProject = useEaselStore((s) => s.project !== null);
 
   // Newest first.
   const items = [...pageLogs].reverse();
@@ -52,6 +86,35 @@ export function ConsolePanel(): React.ReactElement {
                   {l.message}
                 </span>
                 {l.source && <span className="mt-0.5 block truncate text-[10.5px] text-gray-600">{l.source}</span>}
+
+                {/* Uncaught runtime errors carry structured source info → offer a
+                    one-click AI fix targeting the throwing file. */}
+                {l.error && (
+                  <span className="mt-1.5 flex items-center gap-2">
+                    {l.error.fixState === 'fixing' ? (
+                      <span className="flex items-center gap-1 text-[10.5px] font-medium text-brand-400">
+                        <Loader2 className="h-3 w-3 animate-spin" /> Fixing…
+                      </span>
+                    ) : l.error.fixState === 'resolved' || l.error.fixState === 'still-erroring' ? (
+                      <FixStatus state={l.error.fixState} />
+                    ) : (
+                      <button
+                        onClick={() => void fixPageError(l.id)}
+                        disabled={streaming || !hasProject}
+                        title={
+                          !hasProject
+                            ? 'Open a project folder so Claude can edit its source'
+                            : streaming
+                              ? 'An edit is already running'
+                              : 'Let Claude fix this error'
+                        }
+                        className="flex items-center gap-1 rounded-md border border-brand-500/40 bg-brand-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-brand-300 transition-colors hover:bg-brand-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Wrench className="h-3 w-3" /> Fix
+                      </button>
+                    )}
+                  </span>
+                )}
               </span>
             </li>
           ))}

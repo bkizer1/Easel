@@ -22,6 +22,7 @@ import type {
   ImageRequest,
   ImageResult,
   ProjectConfig,
+  SourceLocation,
 } from './types';
 
 /* -------------------------------------------------------------------------- */
@@ -465,6 +466,31 @@ export type InspectorMessage =
       scrollY: number;
       width: number;
       height: number;
+    }
+  | {
+      /**
+       * An UNCAUGHT runtime error (or unhandled promise rejection) thrown by the
+       * previewed page. Surfaced in the Page Console with a one-click "Fix"
+       * affordance that dispatches an AI edit at {@link sources}. Emitted by the
+       * guest's `window` `error` / `unhandledrejection` listeners — distinct from
+       * the host `console-message` path, which only carries an unstructured string.
+       */
+      type: 'page-error';
+      /** The error's `message` (e.g. `features is not defined`). */
+      message: string;
+      /**
+       * The sourcemapped stack trace as a single string, when the runtime
+       * provided one (dev builds symbolicate to original source). Used verbatim
+       * in the edit instruction so the agent can locate the throwing call.
+       */
+      stack?: string;
+      /**
+       * Project-relative source locations parsed from the top stack frames,
+       * best-guess first. Drives the edit's {@link EditRequest.targets}. Empty
+       * when no frame could be mapped to a project file (e.g. minified prod
+       * bundle); the agent then falls back to grepping {@link message}.
+       */
+      sources: SourceLocation[];
     };
 
 /** Commands the host renderer sends down into the guest inspector. */
