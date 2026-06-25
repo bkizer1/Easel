@@ -398,7 +398,13 @@ export async function evaluateSdkWrite(
   const rawPath = String(toolInput['file_path'] ?? toolInput['path'] ?? '');
   if (!rawPath) return null;
 
-  const rel = path.isAbsolute(rawPath) ? path.relative(projectRoot, rawPath) : rawPath;
+  // Normalize to forward-slash, project-relative form so the path handed to the
+  // gate (and shown in deny messages) is consistent across platforms — on
+  // Windows path.relative() yields backslashes.
+  const rel = (path.isAbsolute(rawPath) ? path.relative(projectRoot, rawPath) : rawPath).replace(
+    /\\/g,
+    '/',
+  );
   const verdict = await checkWrite(rel);
   if (verdict.allow) return null;
 
