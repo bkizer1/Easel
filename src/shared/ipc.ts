@@ -21,10 +21,12 @@ import type {
   ElementTarget,
   ImageRequest,
   ImageResult,
+  OffGridElement,
   InstructionMacro,
   ProjectConfig,
   SourceLocation,
 } from './types';
+import type { GridConfig } from './grid';
 
 /* -------------------------------------------------------------------------- */
 /*  Channel names                                                              */
@@ -484,6 +486,17 @@ export type InspectorMessage =
       targets: ElementTarget[];
     }
   | {
+      /**
+       * Reply to `scan-off-grid`: elements whose edges miss the active grid by
+       * more than the requested threshold, worst offender first. Display data is
+       * computed entirely guest-side (no agent round-trip).
+       */
+      type: 'off-grid-result';
+      /** Echoes the {@link InspectorCommand} `scan-off-grid` `scanId`. */
+      scanId: string;
+      offenders: OffGridElement[];
+    }
+  | {
       type: 'viewport-changed';
       /** New scroll offset / size so the overlay can stay aligned. */
       scrollX: number;
@@ -529,4 +542,25 @@ export type InspectorCommand =
       box: BoundingBox;
       /** Correlates the eventual `region-resolved` reply. */
       queryId: string;
+    }
+  | {
+      /**
+       * Toggle the alignment-grid overlay drawn guest-side. Pass a
+       * {@link GridConfig} to show/update it, or `null` to remove it. Pure
+       * display — no agent round-trip (issue #5 guardrail).
+       */
+      type: 'set-grid';
+      grid: GridConfig | null;
+    }
+  | {
+      /**
+       * Run the off-grid scan: walk visible elements, flag any whose edges miss
+       * `grid` by more than `threshold` px, and reply with an `off-grid-result`.
+       */
+      type: 'scan-off-grid';
+      grid: GridConfig;
+      /** Maximum tolerated edge-to-grid distance, in px. */
+      threshold: number;
+      /** Correlates the eventual `off-grid-result` reply. */
+      scanId: string;
     };

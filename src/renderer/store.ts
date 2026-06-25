@@ -25,11 +25,13 @@ import type {
   ChatMessage,
   ElementTarget,
   FileDiff,
+  OffGridElement,
   InstructionMacro,
   ProjectConfig,
   SourceLocation,
 } from '@shared/types';
 import type { DevServerStatePayload, PreviewStatusPayload } from '@shared/ipc';
+import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
 
 /* -------------------------------------------------------------------------- */
@@ -186,6 +188,18 @@ export interface EaselState {
   needsAuth: boolean;
   /** Guardrail writes awaiting the user's allow-once / deny decision. */
   pendingPolicyConfirms: PendingPolicyConfirm[];
+
+  /* ---- Alignment grid (issue #5) ---------------------------------------- */
+  /** Active alignment-grid configuration (column + baseline). */
+  gridConfig: GridConfig;
+  /** Whether the alignment-grid overlay is shown on the preview. */
+  gridVisible: boolean;
+  /** True while an off-grid scan is in flight. */
+  scanningOffGrid: boolean;
+  /** Elements the last scan flagged as misaligned, worst offender first. */
+  offGridElements: OffGridElement[];
+  /** Bumped to ask PreviewPane to run an off-grid scan in the guest. */
+  offGridScanNonce: number;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -334,6 +348,29 @@ export interface EaselActions {
   clearError(): void;
   /** Dismiss the "not authenticated" banner. */
   dismissAuthNotice(): void;
+
+  /* ---- Alignment grid (issue #5) ---------------------------------------- */
+  /**
+   * Show/hide the alignment-grid overlay. Pure display: PreviewPane forwards the
+   * change to the guest inspector via `set-grid` (no agent round-trip). Hiding
+   * the grid also clears any off-grid scan results.
+   */
+  setGridVisible(visible: boolean): void;
+  /** Store the off-grid scan result relayed from the guest inspector. */
+  setOffGridResult(offenders: OffGridElement[]): void;
+  /** Mark an off-grid scan as in flight (cleared when results arrive). */
+  setScanningOffGrid(scanning: boolean): void;
+  /**
+   * Kick off an off-grid scan: ensures the grid is shown, marks scanning, and
+   * bumps a nonce that PreviewPane observes to send `scan-off-grid` to the guest.
+   */
+  scanOffGrid(): void;
+  /**
+   * Build a single {@link EditRequest} asking the agent to align the given
+   * off-grid elements to the active grid, and submit it through the existing
+   * edit pipeline (one edit → one checkpoint). Reuses {@link submitEdit}.
+   */
+  snapToGrid(ids: string[]): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -372,6 +409,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   lastError: null,
   needsAuth: false,
   pendingPolicyConfirms: [],
+  gridConfig: DEFAULT_GRID,
+  gridVisible: false,
+  scanningOffGrid: false,
+  offGridElements: [],
+  offGridScanNonce: 0,
 
   /* ---- Init / subscriptions ------------------------------------------------ */
 
@@ -476,6 +518,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       mode: 'idle',
       lastError: null,
       pendingPolicyConfirms: [],
+      gridVisible: false,
+      offGridElements: [],
+      scanningOffGrid: false,
     });
   },
 
@@ -1273,5 +1318,68 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   dismissAuthNotice() {
     set({ needsAuth: false });
+  },
+
+  /* ---- Alignment grid (issue #5) ------------------------------------------ */
+
+  setGridVisible(visible) {
+    // Hiding the grid clears stale scan results (they belong to a shown grid).
+    set(visible ? { gridVisible: true } : { gridVisible: false, offGridElements: [], scanningOffGrid: false });
+  },
+
+  setOffGridResult(offenders) {
+    set({ offGridElements: offenders, scanningOffGrid: false });
+  },
+
+  setScanningOffGrid(scanning) {
+    set({ scanningOffGrid: scanning });
+  },
+
+  scanOffGrid() {
+    // Showing the grid first keeps the overlay and the scan in sync visually.
+    set((s) => ({
+      gridVisible: true,
+      scanningOffGrid: true,
+      offGridScanNonce: s.offGridScanNonce + 1,
+    }));
+  },
+
+  async snapToGrid(ids) {
+    const { offGridElements, gridConfig } = get();
+    const selected = offGridElements.filter((o) => ids.includes(o.id));
+    if (selected.length === 0) {
+      set({ lastError: 'No off-grid elements selected to snap.' });
+      return;
+    }
+
+    // Reuse the existing batch-edit path: turn each off-grid offender into an
+    // ElementTarget (so the agent gets selector + data-easel-source for source
+    // resolution), seed the draft, and submit ONE EditRequest → one checkpoint.
+    const targets: ElementTarget[] = selected.map((o) => ({
+      id: o.id,
+      selector: o.selector,
+      tagName: o.tagName,
+      dataEaselSource: o.dataEaselSource,
+      boundingBox: o.boundingBox,
+      textSnippet: '',
+      attributes: {},
+      pluginPresent: o.dataEaselSource !== undefined,
+      confidence: o.dataEaselSource !== undefined ? 'high' : 'medium',
+    }));
+    set({ targets });
+
+    const { columns, gutter, margin, baseline } = gridConfig;
+    const instruction =
+      `Align the ${selected.length === 1 ? 'selected element' : `${selected.length} selected elements`} ` +
+      `to the layout grid (${columns} columns, ${gutter}px gutter, ${margin}px outer margin) ` +
+      `and snap vertical spacing to an ${baseline}px baseline. Adjust spacing/sizing in the source ` +
+      `(padding, margin, width) so each element's edges land on the nearest grid line; ` +
+      `do not change copy or visual styling beyond alignment.`;
+
+    await get().submitEdit(instruction);
+
+    // The scan reflects the pre-snap layout; clear it so the user re-scans after
+    // the edit re-renders.
+    set({ offGridElements: [] });
   },
 }));
