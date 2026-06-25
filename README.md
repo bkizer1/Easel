@@ -68,8 +68,9 @@ Easel collapses that loop into one window:
 - **🎨 Visual authoring for developers** — element-select for precision, freeform
   markup (rectangle, ellipse, arrow, freehand, pin) for "this area, roughly here."
 - **↩️ Always undoable** — every accepted edit is a git checkpoint; roll back with a click.
-- **🧩 Works with your stack** — any project with a dev server: Vite, Next.js, Remix,
-  SvelteKit, Astro, plain HTML — anything on `localhost`.
+- **🧩 Works with your stack** — point it at any dev server on `localhost` (Vite,
+  Next.js, Remix, SvelteKit, Astro, plain HTML). Auto-start + framework detection
+  cover Vite, Next, Vue, and Svelte today; anything else works by typing its URL.
 - **🔌 Bring your own model** — Claude via your subscription (default), Anthropic API,
   AWS Bedrock, Google Vertex, or a **local model** (Ollama / LM Studio).
 - **🔓 Open source (AGPL-3.0)** — self-host it, fork it, audit it. No telemetry.
@@ -127,6 +128,9 @@ Grab the latest installer from the [**Releases**](https://github.com/bkizer1/Eas
 > the first time. **macOS:** right-click the app → **Open** → **Open**; if it's still
 > blocked, run `xattr -dr com.apple.quarantine /Applications/Easel.app`.
 > **Windows:** **More info → Run anyway** on the SmartScreen prompt.
+>
+> Updates are **manual** for now — there's no in-app auto-updater yet, so grab new
+> versions from the Releases page.
 
 ### …or run from source
 
@@ -230,7 +234,7 @@ the renderer or the logs.
 - **Select mode** — click an element, see its source, edit by instruction; multi-select supported.
 - **Markup mode** — rectangle / ellipse / arrow / freehand / pin, in any color.
 - **Editable annotations** — drag to move, corner-handles to resize, hover-× to remove.
-- **Auto-started dev server** — open a project and Easel detects the framework, picks the dev port, and runs your dev command for you (or uses a server you already have).
+- **Auto-started dev server** — open a project and Easel detects the framework (Vite, Next, Vue, Svelte), picks the dev port, and runs your dev command for you (or uses a server you already have).
 - **Revert anything** — a visual **History** timeline of git checkpoints (including the original pre-Easel state); jump back to any point and the preview re-renders. ⌘Z / ⌘⇧Z too.
 - **Page console** — warnings and errors from the previewed page surface in Easel with an error badge, so a blank screen always has an explanation.
 - **Responsive viewport** — Desktop / Tablet / Mobile presets to check layouts.

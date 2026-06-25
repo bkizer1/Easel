@@ -103,9 +103,9 @@ Before each release, we:
 This is Anthropic's official, proprietary SDK for building agentic applications. It
 powers Easel's default backend (authentication, tool-use, extended thinking).
 
-**It is NOT bundled or redistributed in Easel's installers.** It is an
-`optionalDependency`, explicitly excluded from packaged builds (see `build.files` in
-`package.json`), and resolved at runtime from the user's own Claude Code install —
+**It is NOT bundled or redistributed in Easel's installers.** It is a
+`devDependency` (electron-builder never bundles those), and resolved at runtime
+from the user's own Claude Code install —
 locally when running Easel from source, or from a global
 `npm install -g @anthropic-ai/claude-agent-sdk` for downloaded builds. If it isn't
 installed, Easel surfaces a clear prompt to install it, and the API-key / local-model

@@ -89,7 +89,12 @@ export async function capturePreview(box?: BoundingBox): Promise<string> {
  *  - The embedded <webview> content is governed by its own CSP from the
  *    dev-server, not by this policy (webview frames are separate origins).
  */
-function installCsp(): void {
+function installCsp(isDev: boolean): void {
+  // Vite HMR + React Fast Refresh need 'unsafe-eval' (and the HMR websocket) in
+  // dev; the packaged renderer is a static bundle that never evals, so we drop it.
+  const scriptSrc = isDev
+    ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    : "script-src 'self' 'unsafe-inline'";
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
@@ -97,13 +102,16 @@ function installCsp(): void {
         'Content-Security-Policy': [
           [
             "default-src 'self'",
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+            scriptSrc,
             "style-src 'self' 'unsafe-inline'",
             "img-src 'self' data: blob:",
             "font-src 'self' data:",
             "connect-src 'self' ws: wss: http: https:",
             "media-src 'self' blob:",
             "worker-src blob:",
+            "object-src 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
           ].join('; '),
         ],
       },
@@ -137,7 +145,7 @@ export function createMainWindow(): BrowserWindow {
     return mainWindow;
   }
 
-  installCsp();
+  installCsp(Boolean(process.env['ELECTRON_RENDERER_URL']));
 
   const preload = preloadPath();
   const inspectorPreload = inspectorPreloadPath();
@@ -220,6 +228,14 @@ export function createMainWindow(): BrowserWindow {
       log.warn('Blocked renderer navigation', { url });
       evt.preventDefault();
     }
+  });
+
+  // Authoritatively enforce <webview> sandboxing from the trusted main process,
+  // regardless of the renderer-side `webpreferences` attribute (defense in depth).
+  win.webContents.on('will-attach-webview', (_evt, webPreferences) => {
+    webPreferences.nodeIntegration = false;
+    webPreferences.contextIsolation = true;
+    webPreferences.sandbox = true;
   });
 
   mainWindow = win;

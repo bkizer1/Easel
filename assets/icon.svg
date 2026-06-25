@@ -1,0 +1,31 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#43e3c1"/>
+      <stop offset="0.55" stop-color="#1fc1a0"/>
+      <stop offset="1" stop-color="#0c9078"/>
+    </linearGradient>
+    <linearGradient id="swoosh" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#bff7ec"/>
+      <stop offset="1" stop-color="#5eead4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- background squircle -->
+  <rect x="64" y="64" width="896" height="896" rx="212" fill="url(#bg)"/>
+
+  <!-- easel legs + tray -->
+  <g fill="none" stroke="#ffffff" stroke-width="42" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 246 L298 814"/>
+    <path d="M512 246 L726 814"/>
+    <path d="M512 246 L560 824"/>
+    <path d="M352 606 L672 606"/>
+  </g>
+
+  <!-- canvas board -->
+  <rect x="370" y="298" width="284" height="300" rx="30" fill="#06352c"/>
+
+  <!-- paint swoosh accent -->
+  <path d="M422 522 Q470 380 612 438" fill="none" stroke="url(#swoosh)" stroke-width="32" stroke-linecap="round"/>
+  <circle cx="612" cy="438" r="9" fill="#bff7ec"/>
+</svg>

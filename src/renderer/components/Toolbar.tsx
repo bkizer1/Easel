@@ -40,8 +40,18 @@ const IS_MAC =
 function Wordmark(): React.ReactElement {
   return (
     <div className="flex items-center gap-2 pr-1">
-      <span className="grid place-items-center w-[19px] h-[19px] rounded-[6px] bg-gradient-to-br from-brand-300 via-brand-400 to-brand-600 shadow-[0_0_14px_-3px_rgba(45,212,191,0.7)]">
-        <span className="w-[7px] h-[7px] rounded-[2px] bg-ink-950/85" />
+      <span className="grid place-items-center w-[21px] h-[21px] rounded-[7px] bg-gradient-to-br from-brand-300 via-brand-400 to-brand-600 shadow-[0_0_14px_-3px_rgba(52,211,176,0.75)]">
+        {/* Easel mark — matches the app icon */}
+        <svg viewBox="0 0 24 24" className="w-[15px] h-[15px]" aria-hidden="true">
+          <g stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" fill="none">
+            <path d="M12 3.9 L6.7 20.2" />
+            <path d="M12 3.9 L17.3 20.2" />
+            <path d="M12 3.9 L13.3 20.4" />
+            <path d="M7.8 13.7 L16.2 13.7" />
+          </g>
+          <rect x="8.1" y="6" width="7.8" height="7.9" rx="1.2" fill="#06352c" />
+          <path d="M9.7 11.8 Q10.7 8.3 14.3 9.6" stroke="#9af0df" strokeWidth="1.4" strokeLinecap="round" fill="none" />
+        </svg>
       </span>
       <span className="font-display text-[15px] font-semibold tracking-tight text-gray-100 leading-none">
         Easel

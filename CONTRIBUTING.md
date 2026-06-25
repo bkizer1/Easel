@@ -8,8 +8,8 @@ Thank you for your interest in contributing to Easel! This guide covers developm
 
 ### Prerequisites
 
-- **Node.js 18+** (verify: `node --version`)
-- **npm 9+** (verify: `npm --version`)
+- **Node.js 20+** (verify: `node --version`)
+- **npm 10+** (verify: `npm --version`)
 - **Git** (verify: `git --version`)
 - A code editor (VS Code recommended; includes TypeScript, ESLint plugins)
 

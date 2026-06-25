@@ -1,6 +1,22 @@
 import { resolve } from 'path';
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
+import type { Plugin } from 'vite';
+
+/**
+ * Strip dev-only CSP relaxations from the PACKAGED renderer. 'unsafe-eval' and
+ * the HMR websocket are only needed for Vite dev; the production bundle never
+ * evals, so we remove them from the built index.html's meta CSP.
+ */
+function prodCspPlugin(): Plugin {
+  return {
+    name: 'easel-prod-csp',
+    transformIndexHtml(html, ctx) {
+      if (ctx.server) return html; // dev serve — keep the relaxed CSP
+      return html.replace(" 'unsafe-eval'", '').replace('ws: wss: ', '');
+    },
+  };
+}
 
 /**
  * Electron + Vite build configuration for Easel.
@@ -21,9 +37,9 @@ const sharedAlias = { '@shared': resolve(__dirname, 'src/shared') };
 
 export default defineConfig({
   main: {
-    // The Claude Agent SDK is an optionalDependency that is NOT bundled into
-    // installers (it's proprietary; resolved at runtime from the user's own
-    // Claude Code). Force-externalize it so it's never inlined into out/main.
+    // The Claude Agent SDK is a devDependency — NOT bundled into installers
+    // (it's proprietary; resolved at runtime from the user's own Claude Code).
+    // Force-externalize it so it's never inlined into out/main either.
     plugins: [externalizeDepsPlugin({ include: ['@anthropic-ai/claude-agent-sdk'] })],
     resolve: { alias: { ...sharedAlias, '@main': resolve(__dirname, 'src/main') } },
     build: {
@@ -54,7 +70,7 @@ export default defineConfig({
 
   renderer: {
     root: 'src/renderer',
-    plugins: [react()],
+    plugins: [react(), prodCspPlugin()],
     resolve: { alias: { ...sharedAlias, '@renderer': resolve(__dirname, 'src/renderer') } },
     build: {
       rollupOptions: {

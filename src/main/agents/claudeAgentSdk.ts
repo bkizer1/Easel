@@ -25,6 +25,7 @@
  */
 
 import { mkdir, writeFile, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -53,36 +54,83 @@ const CLAUDE_NOT_INSTALLED =
 
 type ClaudeQuery = (args: { prompt: string; options?: Record<string, unknown> }) => AsyncIterable<unknown>;
 
-/** Best-effort lookup of the global npm root (requires npm on PATH). */
-function globalNodeModules(): Promise<string | null> {
+/** Run a command and return its first stdout line, or null on failure. */
+function firstLine(cmd: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('npm', ['root', '-g'], { timeout: 5000 }, (err, stdout) => {
-      resolve(err ? null : stdout.toString().trim() || null);
+    execFile(cmd, args, { timeout: 5000 }, (err, stdout) => {
+      if (err) return resolve(null);
+      const line = stdout.toString().split(/\r?\n/)[0]?.trim();
+      resolve(line || null);
     });
   });
+}
+
+/** Locate the user's `claude` CLI — PATH first, then the usual install dirs. */
+async function whichClaude(): Promise<string | null> {
+  const viaPath = await firstLine(process.platform === 'win32' ? 'where' : 'which', ['claude']);
+  if (viaPath && existsSync(viaPath)) return viaPath;
+  const home = os.homedir();
+  const guesses = [
+    path.join(home, '.local/bin/claude'),
+    '/usr/local/bin/claude',
+    '/opt/homebrew/bin/claude',
+    path.join(home, '.claude/local/claude'),
+  ];
+  return guesses.find((g) => existsSync(g)) ?? null;
+}
+
+/**
+ * Candidate global `node_modules` roots to search for the SDK. A GUI-launched
+ * app often has a stripped PATH, so we go well beyond `npm root -g`: common
+ * global prefixes and the dir tree around the user's `claude` binary (covers
+ * nvm/fnm/volta/Homebrew installs).
+ */
+async function candidateGlobalRoots(): Promise<string[]> {
+  const home = os.homedir();
+  const roots: string[] = [];
+
+  const npmRoot = await firstLine('npm', ['root', '-g']);
+  if (npmRoot) roots.push(npmRoot);
+
+  roots.push(
+    '/usr/local/lib/node_modules',
+    '/opt/homebrew/lib/node_modules',
+    path.join(home, '.npm-global/lib/node_modules'),
+    path.join(home, '.local/lib/node_modules'),
+    path.join(home, '.config/yarn/global/node_modules'),
+    path.join(home, '.bun/install/global/node_modules'),
+  );
+
+  const claudeBin = await whichClaude();
+  if (claudeBin) {
+    // <prefix>/bin/claude → look under <prefix>/lib/node_modules and <prefix>/node_modules.
+    const prefix = path.dirname(path.dirname(claudeBin));
+    roots.push(path.join(prefix, 'lib/node_modules'), path.join(prefix, 'node_modules'));
+  }
+
+  return [...new Set(roots)].filter((r) => existsSync(r));
 }
 
 /**
  * Resolve the Claude Agent SDK without bundling it. Tries normal module
  * resolution first (present when running Easel from source / `npm install`),
- * then the user's GLOBAL npm install (for packaged builds). Returns null when
- * Claude Code isn't installed anywhere we can find it.
+ * then the user's GLOBAL install across common locations (for packaged builds).
+ * Returns null when Claude Code isn't installed anywhere we can find it.
  */
 async function resolveClaudeSdk(): Promise<{ query: ClaudeQuery } | null> {
   try {
     return (await import(SDK_PKG)) as unknown as { query: ClaudeQuery };
   } catch {
-    /* not resolvable locally — fall through to the user's global install */
+    /* not resolvable locally — search the user's global installs */
   }
-  try {
-    const root = await globalNodeModules();
-    if (root) {
+  for (const root of await candidateGlobalRoots()) {
+    try {
       const req = createRequire(path.join(root, '_resolve.js'));
       const entry = req.resolve(SDK_PKG);
       return (await import(pathToFileURL(entry).href)) as unknown as { query: ClaudeQuery };
+    } catch {
+      /* not here — try the next root */
     }
-  } catch {
-    /* not installed globally either */
   }
   return null;
 }
