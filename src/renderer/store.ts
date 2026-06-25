@@ -25,9 +25,11 @@ import type {
   ChatMessage,
   ElementTarget,
   FileDiff,
+  InstructionMacro,
   ProjectConfig,
 } from '@shared/types';
 import type { DevServerStatePayload, PreviewStatusPayload } from '@shared/ipc';
+import { resolveMacroInstruction } from '@shared/macros';
 
 /* -------------------------------------------------------------------------- */
 /*  ID generation                                                             */
@@ -245,6 +247,25 @@ export interface EaselActions {
    * Sets lastError on failure.
    */
   validateBackend(): Promise<{ ok: boolean; problem?: string }>;
+
+  /* ---- Instruction macros -------------------------------------------------- */
+
+  /**
+   * Save a new macro from a name + instruction template (and optional hotkey).
+   * The macro is appended to the persisted list and the store's settings are
+   * refreshed. Returns the created macro's id, or null if persistence failed.
+   */
+  saveMacro(input: { name: string; instructionTemplate: string; hotkey?: string }): Promise<string | null>;
+  /** Patch an existing macro by id (name / template / hotkey) and persist. */
+  updateMacro(id: string, patch: Partial<Omit<InstructionMacro, 'id'>>): Promise<void>;
+  /** Remove a macro by id and persist the new list. */
+  deleteMacro(id: string): Promise<void>;
+  /**
+   * Invoke a macro by id: interpolate its template against the first selected
+   * element target ({@link interpolateMacro}) and submit via the existing
+   * {@link submitEdit}. No-op (sets lastError) if the macro id is unknown.
+   */
+  runMacro(id: string): Promise<void>;
 
   /** Refresh the checkpoint list from main. */
   listCheckpoints(): Promise<void>;
@@ -950,6 +971,67 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: null });
     }
     return result.value;
+  },
+
+  /* ---- Instruction macros -------------------------------------------------- */
+
+  async saveMacro(input) {
+    const name = input.name.trim();
+    const instructionTemplate = input.instructionTemplate.trim();
+    if (!name || !instructionTemplate) {
+      set({ lastError: 'Macro name and instruction are required.' });
+      return null;
+    }
+    const macro: InstructionMacro = {
+      id: genId(),
+      name,
+      instructionTemplate,
+      ...(input.hotkey?.trim() ? { hotkey: input.hotkey.trim() } : {}),
+    };
+    const current = get().settings?.macros ?? [];
+    const next = [...current, macro];
+    const result = await easel.settings.setMacros({ macros: next });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return null;
+    }
+    set({ settings: result.value.settings });
+    return macro.id;
+  },
+
+  async updateMacro(id, patch) {
+    const current = get().settings?.macros ?? [];
+    const next = current.map((m) => (m.id === id ? { ...m, ...patch } : m));
+    const result = await easel.settings.setMacros({ macros: next });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ settings: result.value.settings });
+  },
+
+  async deleteMacro(id) {
+    const current = get().settings?.macros ?? [];
+    const next = current.filter((m) => m.id !== id);
+    const result = await easel.settings.setMacros({ macros: next });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ settings: result.value.settings });
+  },
+
+  async runMacro(id) {
+    const { settings, targets } = get();
+    const macro = settings?.macros.find((m) => m.id === id);
+    if (!macro) {
+      set({ lastError: 'Macro not found.' });
+      return;
+    }
+    // Interpolate against the first selected target (if any) and reuse the
+    // existing edit pipeline unchanged.
+    const instruction = resolveMacroInstruction(macro, targets[0]);
+    await get().submitEdit(instruction);
   },
 
   /* ---- Checkpoints --------------------------------------------------------- */

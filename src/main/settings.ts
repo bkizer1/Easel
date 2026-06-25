@@ -81,6 +81,7 @@ function defaultSettings(): AppSettings {
       autoCheckpoint: true,
     },
     theme: 'system',
+    macros: [],
   };
 }
 
@@ -129,6 +130,10 @@ function loadSettingsFromDisk(): AppSettings {
         ...defaults.featureFlags,
         ...(parsed.featureFlags ?? {}),
       },
+      // Macros are a whole-collection field; fall back to the default empty
+      // array if the persisted value is missing or not an array (e.g. settings
+      // written by a version predating this feature).
+      macros: Array.isArray(parsed.macros) ? parsed.macros : defaults.macros,
     };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
