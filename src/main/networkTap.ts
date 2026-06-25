@@ -272,50 +272,74 @@ function findGuestWebContents(): WebContents | null {
  * human `detail` when capture could not be enabled.
  */
 export function setNetworkCapture(enabled: boolean): { capturing: boolean; detail?: string } {
-  if (enabled) {
-    if (capturing && attached && !attached.isDestroyed()) {
-      return { capturing: true };
-    }
+  if (!enabled) {
+    detach();
+    return { capturing: false };
+  }
 
-    const wc = findGuestWebContents();
-    if (!wc) {
-      return { capturing: false, detail: 'No preview is loaded.' };
-    }
+  const wc = findGuestWebContents();
+  if (!wc) {
+    // No guest to attach to — drop any stale attachment so state stays honest.
+    if (attached) detach();
+    return { capturing: false, detail: 'No preview is loaded.' };
+  }
 
-    // Attach the debugger (no-op if we already own it on this wc).
-    try {
-      if (!wc.debugger.isAttached()) {
-        wc.debugger.attach('1.3');
-      }
-    } catch (err) {
-      // Something else (e.g. DevTools) owns the protocol.
-      log.warn('Debugger attach failed', { err: String(err) });
-      return { capturing: false, detail: 'Detach DevTools from the preview to capture network.' };
-    }
-
-    // Register the message handler exactly once for this attachment.
-    if (!messageHandler) {
-      messageHandler = handleCdpMessage;
-      wc.debugger.on('message', messageHandler);
-    }
-
-    try {
-      wc.debugger.sendCommand('Network.enable');
-    } catch (err) {
-      log.warn('Network.enable failed', { err: String(err) });
-      detach();
-      return { capturing: false, detail: 'Could not enable network capture on the preview.' };
-    }
-
-    attached = wc;
-    capturing = true;
-    log.info('Network capture enabled');
+  // Already capturing on this exact, live guest — nothing to do.
+  if (capturing && attached === wc && !wc.isDestroyed()) {
     return { capturing: true };
   }
 
-  // Disable.
-  detach();
-  return { capturing: false };
+  // We were attached to a different or now-destroyed guest (the preview
+  // navigated/reloaded → a fresh <webview> WebContents). Tear the stale
+  // attachment down first so the message handler is re-registered on the new
+  // one — otherwise capture silently dies after a reload.
+  if (attached && attached !== wc) detach();
+
+  // Attach the debugger (no-op if we already own it on this wc).
+  try {
+    if (!wc.debugger.isAttached()) {
+      wc.debugger.attach('1.3');
+    }
+  } catch (err) {
+    // Something else (e.g. DevTools) owns the protocol.
+    log.warn('Debugger attach failed', { err: String(err) });
+    return { capturing: false, detail: 'Detach DevTools from the preview to capture network.' };
+  }
+
+  // (Re)register the message handler for THIS attachment. A freshly attached
+  // debugger has no listeners; clear any stale registration defensively first.
+  if (messageHandler) {
+    try {
+      wc.debugger.removeListener('message', messageHandler);
+    } catch {
+      // Ignore — the prior wc may already be gone.
+    }
+  }
+  messageHandler = handleCdpMessage;
+  wc.debugger.on('message', messageHandler);
+
+  // If the protocol detaches under us (navigation, or another client attaching),
+  // reset module state so a later enable re-attaches cleanly.
+  wc.debugger.once('detach', () => {
+    if (attached === wc) {
+      capturing = false;
+      attached = null;
+      messageHandler = null;
+    }
+  });
+
+  try {
+    wc.debugger.sendCommand('Network.enable');
+  } catch (err) {
+    log.warn('Network.enable failed', { err: String(err) });
+    detach();
+    return { capturing: false, detail: 'Could not enable network capture on the preview.' };
+  }
+
+  attached = wc;
+  capturing = true;
+  log.info('Network capture enabled');
+  return { capturing: true };
 }
 
 /** Read the buffered network log (capped) + current capture state. */
