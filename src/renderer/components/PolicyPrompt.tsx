@@ -10,10 +10,11 @@
  * Renders nothing when there is nothing to confirm.
  */
 
+import React from 'react';
 import { ShieldAlert } from 'lucide-react';
 import { useEaselStore } from '../store';
 
-export function PolicyPrompt(): JSX.Element | null {
+export function PolicyPrompt(): React.ReactElement | null {
   const pending = useEaselStore((s) => s.pendingPolicyConfirms);
   const respond = useEaselStore((s) => s.respondPolicyConfirm);
 
@@ -31,9 +32,10 @@ export function PolicyPrompt(): JSX.Element | null {
       className={[
         'fixed bottom-5 left-1/2 -translate-x-1/2 z-50',
         'flex items-start gap-3',
-        'px-4 py-3 rounded-xl',
-        'bg-amber-950/85 backdrop-blur-xl border border-amber-500/30 text-amber-50 text-sm',
-        'shadow-[0_8px_40px_-8px_rgba(0,0,0,0.6)] max-w-md w-[calc(100%-2rem)]',
+        'px-4 py-3',
+        'glass-panel shadow-glass-lg animate-slide-up',
+        'border-amber-500/30 text-amber-50 text-sm',
+        'max-w-md w-[calc(100%-2rem)]',
       ].join(' ')}
     >
       <span className="grid place-items-center w-6 h-6 rounded-lg bg-amber-500/15 text-amber-300 flex-shrink-0 mt-0.5">
@@ -49,14 +51,14 @@ export function PolicyPrompt(): JSX.Element | null {
           <button
             type="button"
             onClick={() => void respond(requestId, path, true)}
-            className="px-3 py-1.5 rounded-lg bg-amber-400 text-ink-950 text-xs font-semibold hover:brightness-110 transition"
+            className="px-3 py-1.5 rounded-lg bg-amber-400 text-ink-950 text-xs font-semibold transition-all duration-150 ease-spring hover:brightness-110 active:scale-[0.97]"
           >
             Allow once
           </button>
           <button
             type="button"
             onClick={() => void respond(requestId, path, false)}
-            className="px-3 py-1.5 rounded-lg bg-amber-500/10 text-amber-100 text-xs font-semibold hover:bg-amber-500/20 transition"
+            className="px-3 py-1.5 rounded-lg bg-amber-500/10 text-amber-100 text-xs font-semibold transition-all duration-150 ease-spring hover:bg-amber-500/20 active:scale-[0.97]"
           >
             Deny
           </button>

@@ -1,6 +1,6 @@
 {
   "name": "easel",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "An open-source agentic web browser for web development",
   "private": true,
   "type": "module",

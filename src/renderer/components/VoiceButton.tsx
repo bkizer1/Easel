@@ -13,6 +13,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Mic, MicOff, Loader2 } from 'lucide-react';
 import { useEaselStore } from '../store';
+import { Tooltip } from './Tooltip';
 
 /* -------------------------------------------------------------------------- */
 /*  SpeechRecognition shim                                                   */
@@ -109,14 +110,17 @@ export function VoiceButton({ onTranscript, disabled = false }: Props): React.Re
 
   if (!isAvailable) {
     return (
-      <button
-        type="button"
-        disabled
-        title="Voice input unavailable (enable in Settings → Feature flags)"
-        className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-700 cursor-not-allowed"
-      >
-        <MicOff className="w-4 h-4" />
-      </button>
+      <Tooltip label="Voice input unavailable (enable in Settings → Feature flags)" side="top">
+        <button
+          type="button"
+          aria-label="Voice input unavailable"
+          aria-disabled
+          tabIndex={-1}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-700 cursor-not-allowed opacity-40"
+        >
+          <MicOff className="w-4 h-4" />
+        </button>
+      </Tooltip>
     );
   }
 
@@ -124,24 +128,29 @@ export function VoiceButton({ onTranscript, disabled = false }: Props): React.Re
   const isProcessing = state === 'processing';
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={disabled || isProcessing}
-      title={isListening ? 'Stop recording' : 'Start voice input'}
-      className={`w-8 h-8 flex items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 ${
-        isListening
-          ? 'bg-red-600/20 text-red-400 hover:bg-red-600/30'
-          : 'text-gray-500 hover:text-gray-300 hover:bg-gray-700'
-      } disabled:opacity-40 disabled:cursor-not-allowed`}
+    <Tooltip
+      label={isListening ? 'Stop recording' : 'Start voice input'}
+      side="top"
     >
-      {isProcessing ? (
-        <Loader2 className="w-4 h-4 animate-spin" />
-      ) : isListening ? (
-        <Mic className="w-4 h-4 animate-pulse" />
-      ) : (
-        <Mic className="w-4 h-4" />
-      )}
-    </button>
+      <button
+        type="button"
+        aria-label={isListening ? 'Stop recording' : 'Start voice input'}
+        onClick={handleClick}
+        disabled={disabled || isProcessing}
+        className={`w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-150 ease-spring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 active:scale-90 ${
+          isListening
+            ? 'bg-rose-600/20 text-rose-400 hover:bg-rose-600/30'
+            : 'text-gray-500 hover:text-gray-300 hover:bg-white/[0.07]'
+        } disabled:opacity-40 disabled:cursor-not-allowed`}
+      >
+        {isProcessing ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : isListening ? (
+          <Mic className="w-4 h-4 animate-pulse" />
+        ) : (
+          <Mic className="w-4 h-4" />
+        )}
+      </button>
+    </Tooltip>
   );
 }

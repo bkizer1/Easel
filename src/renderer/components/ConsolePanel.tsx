@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useEaselStore } from '../store';
 import type { PageLog } from '../store';
+import { Tooltip } from './Tooltip';
 
 /**
  * Compact resolution badge shown after a "Fix this" edit finishes: a green
@@ -52,18 +53,21 @@ export function ConsolePanel(): React.ReactElement {
   const items = [...pageLogs].reverse();
 
   return (
-    <div className="absolute left-0 top-full mt-1.5 z-30 w-[26rem] overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+    <div className="glass-panel animate-panel-in absolute right-0 top-full mt-2 z-30 w-[26rem] overflow-hidden origin-top-right">
       <div className="flex items-center justify-between px-3.5 py-2.5 hairline-b">
         <span className="flex items-center gap-2 text-[12px] font-semibold text-gray-200">
           <Terminal className="h-3.5 w-3.5 text-brand-400" /> Page console
         </span>
         {items.length > 0 && (
-          <button
-            onClick={() => clearPageLogs()}
-            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-colors hover:bg-white/[0.06] hover:text-gray-300"
-          >
-            <Trash2 className="h-3 w-3" /> Clear
-          </button>
+          <Tooltip label="Clear console" side="left">
+            <button
+              aria-label="Clear console"
+              onClick={() => clearPageLogs()}
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-[0.97]"
+            >
+              <Trash2 className="h-3 w-3" /> Clear
+            </button>
+          </Tooltip>
         )}
       </div>
 
@@ -72,7 +76,7 @@ export function ConsolePanel(): React.ReactElement {
           No warnings or errors from the page. If the preview is blank, errors will surface here.
         </div>
       ) : (
-        <ul className="max-h-80 overflow-y-auto py-1">
+        <ul className="surface-inset mx-2 my-2 max-h-80 overflow-y-auto py-1">
           {items.map((l) => (
             <li
               key={l.id}
@@ -98,20 +102,25 @@ export function ConsolePanel(): React.ReactElement {
                     ) : l.error.fixState === 'resolved' || l.error.fixState === 'still-erroring' ? (
                       <FixStatus state={l.error.fixState} />
                     ) : (
-                      <button
-                        onClick={() => void fixPageError(l.id)}
-                        disabled={streaming || !hasProject}
-                        title={
+                      <Tooltip
+                        label={
                           !hasProject
                             ? 'Open a project folder so Claude can edit its source'
                             : streaming
                               ? 'An edit is already running'
                               : 'Let Claude fix this error'
                         }
-                        className="flex items-center gap-1 rounded-md border border-brand-500/40 bg-brand-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-brand-300 transition-colors hover:bg-brand-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                        side="top"
                       >
-                        <Wrench className="h-3 w-3" /> Fix
-                      </button>
+                        <button
+                          aria-label="Fix this error"
+                          onClick={() => void fixPageError(l.id)}
+                          disabled={streaming || !hasProject}
+                          className="flex items-center gap-1 rounded-md border border-brand-500/40 bg-brand-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-brand-300 transition-all duration-150 ease-spring hover:bg-brand-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Wrench className="h-3 w-3" /> Fix
+                        </button>
+                      </Tooltip>
                     )}
                   </span>
                 )}

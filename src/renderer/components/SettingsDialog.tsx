@@ -31,6 +31,7 @@ import type {
   AppSettings,
 } from '@shared/types';
 import { useEaselStore } from '../store';
+import { Tooltip } from './Tooltip';
 
 /* -------------------------------------------------------------------------- */
 /*  Available Claude models (June 2026)                                      */
@@ -48,7 +49,7 @@ const CLAUDE_MODELS = [
 
 function Label({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
-    <label className="block text-xs font-medium text-gray-400 mb-1">{children}</label>
+    <label className="input-label">{children}</label>
   );
 }
 
@@ -65,7 +66,7 @@ function SelectField({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 focus:outline-none focus:border-brand-600 transition-colors"
+      className="select-field"
     >
       {children}
     </select>
@@ -99,7 +100,7 @@ function SecretInput({ placeholder, hint, isSet, onSave, onClear }: SecretInputP
           </span>
           <button
             onClick={() => void onClear()}
-            className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+            className="text-xs text-gray-500 hover:text-rose-400 transition-colors duration-150 ease-spring"
           >
             Clear
           </button>
@@ -112,12 +113,12 @@ function SecretInput({ placeholder, hint, isSet, onSave, onClear }: SecretInputP
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={isSet ? 'Replace key…' : placeholder}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 transition-colors pr-9"
+            className="input-field pr-9"
           />
           <button
             type="button"
             onClick={() => setShow((s) => !s)}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400"
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400 transition-colors duration-150 ease-spring"
           >
             {show ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
           </button>
@@ -125,7 +126,7 @@ function SecretInput({ placeholder, hint, isSet, onSave, onClear }: SecretInputP
         <button
           onClick={() => void handleSave()}
           disabled={!value.trim()}
-          className="px-3 py-2 text-xs font-medium rounded-lg bg-brand-700 hover:bg-brand-600 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          className="btn-primary px-3 py-2 text-xs"
         >
           Save
         </button>
@@ -149,7 +150,7 @@ function TextField({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 transition-colors"
+      className="input-field"
     />
   );
 }
@@ -513,7 +514,7 @@ export function SettingsDialog(): React.ReactElement | null {
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/60 z-40"
+        className="fixed inset-0 bg-black/60 z-40 animate-fade-in"
         onClick={handleClose}
         aria-hidden
       />
@@ -524,16 +525,19 @@ export function SettingsDialog(): React.ReactElement | null {
         aria-label="Settings"
         className="fixed inset-0 z-50 flex items-center justify-center p-4"
       >
-        <div className="w-full max-w-md max-h-[90vh] bg-gray-900 border border-gray-700 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="glass-raised animate-scale-in w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden">
           {/* Header */}
-          <div className="flex items-center justify-between px-5 py-4 border-b border-gray-800 flex-shrink-0">
+          <div className="flex items-center justify-between px-5 py-4 hairline-b flex-shrink-0">
             <h2 className="text-base font-semibold text-gray-100">Settings</h2>
-            <button
-              onClick={handleClose}
-              className="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-800 text-gray-400 hover:text-gray-200 transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <Tooltip label="Close" shortcut="Esc" side="left">
+              <button
+                aria-label="Close settings"
+                onClick={handleClose}
+                className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-200 transition-all duration-150 ease-spring active:scale-90"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </Tooltip>
           </div>
 
           {/* Body (scrollable) */}
@@ -678,7 +682,7 @@ export function SettingsDialog(): React.ReactElement | null {
           </div>
 
           {/* Footer — Test connection */}
-          <div className="flex-shrink-0 border-t border-gray-800 px-5 py-4 flex items-center justify-between gap-3">
+          <div className="flex-shrink-0 hairline-t px-5 py-4 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2 min-w-0">
               {validateState === 'ok' && (
                 <>
@@ -688,8 +692,8 @@ export function SettingsDialog(): React.ReactElement | null {
               )}
               {validateState === 'fail' && (
                 <>
-                  <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-                  <span className="text-xs text-red-400 truncate">{validateMsg}</span>
+                  <AlertTriangle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+                  <span className="text-xs text-rose-400 truncate">{validateMsg}</span>
                 </>
               )}
             </div>
@@ -697,7 +701,7 @@ export function SettingsDialog(): React.ReactElement | null {
             <button
               onClick={() => void handleValidate()}
               disabled={validateState === 'pending'}
-              className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors disabled:opacity-50 flex-shrink-0"
+              className="btn-secondary flex-shrink-0 text-sm px-3 py-1.5"
             >
               {validateState === 'pending' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Test connection

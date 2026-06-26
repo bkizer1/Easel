@@ -13,6 +13,7 @@ import React, { useState } from 'react';
 import { SlidersHorizontal, Check, Undo2 } from 'lucide-react';
 import { useEaselStore } from '../store';
 import { formatStyleEdit } from '../lib/styleEdit';
+import { Tooltip } from './Tooltip';
 
 /** Numeric (px) tweakable properties surfaced as steppers. */
 const NUMERIC_PROPS: Array<{ property: string; label: string; min: number; max: number; step: number }> = [
@@ -55,7 +56,7 @@ export function TweakPanel(): React.ReactElement | null {
   const deltas = styleTweak && styleTweak.selector === selector ? styleTweak.deltas : [];
 
   return (
-    <div className="absolute bottom-4 right-4 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+    <div className="glass-panel animate-slide-up absolute bottom-4 right-4 z-30 w-72 overflow-hidden">
       <div className="flex items-center gap-2 px-3.5 py-2.5 hairline-b">
         <SlidersHorizontal className="h-3.5 w-3.5 text-brand-400" />
         <span className="text-[12px] font-semibold text-gray-200">Tweak styles</span>
@@ -70,26 +71,32 @@ export function TweakPanel(): React.ReactElement | null {
           return (
             <div key={p.property} className="flex items-center gap-2">
               <label className="w-20 text-[11.5px] text-gray-400">{p.label}</label>
-              <button
-                onClick={() => setNumeric(p.property, cur - p.step, p.min, p.max)}
-                className="grid h-6 w-6 place-items-center rounded-md bg-ink-800 text-gray-300 hover:bg-ink-700"
-              >
-                −
-              </button>
+              <Tooltip label={`Decrease ${p.label.toLowerCase()}`} side="top">
+                <button
+                  onClick={() => setNumeric(p.property, cur - p.step, p.min, p.max)}
+                  aria-label={`Decrease ${p.label.toLowerCase()}`}
+                  className="grid h-6 w-6 place-items-center rounded-md bg-ink-800 text-gray-300 hover:bg-ink-700 transition-all duration-150 ease-spring active:scale-90"
+                >
+                  −
+                </button>
+              </Tooltip>
               <input
                 type="number"
                 value={cur}
                 min={p.min}
                 max={p.max}
                 onChange={(e) => setNumeric(p.property, Number(e.target.value), p.min, p.max)}
-                className="w-14 rounded-md border border-white/10 bg-ink-800 px-1.5 py-0.5 text-center text-[11.5px] text-gray-200 focus:border-brand-500/50 focus:outline-none"
+                className="w-14 surface-inset rounded-md border border-white/10 bg-ink-800 px-1.5 py-0.5 text-center text-[11.5px] text-gray-200 focus:border-brand-500/50 focus:outline-none"
               />
-              <button
-                onClick={() => setNumeric(p.property, cur + p.step, p.min, p.max)}
-                className="grid h-6 w-6 place-items-center rounded-md bg-ink-800 text-gray-300 hover:bg-ink-700"
-              >
-                +
-              </button>
+              <Tooltip label={`Increase ${p.label.toLowerCase()}`} side="top">
+                <button
+                  onClick={() => setNumeric(p.property, cur + p.step, p.min, p.max)}
+                  aria-label={`Increase ${p.label.toLowerCase()}`}
+                  className="grid h-6 w-6 place-items-center rounded-md bg-ink-800 text-gray-300 hover:bg-ink-700 transition-all duration-150 ease-spring active:scale-90"
+                >
+                  +
+                </button>
+              </Tooltip>
             </div>
           );
         })}
@@ -125,21 +132,26 @@ export function TweakPanel(): React.ReactElement | null {
       )}
 
       <div className="flex items-center gap-2 hairline-t px-3.5 py-2.5">
-        <button
-          onClick={() => void applyStyleToSource()}
-          disabled={deltas.length === 0 || streaming}
-          className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-2 py-1.5 text-[12px] font-medium text-white hover:bg-brand-500 disabled:opacity-30"
-        >
-          <Check className="h-3.5 w-3.5" /> Apply to source
-        </button>
-        <button
-          onClick={() => discardStyleTweak()}
-          disabled={deltas.length === 0}
-          title="Discard inline tweaks"
-          className="flex items-center gap-1.5 rounded-lg bg-ink-800 px-2 py-1.5 text-[12px] text-gray-300 hover:bg-ink-700 disabled:opacity-30"
-        >
-          <Undo2 className="h-3.5 w-3.5" /> Discard
-        </button>
+        <Tooltip label="Apply pending style changes to source" side="top">
+          <button
+            onClick={() => void applyStyleToSource()}
+            disabled={deltas.length === 0 || streaming}
+            aria-label="Apply to source"
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-2 py-1.5 text-[12px] font-medium text-white hover:bg-brand-500 disabled:opacity-30 transition-all duration-150 ease-spring active:scale-[0.97]"
+          >
+            <Check className="h-3.5 w-3.5" /> Apply to source
+          </button>
+        </Tooltip>
+        <Tooltip label="Discard inline tweaks" side="top">
+          <button
+            onClick={() => discardStyleTweak()}
+            disabled={deltas.length === 0}
+            aria-label="Discard inline tweaks"
+            className="flex items-center gap-1.5 rounded-lg bg-ink-800 px-2 py-1.5 text-[12px] text-gray-300 hover:bg-ink-700 disabled:opacity-30 transition-all duration-150 ease-spring active:scale-[0.97]"
+          >
+            <Undo2 className="h-3.5 w-3.5" /> Discard
+          </button>
+        </Tooltip>
       </div>
     </div>
   );

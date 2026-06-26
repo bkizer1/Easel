@@ -10,6 +10,7 @@
 import React, { useEffect } from 'react';
 import { Palette, X, ArrowRight } from 'lucide-react';
 import { useEaselStore } from '../store';
+import { Tooltip } from './Tooltip';
 
 export function TokenPanel(): React.ReactElement | null {
   const targets = useEaselStore((s) => s.targets);
@@ -36,18 +37,20 @@ export function TokenPanel(): React.ReactElement | null {
   if (!selector || tokenMatches === null) return null;
 
   return (
-    <div className="absolute top-16 left-4 z-30 w-72 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+    <div className="glass-panel animate-slide-up absolute top-16 left-4 z-30 w-72 overflow-hidden">
       <div className="flex items-center gap-2 px-3.5 py-2.5 hairline-b">
         <Palette className="h-3.5 w-3.5 text-brand-400" />
         <span className="text-[12px] font-semibold text-gray-200">Design tokens</span>
         {tokenLoading && <span className="text-[10.5px] text-gray-500">resolving…</span>}
-        <button
-          onClick={() => clearTokenMatches()}
-          title="Close"
-          className="ml-auto grid h-6 w-6 place-items-center rounded-md text-gray-500 hover:bg-white/10 hover:text-gray-200"
-        >
-          <X className="h-3 w-3" />
-        </button>
+        <Tooltip label="Close token inspector" side="top">
+          <button
+            onClick={() => clearTokenMatches()}
+            aria-label="Close token inspector"
+            className="ml-auto grid h-6 w-6 place-items-center rounded-md text-gray-500 hover:bg-white/10 hover:text-gray-200 transition-all duration-150 ease-spring active:scale-90"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </Tooltip>
       </div>
 
       <ul className="max-h-72 overflow-y-auto py-1">
@@ -67,13 +70,16 @@ export function TokenPanel(): React.ReactElement | null {
                 <span className="font-mono text-[11px] text-brand-300 truncate flex-1" title={m.token.replacement}>
                   {m.token.name}
                 </span>
-                <button
-                  onClick={() => void tokenizeValue(m)}
-                  disabled={streaming}
-                  className="rounded-md bg-brand-600 px-2 py-0.5 text-[10.5px] font-medium text-white hover:bg-brand-500 disabled:opacity-30"
-                >
-                  Use token
-                </button>
+                <Tooltip label={`Replace hardcoded value with ${m.token.name}`} side="top">
+                  <button
+                    onClick={() => void tokenizeValue(m)}
+                    disabled={streaming}
+                    aria-label={`Use token ${m.token.name}`}
+                    className="rounded-md bg-brand-600 px-2 py-0.5 text-[10.5px] font-medium text-white hover:bg-brand-500 disabled:opacity-30 transition-all duration-150 ease-spring active:scale-[0.97]"
+                  >
+                    Use token
+                  </button>
+                </Tooltip>
               </div>
             ) : (
               <div className="mt-1 text-[10.5px] text-amber-400/80">off-system (no token match)</div>

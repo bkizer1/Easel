@@ -22,6 +22,7 @@ import {
   Trash2,
   GitCompare,
   Loader2,
+  MousePointer2,
 } from 'lucide-react';
 import { useEaselStore } from '../store';
 import { formatSerializedValue } from '@shared/xray';
@@ -33,6 +34,7 @@ import type {
   StateGroup,
 } from '@shared/xray';
 import type { SourceLocation } from '@shared/types';
+import { Tooltip } from './Tooltip';
 
 /* -------------------------------------------------------------------------- */
 /*  Small shared bits                                                          */
@@ -87,8 +89,7 @@ function ScrubControl({ entry }: { entry: StateEntry }): React.ReactElement | nu
     return (
       <button
         onClick={() => scrubValue(entry.path, !v.value)}
-        title="Toggle value live"
-        className={`rounded px-1.5 py-0.5 text-[10.5px] font-medium transition-colors ${
+        className={`rounded px-1.5 py-0.5 text-[10.5px] font-medium transition-all duration-150 ease-spring active:scale-[0.97] ${
           v.value
             ? 'bg-brand-500/15 text-brand-300'
             : 'bg-white/[0.06] text-gray-400 hover:text-gray-200'
@@ -104,14 +105,13 @@ function ScrubControl({ entry }: { entry: StateEntry }): React.ReactElement | nu
       <input
         type={v.kind === 'number' ? 'number' : 'text'}
         defaultValue={String(v.value)}
-        title="Scrub value live"
         onChange={(e) =>
           scrubValue(
             entry.path,
             v.kind === 'number' ? Number(e.target.value) : e.target.value,
           )
         }
-        className="w-24 rounded border border-white/10 bg-ink-900/60 px-1.5 py-0.5 font-mono text-[11px] text-gray-200 focus:border-brand-500/50 focus:outline-none"
+        className="w-24 rounded border border-white/10 bg-ink-900/60 px-1.5 py-0.5 font-mono text-[11px] text-gray-200 focus:border-brand-500/50 focus:outline-none surface-inset"
       />
     );
   }
@@ -132,14 +132,16 @@ function StateRow({ entry }: { entry: StateEntry }): React.ReactElement {
         {formatSerializedValue(entry.value)}
       </span>
       {entry.writable && <ScrubControl entry={entry} />}
-      <button
-        onClick={() => void bridge(entry)}
-        disabled={streaming}
-        title={streaming ? 'An edit is already running' : 'Bridge this value into a source edit'}
-        className="flex flex-shrink-0 items-center gap-1 rounded-md border border-brand-500/40 bg-brand-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-brand-300 transition-colors hover:bg-brand-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        <Wand2 className="h-3 w-3" /> Change this
-      </button>
+      <Tooltip label={streaming ? 'An edit is already running' : 'Bridge this value into a source edit'} side="top">
+        <button
+          onClick={() => void bridge(entry)}
+          disabled={streaming}
+          aria-label="Bridge this value into a source edit"
+          className="flex flex-shrink-0 items-center gap-1 rounded-md border border-iris-500/40 bg-iris-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-iris-300 transition-all duration-150 ease-spring hover:bg-iris-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Wand2 className="h-3 w-3" /> Change this
+        </button>
+      </Tooltip>
     </li>
   );
 }
@@ -147,11 +149,34 @@ function StateRow({ entry }: { entry: StateEntry }): React.ReactElement {
 function StateTab(): React.ReactElement {
   const snapshot = useEaselStore((s) => s.currentElementState);
   const refresh = useEaselStore((s) => s.refreshElementState);
+  const mode = useEaselStore((s) => s.mode);
+  const setMode = useEaselStore((s) => s.setMode);
 
   if (!snapshot) {
+    const selecting = mode === 'element-select';
     return (
-      <div className="px-3.5 py-6 text-center text-[12px] leading-relaxed text-gray-500">
-        Pick an element (Select mode) to inspect its live state.
+      <div className="flex flex-col items-center gap-3 px-3.5 py-7 text-center animate-fade-in">
+        <span className="grid place-items-center h-10 w-10 rounded-xl border border-brand-500/20 bg-brand-500/10 text-brand-300">
+          <MousePointer2 className="h-4 w-4" />
+        </span>
+        <p className="max-w-[280px] text-[12px] leading-relaxed text-gray-400">
+          {selecting
+            ? 'Select mode is on — click any element in the preview to inspect its live state, props, hooks and computed style.'
+            : 'Pick an element to inspect its live state, props, hooks and computed style.'}
+        </p>
+        {selecting ? (
+          <span className="flex items-center gap-1.5 text-[11px] text-brand-300/90">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-400" />
+            Select mode active
+          </span>
+        ) : (
+          <button
+            onClick={() => setMode('element-select')}
+            className="flex items-center gap-1.5 rounded-lg bg-brand-600 px-3 py-1.5 text-[12px] font-medium text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.18)] transition-all duration-150 ease-spring hover:bg-brand-500 active:scale-[0.97]"
+          >
+            <MousePointer2 className="h-3.5 w-3.5" /> Enable Select mode
+          </button>
+        )}
       </div>
     );
   }
@@ -187,13 +212,15 @@ function StateBody({
           {snapshot.componentName ?? snapshot.selector}
         </span>
         {snapshot.dataEaselSource && <SourceChip src={snapshot.dataEaselSource} />}
-        <button
-          onClick={onRefresh}
-          title="Re-read the element's live state"
-          className="ml-auto flex flex-shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-colors hover:bg-white/[0.06] hover:text-gray-300"
-        >
-          <RefreshCw className="h-3 w-3" /> Refresh
-        </button>
+        <Tooltip label="Re-read the element's live state" side="top">
+          <button
+            onClick={onRefresh}
+            aria-label="Refresh element state"
+            className="ml-auto flex flex-shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-[0.97]"
+          >
+            <RefreshCw className="h-3 w-3" /> Refresh
+          </button>
+        </Tooltip>
       </div>
 
       {snapshot.error && (
@@ -283,14 +310,16 @@ function NetworkRow({ entry }: { entry: NetworkEntry }): React.ReactElement {
         <span className="flex-shrink-0 text-[10.5px] text-gray-500">{Math.round(entry.durationMs)}ms</span>
       )}
       {entry.initiator && <SourceChip src={entry.initiator} />}
-      <button
-        onClick={() => void bridge(entry.id)}
-        disabled={streaming}
-        title={streaming ? 'An edit is already running' : 'Add loading/error states for this request'}
-        className="flex flex-shrink-0 items-center gap-1 rounded-md border border-brand-500/40 bg-brand-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-brand-300 transition-colors hover:bg-brand-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        <Wand2 className="h-3 w-3" /> Add states
-      </button>
+      <Tooltip label={streaming ? 'An edit is already running' : 'Add loading/error states for this request'} side="top">
+        <button
+          onClick={() => void bridge(entry.id)}
+          disabled={streaming}
+          aria-label="Add loading/error states for this request"
+          className="flex flex-shrink-0 items-center gap-1 rounded-md border border-iris-500/40 bg-iris-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-iris-300 transition-all duration-150 ease-spring hover:bg-iris-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Wand2 className="h-3 w-3" /> Add states
+        </button>
+      </Tooltip>
     </li>
   );
 }
@@ -307,24 +336,30 @@ function NetworkTab(): React.ReactElement {
   return (
     <div>
       <div className="flex items-center gap-2 px-3.5 py-2 hairline-b">
-        <button
-          onClick={() => void setCapture(!capturing)}
-          className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
-            capturing
-              ? 'bg-brand-500/15 text-brand-300'
-              : 'text-gray-400 hover:bg-white/[0.06] hover:text-gray-200'
-          }`}
-        >
-          <Radio className={`h-3 w-3 ${capturing ? 'animate-pulse' : ''}`} />
-          {capturing ? 'Capturing' : 'Capture'}
-        </button>
-        {items.length > 0 && (
+        <Tooltip label={capturing ? 'Stop capturing network requests' : 'Start capturing network requests'} side="bottom">
           <button
-            onClick={() => void clearLog()}
-            className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-colors hover:bg-white/[0.06] hover:text-gray-300"
+            onClick={() => void setCapture(!capturing)}
+            aria-label={capturing ? 'Stop capturing' : 'Start capturing'}
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all duration-150 ease-spring active:scale-[0.97] ${
+              capturing
+                ? 'bg-brand-500/15 text-brand-300'
+                : 'text-gray-400 hover:bg-white/[0.06] hover:text-gray-200'
+            }`}
           >
-            <Trash2 className="h-3 w-3" /> Clear
+            <Radio className={`h-3 w-3 ${capturing ? 'animate-pulse' : ''}`} />
+            {capturing ? 'Capturing' : 'Capture'}
           </button>
+        </Tooltip>
+        {items.length > 0 && (
+          <Tooltip label="Clear network log" side="bottom">
+            <button
+              onClick={() => void clearLog()}
+              aria-label="Clear network log"
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-[0.97]"
+            >
+              <Trash2 className="h-3 w-3" /> Clear
+            </button>
+          </Tooltip>
         )}
         <span className="ml-auto text-[11px] text-gray-500">
           {items.length} request{items.length === 1 ? '' : 's'}
@@ -391,7 +426,7 @@ function TimeTravelTab(): React.ReactElement {
   }
 
   const selectClass =
-    'min-w-0 flex-1 rounded-md border border-white/10 bg-ink-900/60 px-2 py-1 text-[11.5px] text-gray-200 focus:border-brand-500/50 focus:outline-none';
+    'min-w-0 flex-1 rounded-md border border-white/10 bg-ink-900/60 px-2 py-1 text-[11.5px] text-gray-200 focus:border-brand-500/50 focus:outline-none surface-inset';
 
   return (
     <div>
@@ -412,14 +447,17 @@ function TimeTravelTab(): React.ReactElement {
             </option>
           ))}
         </select>
-        <button
-          onClick={() => void runCompare()}
-          disabled={comparing || !fromId || !toId}
-          className="flex flex-shrink-0 items-center gap-1 rounded-md border border-brand-500/40 bg-brand-500/10 px-2 py-1 text-[11px] font-medium text-brand-300 transition-colors hover:bg-brand-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {comparing ? <Loader2 className="h-3 w-3 animate-spin" /> : <GitCompare className="h-3 w-3" />}
-          Compare
-        </button>
+        <Tooltip label="Compare snapshots" side="top">
+          <button
+            onClick={() => void runCompare()}
+            disabled={comparing || !fromId || !toId}
+            aria-label="Compare snapshots"
+            className="flex flex-shrink-0 items-center gap-1 rounded-md border border-iris-500/40 bg-iris-500/10 px-2 py-1 text-[11px] font-medium text-iris-300 transition-all duration-150 ease-spring hover:bg-iris-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {comparing ? <Loader2 className="h-3 w-3 animate-spin" /> : <GitCompare className="h-3 w-3" />}
+            Compare
+          </button>
+        </Tooltip>
       </div>
 
       {diff === null ? (
@@ -487,7 +525,7 @@ export function StateXRayPanel(): React.ReactElement {
             <button
               key={tab}
               onClick={() => setXrayTab(tab)}
-              className={`rounded-md px-2 py-1 text-[11.5px] font-medium transition-colors ${
+              className={`rounded-md px-2 py-1 text-[11.5px] font-medium transition-all duration-150 ease-spring active:scale-[0.97] ${
                 xrayTab === tab
                   ? 'bg-brand-500/15 text-brand-300'
                   : 'text-gray-400 hover:bg-white/[0.06] hover:text-gray-200'
@@ -498,13 +536,15 @@ export function StateXRayPanel(): React.ReactElement {
           ))}
         </div>
 
-        <button
-          onClick={() => setXrayOpen(false)}
-          title="Close State X-Ray"
-          className="ml-auto flex-shrink-0 rounded-md p-1 text-gray-500 transition-colors hover:bg-white/[0.06] hover:text-gray-300"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+        <Tooltip label="Close State X-Ray" side="top">
+          <button
+            onClick={() => setXrayOpen(false)}
+            aria-label="Close State X-Ray"
+            className="ml-auto flex-shrink-0 rounded-md p-1 text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-90"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
       </div>
 
       {/* Body */}

@@ -18,6 +18,7 @@ import React from 'react';
 import { X } from 'lucide-react';
 import type { BoundingBox, ElementTarget } from '@shared/types';
 import { useEaselStore } from '../store';
+import { Tooltip } from './Tooltip';
 
 interface Props {
   /** Bounding box of the currently hovered element, or null. */
@@ -46,26 +47,78 @@ function confidenceColor(confidence: ElementTarget['confidence']): string {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Remove a single element target (+ its bound annotation)                    */
+/* -------------------------------------------------------------------------- */
+
+function useRemoveTarget(): (target: ElementTarget) => void {
+  return (target: ElementTarget): void => {
+    // Atomic: drop the target AND its bound annotation (same id) in a single
+    // functional update read from the freshest state, so rapid removals can't
+    // race on a stale `targets` snapshot or orphan a target behind a removed mark.
+    useEaselStore.setState((s) => ({
+      targets: s.targets.filter((t) => t.id !== target.id),
+      annotations: s.annotations.filter((a) => a.id !== target.id),
+    }));
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Selected target box — highlight + always-visible corner "×" bubble         */
+/* -------------------------------------------------------------------------- */
+
+function TargetBox({
+  target,
+  scrollX,
+  scrollY,
+}: {
+  target: ElementTarget;
+  scrollX: number;
+  scrollY: number;
+}): React.ReactElement {
+  const removeTarget = useRemoveTarget();
+  const color = confidenceColor(target.confidence);
+  const tx = target.boundingBox.x - scrollX;
+  const ty = target.boundingBox.y - scrollY;
+  const { width, height } = target.boundingBox;
+
+  return (
+    <>
+      <div
+        className="absolute pointer-events-none"
+        style={{
+          left: tx,
+          top: ty,
+          width,
+          height,
+          outline: `2px solid ${color}`,
+          outlineOffset: 2,
+          background: `${color}14`, // 8% opacity
+          borderRadius: 2,
+        }}
+        aria-hidden
+      />
+      {/* Always-visible remove bubble pinned to the box's top-right corner. */}
+      <Tooltip label="Remove selection" side="top">
+        <button
+          onClick={() => removeTarget(target)}
+          aria-label="Remove selection"
+          className="absolute z-10 grid place-items-center w-[18px] h-[18px] rounded-full bg-ink-900/95 border border-white/25 text-gray-200 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.8)] backdrop-blur-sm pointer-events-auto hover:bg-rose-500 hover:text-white hover:border-rose-400 hover:scale-110 active:scale-95 transition-all duration-150 ease-spring"
+          style={{ left: tx + width - 9, top: ty - 9 }}
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </Tooltip>
+    </>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Target chip                                                               */
 /* -------------------------------------------------------------------------- */
 
 function TargetChip({ target }: { target: ElementTarget }): React.ReactElement {
-  const removeAnnotation = useEaselStore((s) => s.removeAnnotation);
-  const clearTargets = useEaselStore((s) => s.clearTargets);
-  const targets = useEaselStore((s) => s.targets);
-
-  function remove(): void {
-    // Remove any annotation bound to this target.
-    removeAnnotation(target.id);
-    // If this is the last target, clear all.
-    if (targets.length <= 1) {
-      clearTargets();
-    } else {
-      useEaselStore.setState((s) => ({
-        targets: s.targets.filter((t) => t.id !== target.id),
-      }));
-    }
-  }
+  const removeTarget = useRemoveTarget();
+  const remove = (): void => removeTarget(target);
 
   const color = confidenceColor(target.confidence);
   const label = target.dataEaselSource
@@ -83,13 +136,15 @@ function TargetChip({ target }: { target: ElementTarget }): React.ReactElement {
         style={{ background: color }}
       />
       <span className="truncate">{`<${target.tagName}>`}</span>
-      <button
-        onClick={remove}
-        className="ml-1 text-gray-500 hover:text-gray-200 transition-colors"
-        title="Remove target"
-      >
-        <X className="w-2.5 h-2.5" />
-      </button>
+      <Tooltip label="Remove target" side="top">
+        <button
+          onClick={remove}
+          className="ml-1 text-gray-500 hover:text-gray-200 transition-colors"
+          aria-label="Remove target"
+        >
+          <X className="w-2.5 h-2.5" />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -133,29 +188,10 @@ export function ElementInspector({ hoverBox, scrollX, scrollY }: Props): React.R
         />
       )}
 
-      {/* Selected target bounding box highlights */}
-      {targets.map((t) => {
-        const tx = t.boundingBox.x - scrollX;
-        const ty = t.boundingBox.y - scrollY;
-        const color = confidenceColor(t.confidence);
-        return (
-          <div
-            key={t.id}
-            className="absolute pointer-events-none"
-            style={{
-              left: tx,
-              top: ty,
-              width: t.boundingBox.width,
-              height: t.boundingBox.height,
-              outline: `2px solid ${color}`,
-              outlineOffset: 2,
-              background: `${color}14`, // 8% opacity
-              borderRadius: 2,
-            }}
-            aria-hidden
-          />
-        );
-      })}
+      {/* Selected target highlights + corner remove bubbles */}
+      {targets.map((t) => (
+        <TargetBox key={t.id} target={t} scrollX={scrollX} scrollY={scrollY} />
+      ))}
 
       {/* Target chips panel (bottom-left of overlay) */}
       {targets.length > 0 && (
