@@ -40,8 +40,10 @@ import type {
   ElementTarget,
   OffGridElement,
   SourceLocation,
+  StyleEdit,
 } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
+import { accumulateStyleEdit } from './styleDelta';
 import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
 import {
   serializeValue,
@@ -343,7 +345,82 @@ function buildElementTarget(el: Element): ElementTarget {
     attributes,
     pluginPresent,
     confidence,
+    // Issue #8: carry token-relevant computed styles so the token panel can match.
+    computedStyles: collectTokenStyles(el),
   };
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #6/#8: tweak tool + token computed styles                            */
+/* -------------------------------------------------------------------------- */
+
+/** Token-relevant computed CSS properties (kebab-case), for #8 token matching. */
+const TOKEN_STYLE_KEYS: readonly string[] = [
+  'color',
+  'background-color',
+  'border-color',
+  'fill',
+  'stroke',
+  'font-size',
+  'font-weight',
+  'font-family',
+  'line-height',
+  'padding',
+  'margin',
+  'border-radius',
+];
+
+/** Collect token-relevant computed styles (kebab-case keys) for an element. */
+function collectTokenStyles(el: Element): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    const cs = getComputedStyle(el as HTMLElement);
+    for (const key of TOKEN_STYLE_KEYS) {
+      const val = cs.getPropertyValue(key).trim();
+      if (val) out[key] = val;
+    }
+  } catch {
+    // getComputedStyle can throw on detached nodes — leave the set partial.
+  }
+  return out;
+}
+
+/** Resolve the source location for an element from its (or an ancestor's) attr. */
+function sourceForElement(el: Element): SourceLocation | undefined {
+  const sourceEl = findSourceElement(el);
+  const raw = sourceEl?.getAttribute('data-easel-source') ?? null;
+  return raw ? parseSourceAttr(raw) : undefined;
+}
+
+/** Accumulated tweaks per element, so "Apply to source" ships the full delta. */
+const tweakStore = new WeakMap<Element, StyleEdit[]>();
+
+/** Apply one inline-style tweak and emit the updated `style-delta`. */
+function applyStyleTweak(el: Element, property: string, value: string): void {
+  const htmlEl = el as HTMLElement;
+  const existing = tweakStore.get(el) ?? [];
+  const prior = existing.find((d) => d.property === property);
+  let oldValue = prior?.oldValue;
+  if (oldValue === undefined) {
+    try {
+      oldValue = getComputedStyle(htmlEl).getPropertyValue(property).trim();
+    } catch {
+      oldValue = '';
+    }
+  }
+  htmlEl.style.setProperty(property, value);
+  const next = accumulateStyleEdit(existing, { property, oldValue: oldValue ?? '', newValue: value });
+  tweakStore.set(el, next);
+  send({ type: 'style-delta', selector: buildSelector(el), deltas: next, dataEaselSource: sourceForElement(el) });
+}
+
+/** Remove all inline tweaks from an element, restoring its source styling. */
+function discardStyleTweak(el: Element): void {
+  const existing = tweakStore.get(el) ?? [];
+  const htmlEl = el as HTMLElement;
+  for (const d of existing) htmlEl.style.removeProperty(d.property);
+  tweakStore.delete(el);
+  send({ type: 'style-delta', selector: buildSelector(el), deltas: [], dataEaselSource: sourceForElement(el) });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1244,6 +1321,26 @@ ipcRenderer.on(
             if (wrote) {
               send({ type: 'element-state', snapshot: buildElementStateSnapshot(el) });
             }
+          }
+          break;
+        }
+
+        case 'set-style': {
+          try {
+            const el = document.querySelector(cmd.selector);
+            if (el) applyStyleTweak(el, cmd.property, cmd.value);
+          } catch (err) {
+            console.error('[Easel:inspector] set-style error:', err);
+          }
+          break;
+        }
+
+        case 'discard-style': {
+          try {
+            const el = document.querySelector(cmd.selector);
+            if (el) discardStyleTweak(el);
+          } catch (err) {
+            console.error('[Easel:inspector] discard-style error:', err);
           }
           break;
         }

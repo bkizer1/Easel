@@ -154,6 +154,20 @@ const api: EaselApi = {
     onChanged(handler) {
       return subscribe(IpcChannels.checkpointChanged, handler);
     },
+    // Issue #7: fetch a checkpoint's before/after preview screenshots.
+    getShots(req) {
+      return ipcRenderer.invoke(IpcChannels.checkpointGetShots, req);
+    },
+    // Issue #11: scratch experiments.
+    scratchStart(req) {
+      return ipcRenderer.invoke(IpcChannels.checkpointScratchStart, req);
+    },
+    scratchKeep() {
+      return ipcRenderer.invoke(IpcChannels.checkpointScratchKeep);
+    },
+    scratchDiscard() {
+      return ipcRenderer.invoke(IpcChannels.checkpointScratchDiscard);
+    },
   },
 
   // ── preview.* ─────────────────────────────────────────────────────────────
@@ -213,6 +227,20 @@ const api: EaselApi = {
     },
     onNetworkEvent(handler) {
       return subscribe(IpcChannels.networkEvent, handler);
+    },
+  },
+
+  // ── tokens.* (Issue #8) ─────────────────────────────────────────────────────
+  tokens: {
+    match(req) {
+      return ipcRenderer.invoke(IpcChannels.tokensMatch, req);
+    },
+  },
+
+  // ── publish.* (Issue #10) ────────────────────────────────────────────────────
+  publish: {
+    openPr(req) {
+      return ipcRenderer.invoke(IpcChannels.publishOpenPr, req);
     },
   },
 };

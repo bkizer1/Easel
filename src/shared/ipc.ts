@@ -24,7 +24,10 @@ import type {
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
+  ScratchInfo,
   SourceLocation,
+  StyleEdit,
+  TokenMatch,
 } from './types';
 import type { GridConfig } from './grid';
 import type { ElementStateSnapshot, NetworkEntry, StateSnapshot } from './xray';
@@ -88,6 +91,14 @@ export const IpcChannels = {
   checkpointRedo: 'checkpoint.redo',
   /** Emitted by main when the checkpoint list/position changes. */
   checkpointChanged: 'checkpoint.changed',
+  /** Fetch a checkpoint's before/after preview screenshots (Issue #7). */
+  checkpointGetShots: 'checkpoint.getShots',
+  /** Start a scratch experiment (Issue #11). */
+  checkpointScratchStart: 'checkpoint.scratchStart',
+  /** Keep the active scratch (land it on the main line) (Issue #11). */
+  checkpointScratchKeep: 'checkpoint.scratchKeep',
+  /** Discard the active scratch (restore pre-scratch tree) (Issue #11). */
+  checkpointScratchDiscard: 'checkpoint.scratchDiscard',
 
   // Preview / images --------------------------------------------------------
   /** Reload the embedded preview (e.g. after a manual file change). */
@@ -126,6 +137,14 @@ export const IpcChannels = {
   xrayListSnapshots: 'xray.listSnapshots',
   /** Emitted by main as network requests are observed (CDP). */
   networkEvent: 'network.event',
+
+  // Tokens (Issue #8) -------------------------------------------------------
+  /** Match a picked element's computed values against the project's design tokens. */
+  tokensMatch: 'tokens.match',
+
+  // Publish (Issue #10) -----------------------------------------------------
+  /** Squash accepted checkpoints onto a fresh branch off HEAD and open a PR. */
+  publishOpenPr: 'publish.openPr',
 } as const;
 
 /** Union of every channel-name literal. */
@@ -260,6 +279,56 @@ export interface CheckpointRedoResponse {
 export interface CheckpointChangedPayload {
   checkpoints: Checkpoint[];
   currentId?: string;
+  /** Issue #11: the active scratch experiment, when one is running. */
+  scratch?: ScratchInfo;
+}
+
+// Issue #7: checkpoint visual diff -------------------------------------------
+
+export interface CheckpointGetShotsRequest {
+  checkpointId: string;
+}
+export interface CheckpointGetShotsResponse {
+  /** PNG data URL of the preview before the edit, if captured. */
+  before?: string;
+  /** PNG data URL of the preview after HMR settled, if captured. */
+  after?: string;
+}
+
+// Issue #11: scratch experiments ---------------------------------------------
+
+export interface CheckpointScratchStartRequest {
+  /** Optional user-supplied experiment name. */
+  name?: string;
+}
+export interface CheckpointScratchResponse {
+  scratch: ScratchInfo;
+}
+
+// Issue #8: token matching ---------------------------------------------------
+
+export interface TokensMatchRequest {
+  /** Computed `{property: value}` pairs from the picked element. */
+  values: Record<string, string>;
+}
+export interface TokensMatchResponse {
+  /** One entry per input value; `token` is null when off-system. */
+  matches: TokenMatch[];
+}
+
+// Issue #10: branch & open PR ------------------------------------------------
+
+export interface PublishOpenPrRequest {
+  /** Override the generated branch name. */
+  branchName?: string;
+  /** Override the generated PR title. */
+  title?: string;
+}
+export interface PublishOpenPrResponse {
+  /** The branch created off HEAD. */
+  branch: string;
+  /** The opened PR URL, when `gh` returned one. */
+  prUrl?: string;
 }
 
 // preview.* -----------------------------------------------------------------
@@ -428,6 +497,14 @@ export interface EaselApi {
     undo(): Promise<IpcResult<CheckpointUndoResponse>>;
     redo(): Promise<IpcResult<CheckpointRedoResponse>>;
     onChanged(handler: (payload: CheckpointChangedPayload) => void): Unsubscribe;
+    /** Issue #7: fetch a checkpoint's before/after preview screenshots. */
+    getShots(req: CheckpointGetShotsRequest): Promise<IpcResult<CheckpointGetShotsResponse>>;
+    /** Issue #11: start a scratch experiment (routes new checkpoints to a scratch ref). */
+    scratchStart(req: CheckpointScratchStartRequest): Promise<IpcResult<CheckpointScratchResponse>>;
+    /** Issue #11: keep the active scratch (land its checkpoints on the main line). */
+    scratchKeep(): Promise<IpcResult<CheckpointScratchResponse>>;
+    /** Issue #11: discard the active scratch (restore the pre-scratch tree). */
+    scratchDiscard(): Promise<IpcResult<CheckpointScratchResponse>>;
   };
 
   preview: {
@@ -468,6 +545,18 @@ export interface EaselApi {
     /** Subscribe to streamed network observations from the CDP tap. */
     onNetworkEvent(handler: (payload: NetworkEventPayload) => void): Unsubscribe;
   };
+
+  // ── Issue #8: Live token inspector ──────────────────────────────────────────
+  tokens: {
+    /** Match computed values against the open project's design tokens. */
+    match(req: TokensMatchRequest): Promise<IpcResult<TokensMatchResponse>>;
+  };
+
+  // ── Issue #10: Branch & open PR ─────────────────────────────────────────────
+  publish: {
+    /** Squash accepted checkpoints onto a fresh branch off HEAD and open a PR. */
+    openPr(req: PublishOpenPrRequest): Promise<IpcResult<PublishOpenPrResponse>>;
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -501,6 +590,10 @@ export interface IpcInvokeMap {
   [IpcChannels.checkpointRestore]: { request: CheckpointRestoreRequest; response: IpcResult<CheckpointRestoreResponse> };
   [IpcChannels.checkpointUndo]: { request: void; response: IpcResult<CheckpointUndoResponse> };
   [IpcChannels.checkpointRedo]: { request: void; response: IpcResult<CheckpointRedoResponse> };
+  [IpcChannels.checkpointGetShots]: { request: CheckpointGetShotsRequest; response: IpcResult<CheckpointGetShotsResponse> };
+  [IpcChannels.checkpointScratchStart]: { request: CheckpointScratchStartRequest; response: IpcResult<CheckpointScratchResponse> };
+  [IpcChannels.checkpointScratchKeep]: { request: void; response: IpcResult<CheckpointScratchResponse> };
+  [IpcChannels.checkpointScratchDiscard]: { request: void; response: IpcResult<CheckpointScratchResponse> };
 
   [IpcChannels.previewReload]: { request: PreviewReloadRequest | void; response: IpcResult<void> };
   [IpcChannels.previewCapture]: { request: PreviewCaptureRequest | void; response: IpcResult<PreviewCaptureResponse> };
@@ -523,6 +616,10 @@ export interface IpcInvokeMap {
     response: IpcResult<XrayGetSnapshotResponse>;
   };
   [IpcChannels.xrayListSnapshots]: { request: void; response: IpcResult<XrayListSnapshotsResponse> };
+
+  [IpcChannels.tokensMatch]: { request: TokensMatchRequest; response: IpcResult<TokensMatchResponse> };
+
+  [IpcChannels.publishOpenPr]: { request: PublishOpenPrRequest; response: IpcResult<PublishOpenPrResponse> };
 }
 
 /**
@@ -629,6 +726,17 @@ export type InspectorMessage =
        */
       type: 'element-state';
       snapshot: ElementStateSnapshot;
+    }
+  // ── Issue #6: Live DOM/CSS tweak ────────────────────────────────────────────
+  | {
+      /** Accumulated inline-style delta for the tweaked element. */
+      type: 'style-delta';
+      /** Selector of the element the delta applies to. */
+      selector: string;
+      /** All `{property, oldValue, newValue}` changes so far (empty after discard). */
+      deltas: StyleEdit[];
+      /** The element's source location, when `data-easel-source` is present. */
+      dataEaselSource?: SourceLocation;
     };
 
 /** Commands the host renderer sends down into the guest inspector. */
@@ -687,4 +795,19 @@ export type InspectorCommand =
       /** Machine path from a {@link import('./xray').StateEntry}, e.g. `['props','count']`. */
       path: string[];
       value: string | number | boolean | null;
+    }
+  // ── Issue #6: Live DOM/CSS tweak ────────────────────────────────────────────
+  | {
+      /** Apply an ephemeral inline-style tweak to the element for instant feedback. */
+      type: 'set-style';
+      selector: string;
+      /** CSS property in kebab-case. */
+      property: string;
+      /** New value to apply inline. */
+      value: string;
+    }
+  | {
+      /** Drop all inline tweaks on the element, restoring its source styling. */
+      type: 'discard-style';
+      selector: string;
     };

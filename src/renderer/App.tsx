@@ -26,6 +26,8 @@ import { DiffViewer } from './components/DiffViewer';
 import { SettingsDialog } from './components/SettingsDialog';
 import { PolicyPrompt } from './components/PolicyPrompt';
 import { StateXRayPanel } from './components/StateXRayPanel';
+import { TweakPanel } from './components/TweakPanel';
+import { TokenPanel } from './components/TokenPanel';
 
 /* -------------------------------------------------------------------------- */
 /*  Theme management                                                           */
@@ -203,6 +205,10 @@ export default function App(): JSX.Element {
         <div className="flex flex-1 min-h-0 overflow-hidden">
           <div className="flex-1 relative overflow-hidden">
             <PreviewPane />
+            {/* Issue #6: live CSS tweak panel (renders only when an element is picked) */}
+            <TweakPanel />
+            {/* Issue #8: design-token inspector (renders after token matches resolve) */}
+            <TokenPanel />
           </div>
 
           <div className="shrink-0 flex flex-col hairline-l w-80 lg:w-[360px]">
