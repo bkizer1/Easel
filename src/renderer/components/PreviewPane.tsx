@@ -22,6 +22,7 @@ import { DEFAULT_OFF_GRID_THRESHOLD } from '@shared/grid';
 import { useEaselStore, normalizePreviewUrl } from '../store';
 import { easel } from '../lib/api';
 import { AnnotationOverlay } from './AnnotationOverlay';
+import { dropPointToQueryBox } from '../lib/dropImage';
 import { DevServerOverlay } from './DevServerOverlay';
 
 /* -------------------------------------------------------------------------- */
@@ -135,6 +136,9 @@ export function PreviewPane(): React.ReactElement {
 
   // State X-Ray (issue #13): record live element state + drain guest commands.
   const setElementState = useEaselStore((s) => s.setElementState);
+  // Issue #6: relay the accumulated style delta; Issue #9: drop-an-image.
+  const setStyleTweak = useEaselStore((s) => s.setStyleTweak);
+  const dropImageOnElement = useEaselStore((s) => s.dropImageOnElement);
   const pendingInspectorCommand = useEaselStore((s) => s.pendingInspectorCommand);
   const inspectorCommandNonce = useEaselStore((s) => s.inspectorCommandNonce);
 
@@ -148,6 +152,11 @@ export function PreviewPane(): React.ReactElement {
   const [scroll, setScroll] = useState<Point>({ x: 0, y: 0 });
   // Whether the webview is ready (dom-ready fired).
   const [webviewReady, setWebviewReady] = useState(false);
+  // Issue #9: drag-over affordance + in-flight image drops awaiting a target,
+  // keyed by queryId so concurrent drops never clobber each other.
+  const [dragActive, setDragActive] = useState(false);
+  const pendingDrops = useRef<Map<string, { imageDataUrl: string }>>(new Map());
+  const dropCounter = useRef(0);
 
   // Keep the address bar in sync when previewUrl changes externally
   // (e.g. opening a project pre-fills its dev-server URL).
@@ -158,6 +167,7 @@ export function PreviewPane(): React.ReactElement {
   // Reset readiness whenever we navigate to a new URL (new dom-ready follows).
   useEffect(() => {
     setWebviewReady(false);
+    setDragActive(false); // clear any stale drag affordance from the old page
   }, [previewUrl]);
 
   /* ---- Navigation ---- */
@@ -226,11 +236,29 @@ export function PreviewPane(): React.ReactElement {
         }
 
         case 'region-resolved': {
+          // Issue #9: if a dropped image is awaiting this query, restyle the
+          // top-ranked element to match it instead of selecting targets.
+          const pending = pendingDrops.current.get(msg.queryId);
+          if (pending) {
+            pendingDrops.current.delete(msg.queryId);
+            const top = msg.targets[0];
+            if (top) void dropImageOnElement(top, pending.imageDataUrl);
+            break;
+          }
           for (const t of msg.targets) {
             addTarget(t);
           }
           break;
         }
+
+        case 'style-delta':
+          // Issue #6: accumulated inline-style delta for the tweaked element.
+          setStyleTweak(
+            msg.deltas.length > 0
+              ? { selector: msg.selector, deltas: msg.deltas, dataEaselSource: msg.dataEaselSource }
+              : null,
+          );
+          break;
 
         case 'off-grid-result':
           setOffGridResult(msg.offenders);
@@ -257,7 +285,17 @@ export function PreviewPane(): React.ReactElement {
           break;
       }
     },
-    [addTarget, setHover, addAnnotation, addPageError, scroll, setOffGridResult, setElementState],
+    [
+      addTarget,
+      setHover,
+      addAnnotation,
+      addPageError,
+      scroll,
+      setOffGridResult,
+      setElementState,
+      setStyleTweak,
+      dropImageOnElement,
+    ],
   );
 
   /* ---- Sync mode changes to the guest inspector ---- */
@@ -323,6 +361,48 @@ export function PreviewPane(): React.ReactElement {
     if (!webviewReady) return;
     sendCommand({ type: 'highlight', selector: hoveredSelector ?? null });
   }, [hoveredSelector, webviewReady, sendCommand]);
+
+  /* ---- Issue #9: drag-and-drop an image onto an element ---- */
+  const onPreviewDragOver = useCallback((e: React.DragEvent) => {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    setDragActive(true);
+  }, []);
+
+  const onPreviewDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragActive(false);
+  }, []);
+
+  const onPreviewDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setDragActive(false);
+
+      const file = e.dataTransfer.files?.[0];
+      if (!file || !file.type.startsWith('image/')) return;
+
+      const wv = webviewRef.current;
+      if (!wv) return;
+      const rect = wv.getBoundingClientRect();
+      const point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : null;
+        if (!dataUrl) return;
+        const queryId = `drop-${++dropCounter.current}`;
+        pendingDrops.current.set(queryId, { imageDataUrl: dataUrl });
+        sendCommand({ type: 'query-region', box: dropPointToQueryBox(point), queryId });
+      };
+      reader.readAsDataURL(file);
+    },
+    [sendCommand],
+  );
 
   /* ---- Drive the alignment-grid overlay into the guest (issue #5) ---- */
   useEffect(() => {
@@ -473,6 +553,9 @@ export function PreviewPane(): React.ReactElement {
             <div
               className="relative h-full shrink-0 transition-[width] duration-200"
               style={{ width: viewportWidth ? `${viewportWidth}px` : '100%', maxWidth: '100%' }}
+              onDragOver={onPreviewDragOver}
+              onDragLeave={onPreviewDragLeave}
+              onDrop={onPreviewDrop}
             >
               <webview
                 // Keying by URL forces a fresh element on navigation so the
@@ -491,6 +574,14 @@ export function PreviewPane(): React.ReactElement {
                 style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 'none' }}
               />
               <AnnotationOverlay hoverBox={hoverBox} scroll={scroll} sendCommand={sendCommand} />
+              {/* Issue #9: drop-an-image affordance */}
+              {dragActive && (
+                <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-brand-500/10 ring-2 ring-inset ring-brand-400/70">
+                  <span className="rounded-lg bg-ink-900/90 px-3 py-1.5 text-[12px] font-medium text-brand-200 shadow-lg">
+                    Drop an image onto an element to restyle it
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}

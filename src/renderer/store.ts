@@ -23,14 +23,21 @@ import type {
   AppSettings,
   Checkpoint,
   ChatMessage,
+  EditRequest,
   ElementTarget,
   FileDiff,
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
+  ScratchInfo,
   SourceLocation,
+  StyleEdit,
+  TokenMatch,
 } from '@shared/types';
 import type { DevServerStatePayload, InspectorCommand, PreviewStatusPayload } from '@shared/ipc';
+import { buildStyleEditInstruction } from './lib/styleEdit';
+import { buildTokenizeInstruction } from './lib/tokenize';
+import { buildDropImageEditRequest } from './lib/dropImage';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
 import {
@@ -225,6 +232,26 @@ export interface EaselState {
   pendingInspectorCommand: InspectorCommand | null;
   /** Bumped whenever {@link pendingInspectorCommand} is set, to trigger send. */
   inspectorCommandNonce: number;
+
+  // ── Issue #6: Live DOM/CSS tweak ──────────────────────────────────────────
+  /** The accumulated ephemeral style delta for the element being tweaked. */
+  styleTweak: { selector: string; deltas: StyleEdit[]; dataEaselSource?: SourceLocation } | null;
+
+  // ── Issue #8: Live token inspector ────────────────────────────────────────
+  /** Token matches for the picked element's computed values, or null. */
+  tokenMatches: TokenMatch[] | null;
+  /** True while token matches are being resolved by main. */
+  tokenLoading: boolean;
+
+  // ── Issue #11: Scratch branches ───────────────────────────────────────────
+  /** The active scratch experiment, or null when on the main checkpoint line. */
+  scratch: ScratchInfo | null;
+
+  // ── Issue #10: Branch & open PR ───────────────────────────────────────────
+  /** True while a branch+PR is being created. */
+  publishing: boolean;
+  /** URL of the most recently opened PR, or null. */
+  lastPrUrl: string | null;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -435,6 +462,52 @@ export interface EaselActions {
     fromCheckpointId: string,
     toCheckpointId: string,
   ): Promise<StateDiffEntry[] | null>;
+
+  // ── Shared: submit a pre-baked EditRequest (used by #6/#8/#9) ──────────────
+  /**
+   * Submit a fully-assembled {@link EditRequest} directly (bypassing the
+   * annotation/screenshot draft path of {@link submitEdit}). Pushes a user
+   * ChatMessage, flips the streaming flag, and routes failures like submitEdit.
+   */
+  submitDirectEdit(request: EditRequest): Promise<void>;
+
+  // ── Issue #6: Live DOM/CSS tweak ──────────────────────────────────────────
+  /** Store the latest style delta the guest reported for the tweaked element. */
+  setStyleTweak(tweak: EaselState['styleTweak']): void;
+  /** Apply one live inline-style tweak to `selector` (instant, ephemeral). */
+  tweakStyle(selector: string, property: string, value: string): void;
+  /** "Apply to source": ship the accumulated delta as an EditRequest. */
+  applyStyleToSource(): Promise<void>;
+  /** Discard the accumulated tweaks, restoring the element's source styling. */
+  discardStyleTweak(): void;
+
+  // ── Issue #7: Checkpoint visual diff ──────────────────────────────────────
+  /** Fetch a checkpoint's before/after preview screenshots (visual diff). */
+  getCheckpointShots(checkpointId: string): Promise<{ before?: string; after?: string }>;
+
+  // ── Issue #8: Live token inspector ────────────────────────────────────────
+  /** Resolve token matches for a set of computed `{property: value}` pairs. */
+  fetchTokenMatches(values: Record<string, string>): Promise<void>;
+  /** Clear the current token matches (e.g. when the panel closes). */
+  clearTokenMatches(): void;
+  /** "Use token": build an EditRequest swapping the hardcoded value for a token. */
+  tokenizeValue(match: TokenMatch): Promise<void>;
+
+  // ── Issue #9: Drop-an-image design-to-code ────────────────────────────────
+  /** Restyle one existing element to match a dropped image. */
+  dropImageOnElement(target: ElementTarget, imageDataUrl: string): Promise<void>;
+
+  // ── Issue #11: Scratch branches ───────────────────────────────────────────
+  /** Start a scratch experiment (routes new checkpoints to a throwaway ref). */
+  startScratch(name?: string): Promise<void>;
+  /** Keep the active scratch: land its checkpoints on the main line. */
+  keepScratch(): Promise<void>;
+  /** Discard the active scratch: restore the pre-scratch tree and reload. */
+  discardScratch(): Promise<void>;
+
+  // ── Issue #10: Branch & open PR ───────────────────────────────────────────
+  /** Squash this session's accepted checkpoints onto a fresh branch and open a PR. */
+  openPr(): Promise<string | null>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -485,6 +558,12 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   networkCapturing: false,
   pendingInspectorCommand: null,
   inspectorCommandNonce: 0,
+  styleTweak: null,
+  tokenMatches: null,
+  tokenLoading: false,
+  scratch: null,
+  publishing: false,
+  lastPrUrl: null,
 
   /* ---- Init / subscriptions ------------------------------------------------ */
 
@@ -498,8 +577,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ settings });
     });
 
-    const unsubCheckpoint = easel.checkpoint.onChanged(({ checkpoints, currentId }) => {
-      set({ checkpoints, currentCheckpointId: currentId });
+    const unsubCheckpoint = easel.checkpoint.onChanged(({ checkpoints, currentId, scratch }) => {
+      set({ checkpoints, currentCheckpointId: currentId, scratch: scratch ?? null });
     });
 
     const unsubPreview = easel.preview.onStatus((payload) => {
@@ -612,6 +691,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       xrayOpen: false,
       currentElementState: null,
       networkEntries: [],
+      // Issues #6-#11: clear feature state so it never leaks into the next project.
+      styleTweak: null,
+      tokenMatches: null,
+      tokenLoading: false,
+      scratch: null,
+      publishing: false,
+      lastPrUrl: null,
     });
   },
 
@@ -1661,5 +1747,234 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     }
     if (!from.value.snapshot || !to.value.snapshot) return null;
     return diffSerialized(from.value.snapshot.data, to.value.snapshot.data);
+  },
+
+  /* ---- Shared: submit a pre-baked EditRequest ------------------------------ */
+
+  async submitDirectEdit(request) {
+    const { project } = get();
+    if (!project) {
+      set({ lastError: 'No project is open.' });
+      return;
+    }
+    if (!request.instruction.trim()) {
+      set({ lastError: 'Instruction cannot be empty.' });
+      return;
+    }
+
+    const userMsg: ChatMessage = {
+      id: genId(),
+      role: 'user',
+      content: request.instruction,
+      createdAt: Date.now(),
+      requestId: request.id,
+    };
+
+    set((s) => ({
+      chat: [...s.chat, userMsg],
+      activeRequestId: request.id,
+      streaming: true,
+      liveDiffs: [],
+      lastError: null,
+    }));
+
+    const result = await easel.edit.submit({ request });
+    if (!result.ok) {
+      const errMsg: ChatMessage = {
+        id: genId(),
+        role: 'system',
+        content: `Submit failed: ${result.error}`,
+        createdAt: Date.now(),
+        requestId: request.id,
+      };
+      set((s) => ({
+        chat: [...s.chat, errMsg],
+        lastError: result.error,
+        streaming: false,
+        activeRequestId: null,
+      }));
+    }
+  },
+
+  /* ---- Issue #6: Live DOM/CSS tweak --------------------------------------- */
+
+  setStyleTweak(tweak) {
+    set({ styleTweak: tweak });
+  },
+
+  tweakStyle(selector, property, value) {
+    get().sendInspectorCommand({ type: 'set-style', selector, property, value });
+  },
+
+  async applyStyleToSource() {
+    const { project, previewUrl, styleTweak, targets } = get();
+    if (!project) {
+      set({ lastError: 'No project is open.' });
+      return;
+    }
+    if (!styleTweak || styleTweak.deltas.length === 0) {
+      set({ lastError: 'No style changes to apply.' });
+      return;
+    }
+
+    const matched = targets.find((t) => t.selector === styleTweak.selector);
+    const target: ElementTarget =
+      matched ?? {
+        id: genId(),
+        selector: styleTweak.selector,
+        tagName: '',
+        dataEaselSource: styleTweak.dataEaselSource,
+        boundingBox: { x: 0, y: 0, width: 0, height: 0 },
+        textSnippet: '',
+        attributes: {},
+        pluginPresent: Boolean(styleTweak.dataEaselSource),
+        confidence: styleTweak.dataEaselSource ? 'high' : 'low',
+      };
+
+    const request: EditRequest = {
+      id: genId(),
+      instruction: buildStyleEditInstruction(styleTweak.deltas),
+      annotations: [],
+      targets: [target],
+      projectRoot: project.root,
+      devServerUrl: previewUrl ?? project.devServerUrl,
+    };
+
+    set({ styleTweak: null });
+    await get().submitDirectEdit(request);
+  },
+
+  discardStyleTweak() {
+    const { styleTweak } = get();
+    if (styleTweak) {
+      get().sendInspectorCommand({ type: 'discard-style', selector: styleTweak.selector });
+    }
+    set({ styleTweak: null });
+  },
+
+  /* ---- Issue #7: Checkpoint visual diff ----------------------------------- */
+
+  async getCheckpointShots(checkpointId) {
+    const result = await easel.checkpoint.getShots({ checkpointId });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return {};
+    }
+    return result.value;
+  },
+
+  /* ---- Issue #8: Live token inspector ------------------------------------- */
+
+  async fetchTokenMatches(values) {
+    if (Object.keys(values).length === 0) {
+      set({ tokenMatches: [], tokenLoading: false });
+      return;
+    }
+    set({ tokenLoading: true });
+    const result = await easel.tokens.match({ values });
+    if (!result.ok) {
+      set({ lastError: result.error, tokenLoading: false, tokenMatches: null });
+      return;
+    }
+    set({ tokenMatches: result.value.matches, tokenLoading: false });
+  },
+
+  clearTokenMatches() {
+    set({ tokenMatches: null, tokenLoading: false });
+  },
+
+  async tokenizeValue(match) {
+    const { project, previewUrl, targets } = get();
+    if (!project) {
+      set({ lastError: 'No project is open.' });
+      return;
+    }
+    if (!match.token) {
+      set({ lastError: 'This value has no matching design token.' });
+      return;
+    }
+
+    const target =
+      targets.find((t) => t.computedStyles?.[match.property] === match.value) ??
+      targets[targets.length - 1];
+    if (!target) {
+      set({ lastError: 'No element is selected.' });
+      return;
+    }
+
+    const request: EditRequest = {
+      id: genId(),
+      instruction: buildTokenizeInstruction(match),
+      annotations: [],
+      targets: [target],
+      projectRoot: project.root,
+      devServerUrl: previewUrl ?? project.devServerUrl,
+    };
+
+    await get().submitDirectEdit(request);
+  },
+
+  /* ---- Issue #9: Drop-an-image design-to-code ----------------------------- */
+
+  async dropImageOnElement(target, imageDataUrl) {
+    const { project, previewUrl } = get();
+    if (!project) {
+      set({ lastError: 'No project is open.' });
+      return;
+    }
+    const request = buildDropImageEditRequest({
+      id: genId(),
+      target,
+      imageDataUrl,
+      projectRoot: project.root,
+      devServerUrl: previewUrl ?? project.devServerUrl,
+    });
+    await get().submitDirectEdit(request);
+  },
+
+  /* ---- Issue #11: Scratch branches ---------------------------------------- */
+
+  async startScratch(name) {
+    const result = await easel.checkpoint.scratchStart({ name });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ scratch: result.value.scratch, lastError: null });
+  },
+
+  async keepScratch() {
+    const result = await easel.checkpoint.scratchKeep();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ scratch: result.value.scratch, lastError: null });
+  },
+
+  async discardScratch() {
+    const result = await easel.checkpoint.scratchDiscard();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ scratch: result.value.scratch, lastError: null });
+    get().reloadPreview();
+  },
+
+  /* ---- Issue #10: Branch & open PR ---------------------------------------- */
+
+  async openPr() {
+    if (get().publishing) return null;
+    set({ publishing: true, lastError: null });
+    const result = await easel.publish.openPr({});
+    set({ publishing: false });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return null;
+    }
+    const url = result.value.prUrl ?? null;
+    set({ lastPrUrl: url });
+    return url;
   },
 }));
