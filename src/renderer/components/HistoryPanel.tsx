@@ -27,6 +27,7 @@ import {
 import type { Checkpoint } from '@shared/types';
 import { useEaselStore } from '../store';
 import { easel } from '../lib/api';
+import { Tooltip } from './Tooltip';
 
 function relTime(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -70,7 +71,7 @@ function VisualDiff({ checkpointId }: { checkpointId: string }): React.ReactElem
   return (
     <div className="px-3.5 pb-3 pt-1">
       {/* Onion-skin: before with after overlaid at the slider opacity. */}
-      <div className="relative overflow-hidden rounded-md border border-white/10 bg-black/40">
+      <div className="surface-inset relative overflow-hidden rounded-md">
         {shots!.before && (
           <img src={shots!.before} alt="before" className="block w-full" draggable={false} />
         )}
@@ -114,41 +115,48 @@ function CheckpointEntry({ c, isCurrent }: { c: Checkpoint; isCurrent: boolean }
   return (
     <li>
       <div
-        className={`group flex w-full items-start gap-2.5 px-3.5 py-2 ${
+        className={`group flex w-full items-start gap-2.5 px-3.5 py-2 transition-all duration-150 ease-spring ${
           isCurrent ? 'bg-brand-500/10' : 'hover:bg-white/[0.05]'
         }`}
       >
-        <button
-          onClick={() => void restoreCheckpoint(c.id)}
-          disabled={isCurrent}
-          title={isCurrent ? 'Current state' : `Revert to: ${c.message}`}
-          className="flex min-w-0 flex-1 items-start gap-2.5 text-left"
+        <Tooltip
+          label={isCurrent ? 'Current state' : `Revert to: ${c.message}`}
+          side="right"
         >
-          <span
-            className={`mt-0.5 grid h-4 w-4 flex-shrink-0 place-items-center rounded-full ${
-              isCurrent ? 'bg-brand-500/20 text-brand-300' : 'text-gray-600 group-hover:text-gray-300'
-            }`}
+          <button
+            onClick={() => void restoreCheckpoint(c.id)}
+            disabled={isCurrent}
+            aria-label={isCurrent ? 'Current state' : `Revert to: ${c.message}`}
+            className="flex min-w-0 flex-1 items-start gap-2.5 text-left active:scale-[0.99] transition-all duration-150 ease-spring"
           >
-            {isCurrent ? <Check className="h-3 w-3" /> : <RotateCcw className="h-3 w-3" />}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12.5px] text-gray-200">{c.message}</span>
-            <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-500">
-              <Clock className="h-2.5 w-2.5" /> {relTime(c.createdAt)}
-              {c.changedFiles.length > 0 && (
-                <span>· {c.changedFiles.length} file{c.changedFiles.length === 1 ? '' : 's'}</span>
-              )}
+            <span
+              className={`mt-0.5 grid h-4 w-4 flex-shrink-0 place-items-center rounded-full ${
+                isCurrent ? 'bg-brand-500/20 text-brand-300' : 'text-gray-600 group-hover:text-gray-300'
+              }`}
+            >
+              {isCurrent ? <Check className="h-3 w-3" /> : <RotateCcw className="h-3 w-3" />}
             </span>
-          </span>
-        </button>
-        <button
-          onClick={() => setExpanded((e) => !e)}
-          title="Before / after screenshots"
-          className="mt-0.5 flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 text-gray-500 hover:bg-white/10 hover:text-brand-300"
-        >
-          <Images className="h-3 w-3" />
-          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        </button>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12.5px] text-gray-200">{c.message}</span>
+              <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-gray-500">
+                <Clock className="h-2.5 w-2.5" /> {relTime(c.createdAt)}
+                {c.changedFiles.length > 0 && (
+                  <span>· {c.changedFiles.length} file{c.changedFiles.length === 1 ? '' : 's'}</span>
+                )}
+              </span>
+            </span>
+          </button>
+        </Tooltip>
+        <Tooltip label="Before / after screenshots" side="left">
+          <button
+            onClick={() => setExpanded((e) => !e)}
+            aria-label="Before / after screenshots"
+            className="mt-0.5 flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 text-gray-500 transition-all duration-150 ease-spring hover:bg-white/10 hover:text-brand-300 active:scale-90"
+          >
+            <Images className="h-3 w-3" />
+            {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          </button>
+        </Tooltip>
       </div>
       {expanded && <VisualDiff checkpointId={c.id} />}
     </li>
@@ -173,22 +181,26 @@ function ScratchControls(): React.ReactElement {
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-amber-200/90">
           Experiment{scratch.name ? `: ${scratch.name}` : ' in progress'}
         </span>
-        <button
-          onClick={() => void keepScratch()}
-          disabled={streaming}
-          title="Keep these edits on the main line"
-          className="flex items-center gap-1 rounded-md bg-brand-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-brand-500 disabled:opacity-30"
-        >
-          <Check className="h-3 w-3" /> Keep
-        </button>
-        <button
-          onClick={() => void discardScratch()}
-          disabled={streaming}
-          title="Discard the experiment and restore the pre-scratch state"
-          className="flex items-center gap-1 rounded-md bg-ink-800 px-2 py-1 text-[11px] text-gray-300 hover:bg-rose-500/15 hover:text-rose-300 disabled:opacity-30"
-        >
-          <Trash2 className="h-3 w-3" /> Discard
-        </button>
+        <Tooltip label="Keep these edits on the main line" side="bottom">
+          <button
+            onClick={() => void keepScratch()}
+            disabled={streaming}
+            aria-label="Keep these edits on the main line"
+            className="flex items-center gap-1 rounded-md bg-brand-600 px-2 py-1 text-[11px] font-medium text-white transition-all duration-150 ease-spring hover:bg-brand-500 active:scale-[0.97] disabled:opacity-30"
+          >
+            <Check className="h-3 w-3" /> Keep
+          </button>
+        </Tooltip>
+        <Tooltip label="Discard the experiment and restore the pre-scratch state" side="bottom">
+          <button
+            onClick={() => void discardScratch()}
+            disabled={streaming}
+            aria-label="Discard experiment"
+            className="flex items-center gap-1 rounded-md bg-ink-800 px-2 py-1 text-[11px] text-gray-300 transition-all duration-150 ease-spring hover:bg-rose-500/15 hover:text-rose-300 active:scale-[0.97] disabled:opacity-30"
+          >
+            <Trash2 className="h-3 w-3" /> Discard
+          </button>
+        </Tooltip>
       </div>
     );
   }
@@ -214,7 +226,7 @@ function ScratchControls(): React.ReactElement {
         />
         <button
           onClick={submit}
-          className="rounded-md bg-brand-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-brand-500"
+          className="rounded-md bg-brand-600 px-2 py-1 text-[11px] font-medium text-white transition-all duration-150 ease-spring hover:bg-brand-500 active:scale-[0.97]"
         >
           Start
         </button>
@@ -224,14 +236,16 @@ function ScratchControls(): React.ReactElement {
 
   return (
     <div className="px-3.5 py-2 hairline-b">
-      <button
-        onClick={() => setOpening(true)}
-        disabled={!project || streaming}
-        title="Start a throwaway experiment you can keep or discard"
-        className="flex w-full items-center justify-center gap-1.5 rounded-md bg-ink-800/70 px-2 py-1.5 text-[11.5px] text-gray-300 hover:bg-ink-700 disabled:opacity-30"
-      >
-        <FlaskConical className="h-3.5 w-3.5 text-brand-400" /> Start experiment
-      </button>
+      <Tooltip label="Start a throwaway experiment you can keep or discard" side="bottom">
+        <button
+          onClick={() => setOpening(true)}
+          disabled={!project || streaming}
+          aria-label="Start experiment"
+          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-ink-800/70 px-2 py-1.5 text-[11.5px] text-gray-300 transition-all duration-150 ease-spring hover:bg-ink-700 active:scale-[0.97] disabled:opacity-30"
+        >
+          <FlaskConical className="h-3.5 w-3.5 text-brand-400" /> Start experiment
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -250,26 +264,34 @@ function PublishFooter(): React.ReactElement | null {
 
   return (
     <div className="hairline-t px-3.5 py-2.5">
-      <button
-        onClick={() => void openPr()}
-        disabled={publishing || scratch?.active}
-        title={
+      <Tooltip
+        label={
           scratch?.active
             ? 'Keep or discard the active experiment before opening a PR'
             : 'Squash these edits onto a fresh branch off HEAD and open a PR'
         }
-        className="flex w-full items-center justify-center gap-1.5 rounded-md bg-brand-600 px-2 py-1.5 text-[12px] font-medium text-white hover:bg-brand-500 disabled:opacity-30"
+        side="top"
       >
-        <GitPullRequest className="h-3.5 w-3.5" />
-        {publishing ? 'Opening PR…' : `Branch & open PR (${editCount} edit${editCount === 1 ? '' : 's'})`}
-      </button>
-      {lastPrUrl && (
         <button
-          onClick={() => void easel.preview.openExternal({ url: lastPrUrl })}
-          className="mt-1.5 flex w-full items-center justify-center gap-1.5 text-[11px] text-brand-300 hover:text-brand-200"
+          onClick={() => void openPr()}
+          disabled={publishing || scratch?.active}
+          aria-label={publishing ? 'Opening PR…' : 'Branch and open PR'}
+          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-brand-600 px-2 py-1.5 text-[12px] font-medium text-white transition-all duration-150 ease-spring hover:bg-brand-500 active:scale-[0.97] disabled:opacity-30"
         >
-          <ExternalLink className="h-3 w-3" /> View pull request
+          <GitPullRequest className="h-3.5 w-3.5" />
+          {publishing ? 'Opening PR…' : `Branch & open PR (${editCount} edit${editCount === 1 ? '' : 's'})`}
         </button>
+      </Tooltip>
+      {lastPrUrl && (
+        <Tooltip label="View pull request" side="top">
+          <button
+            onClick={() => void easel.preview.openExternal({ url: lastPrUrl })}
+            aria-label="View pull request"
+            className="mt-1.5 flex w-full items-center justify-center gap-1.5 text-[11px] text-brand-300 transition-all duration-150 ease-spring hover:text-brand-200 active:scale-[0.97]"
+          >
+            <ExternalLink className="h-3 w-3" /> View pull request
+          </button>
+        </Tooltip>
       )}
     </div>
   );
@@ -283,7 +305,7 @@ export function HistoryPanel(): React.ReactElement {
   const items = [...checkpoints].reverse();
 
   return (
-    <div className="absolute left-0 top-full mt-1.5 z-30 w-80 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+    <div className="glass-panel animate-panel-in absolute left-0 top-full mt-1.5 z-30 w-80 overflow-hidden origin-top-right">
       <div className="flex items-center justify-between px-3.5 py-2.5 hairline-b">
         <span className="flex items-center gap-2 text-[12px] font-semibold text-gray-200">
           <History className="h-3.5 w-3.5 text-brand-400" /> History

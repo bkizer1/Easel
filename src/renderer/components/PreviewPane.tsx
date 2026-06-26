@@ -15,7 +15,16 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, RotateCw, FolderOpen, Globe } from 'lucide-react';
+import {
+  ArrowLeft,
+  ArrowRight,
+  RotateCw,
+  FolderOpen,
+  Globe,
+  Lock,
+  Loader2,
+  Sparkles,
+} from 'lucide-react';
 import type { BoundingBox, ElementTarget, Point } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { DEFAULT_OFF_GRID_THRESHOLD } from '@shared/grid';
@@ -24,6 +33,7 @@ import { easel } from '../lib/api';
 import { AnnotationOverlay } from './AnnotationOverlay';
 import { dropPointToQueryBox } from '../lib/dropImage';
 import { DevServerOverlay } from './DevServerOverlay';
+import { Tooltip } from './Tooltip';
 
 /* -------------------------------------------------------------------------- */
 /*  Webview element typing                                                    */
@@ -43,6 +53,8 @@ interface WebviewElement extends HTMLElement {
   reloadIgnoringCache(): void;
   goBack(): void;
   goForward(): void;
+  canGoBack(): boolean;
+  canGoForward(): boolean;
   stop(): void;
   getURL(): string;
   send(channel: string, ...args: unknown[]): void;
@@ -80,23 +92,33 @@ interface DidFailLoadEvent extends Event {
 
 function EmptyState({ onOpen }: { onOpen: () => void }): React.ReactElement {
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-4 text-gray-500 select-none px-6 text-center">
-      <Globe className="w-12 h-12 text-gray-700" />
-      <div>
-        <p className="text-sm font-medium text-gray-400">Nothing loaded yet</p>
-        <p className="text-xs mt-1 max-w-xs">
-          Type your dev server URL in the address bar above (e.g.{' '}
-          <span className="font-mono text-gray-400">http://localhost:3000</span>) and press Enter —
-          or open a project folder to also let Claude edit its source.
+    <div className="flex flex-col items-center justify-center h-full gap-5 text-gray-500 select-none px-6 text-center animate-fade-in">
+      {/* Layered emblem: a soft jade halo behind the canvas mark. */}
+      <div className="relative grid place-items-center">
+        <div className="absolute h-28 w-28 rounded-full bg-brand-500/10 blur-2xl" />
+        <div className="relative grid place-items-center h-16 w-16 rounded-2xl border border-white/10 bg-ink-800/70 shadow-glass">
+          <Globe className="h-7 w-7 text-gray-500" />
+        </div>
+      </div>
+      <div className="max-w-sm">
+        <p className="text-[15px] font-semibold text-gray-200">Nothing loaded yet</p>
+        <p className="text-[12.5px] mt-1.5 leading-relaxed text-gray-500">
+          Type a dev-server URL in the address bar above —{' '}
+          <span className="font-mono text-gray-300">http://localhost:3000</span> — and press Enter.
+          Open a project folder too, so Claude can edit its source.
         </p>
       </div>
       <button
         onClick={onOpen}
-        className="flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg bg-brand-700 hover:bg-brand-600 text-white transition-colors"
+        className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium rounded-xl bg-brand-600 text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.18)] hover:bg-brand-500 transition-all duration-150 ease-spring active:scale-[0.98]"
       >
         <FolderOpen className="w-4 h-4" />
         Open project folder
       </button>
+      <div className="flex items-center gap-1.5 text-[11px] text-gray-600">
+        <Sparkles className="w-3 h-3 text-brand-500/70" />
+        Select an element or draw markup, then describe the change
+      </div>
     </div>
   );
 }
@@ -125,6 +147,7 @@ export function PreviewPane(): React.ReactElement {
   const setHover = useEaselStore((s) => s.setHover);
   const addAnnotation = useEaselStore((s) => s.addAnnotation);
   const clearTargets = useEaselStore((s) => s.clearTargets);
+  const clearAnnotations = useEaselStore((s) => s.clearAnnotations);
   const hoveredSelector = useEaselStore((s) => s.hoveredSelector);
 
   // Alignment grid (issue #5): display state is driven into the guest inspector.
@@ -143,6 +166,18 @@ export function PreviewPane(): React.ReactElement {
   const inspectorCommandNonce = useEaselStore((s) => s.inspectorCommandNonce);
 
   const webviewRef = useRef<WebviewElement | null>(null);
+  // Mirror the webview element into state so the listener effect re-runs when it
+  // actually mounts. The webview is conditionally rendered — it replaces the
+  // dev-server overlay only once the server is reachable — and that mount does
+  // not change `previewUrl`, so a plain ref would leave the inspector listeners
+  // (and crucially `dom-ready` → `set-mode`) unattached, freezing the guest in
+  // idle mode (no hover / no selection / no State X-Ray).
+  const [webviewEl, setWebviewEl] = useState<WebviewElement | null>(null);
+  const attachWebview = useCallback((el: HTMLElement | null) => {
+    const wv = (el as unknown as WebviewElement | null) ?? null;
+    webviewRef.current = wv;
+    setWebviewEl(wv);
+  }, []);
 
   // Address-bar text (synced to previewUrl, but editable while typing).
   const [urlInput, setUrlInput] = useState(previewUrl ?? '');
@@ -152,6 +187,13 @@ export function PreviewPane(): React.ReactElement {
   const [scroll, setScroll] = useState<Point>({ x: 0, y: 0 });
   // Whether the webview is ready (dom-ready fired).
   const [webviewReady, setWebviewReady] = useState(false);
+  // Browser-chrome state: navigation progress, history affordances, favicon/title.
+  const [loading, setLoading] = useState(false);
+  const [navState, setNavState] = useState({ canGoBack: false, canGoForward: false });
+  const [favicon, setFavicon] = useState<string | null>(null);
+  const [pageTitle, setPageTitle] = useState<string | null>(null);
+  // Whether the address bar is focused (drives the focus glow + title reveal).
+  const [urlFocused, setUrlFocused] = useState(false);
   // Issue #9: drag-over affordance + in-flight image drops awaiting a target,
   // keyed by queryId so concurrent drops never clobber each other.
   const [dragActive, setDragActive] = useState(false);
@@ -168,6 +210,8 @@ export function PreviewPane(): React.ReactElement {
   useEffect(() => {
     setWebviewReady(false);
     setDragActive(false); // clear any stale drag affordance from the old page
+    setFavicon(null); // a new origin gets its own favicon/title
+    setPageTitle(null);
   }, [previewUrl]);
 
   /* ---- Navigation ---- */
@@ -204,6 +248,12 @@ export function PreviewPane(): React.ReactElement {
 
       switch (msg.type) {
         case 'inspector-ready':
+          // The guest inspector is now listening — a more reliable readiness
+          // signal than the webview 'dom-ready' DOM event (which can fire before
+          // our listener attaches). Mark ready and assert the current mode so
+          // element-select works on the very first click.
+          setWebviewReady(true);
+          sendCommand({ type: 'set-mode', mode: useEaselStore.getState().mode });
           break;
 
         case 'element-hover':
@@ -295,6 +345,7 @@ export function PreviewPane(): React.ReactElement {
       setElementState,
       setStyleTweak,
       dropImageOnElement,
+      sendCommand,
     ],
   );
 
@@ -307,19 +358,50 @@ export function PreviewPane(): React.ReactElement {
       setHover(null);
     }
     if (mode === 'idle') {
+      // Toggling the active mode off is an explicit "done" — clear the whole
+      // draft selection (targets + marks) so nothing lingers invisibly attached.
       clearTargets();
+      clearAnnotations();
     }
-  }, [mode, webviewReady, sendCommand, setHover, clearTargets]);
+  }, [mode, webviewReady, sendCommand, setHover, clearTargets, clearAnnotations]);
 
   /* ---- Attach/detach ipc-message listener (re-runs when webview mounts) ---- */
   useEffect(() => {
-    const wv = webviewRef.current;
+    const wv = webviewEl;
     if (!wv) return;
+
+    // canGoBack/canGoForward proxy to the guest WebContents and can throw if the
+    // webview is mid-teardown during a navigation/remount — read defensively.
+    const readNav = (): { canGoBack: boolean; canGoForward: boolean } => {
+      try {
+        return { canGoBack: wv.canGoBack(), canGoForward: wv.canGoForward() };
+      } catch {
+        return { canGoBack: false, canGoForward: false };
+      }
+    };
 
     const listener = (e: Event) => handleIpcMessage(e as IpcMessageEvent);
     const domReady = () => {
       setWebviewReady(true);
       sendCommand({ type: 'set-mode', mode });
+      setNavState(readNav());
+    };
+
+    // Browser-chrome events: drive the top loading bar, history affordances,
+    // favicon, and page title for a real-browser feel.
+    const onStartLoading = () => setLoading(true);
+    const onStopLoading = () => {
+      setLoading(false);
+      setNavState(readNav());
+    };
+    const onNavigate = () => setNavState(readNav());
+    const onFavicon = (e: Event) => {
+      const favs = (e as unknown as { favicons?: string[] }).favicons;
+      setFavicon(favs && favs.length > 0 ? favs[0] : null);
+    };
+    const onTitle = (e: Event) => {
+      const t = (e as unknown as { title?: string }).title;
+      setPageTitle(t && t.trim() ? t : null);
     };
 
     // Capture the previewed page's own warnings/errors so a blank screen always
@@ -348,13 +430,25 @@ export function PreviewPane(): React.ReactElement {
     wv.addEventListener('dom-ready', domReady);
     wv.addEventListener('console-message', onConsole);
     wv.addEventListener('did-fail-load', onFailLoad);
+    wv.addEventListener('did-start-loading', onStartLoading);
+    wv.addEventListener('did-stop-loading', onStopLoading);
+    wv.addEventListener('did-navigate', onNavigate);
+    wv.addEventListener('did-navigate-in-page', onNavigate);
+    wv.addEventListener('page-favicon-updated', onFavicon);
+    wv.addEventListener('page-title-updated', onTitle);
     return () => {
       wv.removeEventListener('ipc-message', listener);
       wv.removeEventListener('dom-ready', domReady);
       wv.removeEventListener('console-message', onConsole);
       wv.removeEventListener('did-fail-load', onFailLoad);
+      wv.removeEventListener('did-start-loading', onStartLoading);
+      wv.removeEventListener('did-stop-loading', onStopLoading);
+      wv.removeEventListener('did-navigate', onNavigate);
+      wv.removeEventListener('did-navigate-in-page', onNavigate);
+      wv.removeEventListener('page-favicon-updated', onFavicon);
+      wv.removeEventListener('page-title-updated', onTitle);
     };
-  }, [handleIpcMessage, sendCommand, mode, previewUrl, addPageLog]);
+  }, [handleIpcMessage, sendCommand, mode, previewUrl, addPageLog, webviewEl]);
 
   /* ---- Handle highlight command (driven by hoveredSelector) ---- */
   useEffect(() => {
@@ -450,6 +544,12 @@ export function PreviewPane(): React.ReactElement {
   const reachable =
     previewStatus && previewStatus.url === previewUrl ? previewStatus.reachable : null;
 
+  /* ---- Address-bar security glyph + label ---- */
+  const isHttps = (previewUrl ?? urlInput).startsWith('https://');
+  const secureLabel = isHttps
+    ? 'Secure connection (HTTPS)'
+    : 'Local or insecure connection (HTTP)';
+
   /* ---- Decide whether to show the live webview or the dev-server overlay ----
    * Gate the webview on the dev server actually serving, so we never render a
    * blank/connection-refused page. When the open project's dev server isn't up
@@ -466,31 +566,37 @@ export function PreviewPane(): React.ReactElement {
   return (
     <div className="absolute inset-0 flex flex-col bg-gray-950 min-w-0">
       {/* Address bar */}
-      <div className="flex items-center gap-1 px-2.5 py-2 hairline-b bg-ink-900/70 backdrop-blur-xl">
-        <button
-          onClick={() => webviewRef.current?.goBack()}
-          title="Back"
-          className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-colors disabled:opacity-25"
-          disabled={!previewUrl}
-        >
-          <ArrowLeft className="w-4 h-4" />
-        </button>
-        <button
-          onClick={() => webviewRef.current?.goForward()}
-          title="Forward"
-          className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-colors disabled:opacity-25"
-          disabled={!previewUrl}
-        >
-          <ArrowRight className="w-4 h-4" />
-        </button>
-        <button
-          onClick={reload}
-          title="Reload"
-          className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-colors disabled:opacity-25"
-          disabled={!previewUrl}
-        >
-          <RotateCw className="w-4 h-4" />
-        </button>
+      <div className="relative flex items-center gap-1.5 px-2.5 py-2 hairline-b bg-ink-900/70 backdrop-blur-xl">
+        <Tooltip label="Back" side="bottom">
+          <button
+            onClick={() => webviewRef.current?.goBack()}
+            className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-all duration-150 ease-spring active:scale-90 disabled:opacity-25 disabled:pointer-events-none"
+            disabled={!previewUrl || !navState.canGoBack}
+            aria-label="Back"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+        </Tooltip>
+        <Tooltip label="Forward" side="bottom">
+          <button
+            onClick={() => webviewRef.current?.goForward()}
+            className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-all duration-150 ease-spring active:scale-90 disabled:opacity-25 disabled:pointer-events-none"
+            disabled={!previewUrl || !navState.canGoForward}
+            aria-label="Forward"
+          >
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </Tooltip>
+        <Tooltip label={loading ? 'Stop' : 'Reload'} side="bottom">
+          <button
+            onClick={reload}
+            className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-all duration-150 ease-spring active:scale-90 disabled:opacity-25 disabled:pointer-events-none"
+            disabled={!previewUrl}
+            aria-label="Reload"
+          >
+            <RotateCw className={`w-4 h-4 ${loading ? 'animate-spin [animation-duration:1.4s]' : ''}`} />
+          </button>
+        </Tooltip>
 
         <form
           onSubmit={(e) => {
@@ -499,35 +605,71 @@ export function PreviewPane(): React.ReactElement {
           }}
           className="flex-1"
         >
-          <div className="relative flex items-center">
-            <Globe className="absolute left-2.5 w-3.5 h-3.5 text-gray-500 pointer-events-none" />
-            {reachable !== null && (
-              <span
-                title={reachable ? 'Reachable' : 'Not reachable'}
-                className={`absolute right-2.5 w-2 h-2 rounded-full ${
-                  reachable ? 'bg-brand-400 shadow-[0_0_8px_rgba(45,212,191,0.8)]' : 'bg-rose-500'
-                }`}
-              />
-            )}
+          <div
+            className={`relative flex items-center h-9 pl-2.5 pr-2.5 rounded-xl bg-ink-800/70 border transition-all duration-150 ease-spring ${
+              urlFocused
+                ? 'border-brand-500/50 bg-ink-800 shadow-[0_0_0_3px_rgba(45,212,191,0.10)]'
+                : 'border-white/10 hover:border-white/[0.18]'
+            }`}
+          >
+            {/* Leading slot: spinner while loading, then favicon or a security glyph. */}
+            <Tooltip label={pageTitle ?? secureLabel} side="bottom">
+              <span className="grid place-items-center w-5 h-5 shrink-0">
+                {loading ? (
+                  <Loader2 className="w-3.5 h-3.5 text-brand-400 animate-spin" />
+                ) : favicon ? (
+                  <img src={favicon} alt="" className="w-4 h-4 rounded-[3px]" />
+                ) : isHttps ? (
+                  <Lock className="w-3.5 h-3.5 text-brand-400" />
+                ) : (
+                  <Globe className="w-3.5 h-3.5 text-gray-500" />
+                )}
+              </span>
+            </Tooltip>
             <input
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
+              onFocus={(e) => {
+                setUrlFocused(true);
+                e.target.select();
+              }}
+              onBlur={() => setUrlFocused(false)}
               placeholder="http://localhost:3000"
               spellCheck={false}
               autoCapitalize="off"
               autoCorrect="off"
-              className="w-full pl-8 pr-7 py-2 text-xs font-mono rounded-lg bg-ink-800/80 text-gray-200 placeholder-gray-600 border border-white/10 focus:border-brand-500/50 focus:bg-ink-800 focus:outline-none focus:shadow-[0_0_0_3px_rgba(45,212,191,0.10)] transition-all"
+              className="w-full px-2.5 bg-transparent text-[12.5px] font-mono text-gray-200 placeholder-gray-600 focus:outline-none"
             />
+            {reachable !== null && (
+              <Tooltip label={reachable ? 'Reachable' : 'Not reachable'} side="bottom">
+                <span
+                  className={`shrink-0 w-2 h-2 rounded-full ${
+                    reachable
+                      ? 'bg-brand-400 shadow-[0_0_8px_rgba(45,212,191,0.8)]'
+                      : 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.7)]'
+                  }`}
+                />
+              </Tooltip>
+            )}
           </div>
         </form>
 
-        <button
-          onClick={() => void openProject()}
-          title="Open project folder (lets Claude edit source)"
-          className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-colors"
-        >
-          <FolderOpen className="w-4 h-4" />
-        </button>
+        <Tooltip label="Open project folder — lets Claude edit source" side="bottom">
+          <button
+            onClick={() => void openProject()}
+            className="grid place-items-center w-8 h-8 rounded-lg text-gray-400 hover:bg-white/[0.07] hover:text-gray-100 transition-all duration-150 ease-spring active:scale-90"
+            aria-label="Open project folder"
+          >
+            <FolderOpen className="w-4 h-4" />
+          </button>
+        </Tooltip>
+
+        {/* Navigation progress — indeterminate browser-style loading bar. */}
+        {loading && (
+          <div className="loadbar">
+            <span />
+          </div>
+        )}
       </div>
 
       {/* Preview surface */}
@@ -561,9 +703,7 @@ export function PreviewPane(): React.ReactElement {
                 // Keying by URL forces a fresh element on navigation so the
                 // guest inspector re-initialises cleanly.
                 key={previewUrl}
-                ref={(el) => {
-                  webviewRef.current = el as unknown as WebviewElement | null;
-                }}
+                ref={attachWebview}
                 src={previewUrl}
                 preload={easel.webviewPreloadUrl}
                 partition="persist:easel-preview"

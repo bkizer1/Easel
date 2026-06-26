@@ -16,6 +16,7 @@
 import React from 'react';
 import { Loader2, PlugZap, Square, Play } from 'lucide-react';
 import type { DevServerState } from '@shared/ipc';
+import { Tooltip } from './Tooltip';
 
 interface DevServerOverlayProps {
   url: string;
@@ -41,7 +42,7 @@ function phaseOf(state: DevServerState, reachable: boolean | null): Phase {
 function LogTail({ lines }: { lines: string[] }): React.ReactElement | null {
   if (lines.length === 0) return null;
   return (
-    <pre className="mt-4 max-h-40 w-full max-w-xl overflow-auto rounded-lg border border-white/10 bg-black/40 p-3 text-left text-[11px] font-mono leading-relaxed text-gray-400">
+    <pre className="surface-inset mt-4 max-h-40 w-full max-w-xl overflow-auto p-3 text-left text-[11px] font-mono leading-relaxed text-gray-400">
       {lines.join('\n')}
     </pre>
   );
@@ -53,8 +54,8 @@ export function DevServerOverlay(props: DevServerOverlayProps): React.ReactEleme
   const spinning = phase === 'connecting' || phase === 'starting';
 
   return (
-    <div className="absolute inset-0 grid place-items-center bg-gray-950 px-6 text-center select-none">
-      <div className="flex max-w-xl flex-col items-center">
+    <div className="absolute inset-0 grid place-items-center bg-ink-950/95 px-6 text-center select-none">
+      <div className="glass-panel animate-fade-in flex max-w-xl flex-col items-center px-8 py-10">
         {spinning ? (
           <Loader2 className="h-10 w-10 animate-spin text-brand-400" />
         ) : (
@@ -102,23 +103,29 @@ export function DevServerOverlay(props: DevServerOverlayProps): React.ReactEleme
 
         <LogTail lines={logTail} />
 
-        <div className="mt-5 flex items-center gap-2">
+        <div className="mt-6 flex items-center gap-2">
           {phase === 'starting' ? (
-            <button
-              onClick={onStop}
-              className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.06] px-3.5 py-2 text-xs font-medium text-gray-200 transition-colors hover:bg-white/[0.1]"
-            >
-              <Square className="h-3.5 w-3.5" /> Stop
-            </button>
+            <Tooltip label="Stop dev server" side="bottom">
+              <button
+                aria-label="Stop dev server"
+                onClick={onStop}
+                className="flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3.5 py-2 text-xs font-medium text-rose-300 transition-all duration-150 ease-spring hover:bg-rose-500/20 active:scale-[0.97]"
+              >
+                <Square className="h-3.5 w-3.5" /> Stop
+              </button>
+            </Tooltip>
           ) : (
             canStart && (
-              <button
-                onClick={onStart}
-                className="flex items-center gap-2 rounded-lg bg-brand-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-brand-600"
-              >
-                <Play className="h-3.5 w-3.5" />
-                {phase === 'error' ? 'Restart dev server' : 'Start dev server'}
-              </button>
+              <Tooltip label="Start dev server" side="bottom">
+                <button
+                  aria-label="Start dev server"
+                  onClick={onStart}
+                  className="btn-primary gap-2 px-4 py-2 text-xs font-semibold"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  {phase === 'error' ? 'Restart dev server' : 'Start dev server'}
+                </button>
+              </Tooltip>
             )
           )}
         </div>

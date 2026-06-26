@@ -14,6 +14,7 @@ import { Circle, Square, ArrowRight, PenLine, MapPin, X } from 'lucide-react';
 import type { Annotation, AnnotationKind, BoundingBox, Point } from '@shared/types';
 import { boxFromPoints } from '../lib/geometry';
 import { useEaselStore } from '../store';
+import { Tooltip } from './Tooltip';
 
 export type DrawTool = AnnotationKind;
 
@@ -55,33 +56,35 @@ function ToolBar({
     <div
       onPointerDown={stop}
       onPointerUp={stop}
-      className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-ink-900/90 backdrop-blur-xl border border-white/10 rounded-xl px-2 py-1.5 pointer-events-auto shadow-[0_8px_30px_-8px_rgba(0,0,0,0.7)] select-none z-20"
+      className="glass-panel animate-slide-up absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-1 px-2 py-1.5 pointer-events-auto select-none z-20"
     >
       {tools.map((t) => (
-        <button
-          key={t.id}
-          onClick={() => onTool(t.id)}
-          title={t.label}
-          className={`grid place-items-center w-8 h-8 rounded-lg transition-colors ${
-            activeTool === t.id
-              ? 'bg-brand-500/20 text-brand-300 ring-1 ring-brand-500/40'
-              : 'text-gray-400 hover:text-gray-100 hover:bg-white/[0.07]'
-          }`}
-        >
-          {t.icon}
-        </button>
+        <Tooltip key={t.id} label={t.label} side="bottom">
+          <button
+            onClick={() => onTool(t.id)}
+            aria-label={t.label}
+            className={`grid place-items-center w-8 h-8 rounded-lg transition-all duration-150 ease-spring active:scale-90 ${
+              activeTool === t.id
+                ? 'bg-brand-500/20 text-brand-300 ring-1 ring-brand-500/40 shadow-glow-brand'
+                : 'text-gray-400 hover:text-gray-100 hover:bg-white/[0.07]'
+            }`}
+          >
+            {t.icon}
+          </button>
+        </Tooltip>
       ))}
       <span className="w-px h-5 bg-white/10 mx-1" />
       {COLORS.map((c) => (
-        <button
-          key={c}
-          onClick={() => onColor(c)}
-          title={c}
-          className={`w-4 h-4 rounded-full transition-transform ${
-            activeColor === c ? 'ring-2 ring-white ring-offset-2 ring-offset-ink-900 scale-110' : ''
-          }`}
-          style={{ background: c }}
-        />
+        <Tooltip key={c} label="Marker colour" side="bottom">
+          <button
+            onClick={() => onColor(c)}
+            aria-label={`Colour ${c}`}
+            className={`w-4 h-4 rounded-full transition-transform duration-150 ease-spring hover:scale-125 ${
+              activeColor === c ? 'ring-2 ring-white ring-offset-2 ring-offset-ink-900 scale-110' : ''
+            }`}
+            style={{ background: c }}
+          />
+        </Tooltip>
       ))}
     </div>
   );
@@ -230,18 +233,21 @@ function AnnotationFrame({
       {/* Hover hit-area + outline */}
       <div className="absolute inset-0 rounded-[3px] border border-transparent group-hover:border-white/40 cursor-move" />
 
-      {/* Remove button */}
-      <button
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          onRemove(a.id);
-        }}
-        title="Remove annotation"
-        className="absolute -top-2.5 -right-2.5 grid place-items-center w-5 h-5 rounded-full bg-ink-900 border border-white/20 text-gray-300 shadow hover:bg-rose-500 hover:text-white hover:border-rose-500 opacity-0 group-hover:opacity-100 transition-opacity"
-      >
-        <X className="w-3 h-3" />
-      </button>
+      {/* Remove bubble — always visible so a drawn selection can be cleared at a
+          glance. Brightens on hover; positioned just outside the top-right corner. */}
+      <Tooltip label="Remove selection" side="top">
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove(a.id);
+          }}
+          aria-label="Remove selection"
+          className="absolute -top-2.5 -right-2.5 z-10 grid place-items-center w-[18px] h-[18px] rounded-full bg-ink-900/95 border border-white/25 text-gray-200 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.8)] backdrop-blur-sm hover:bg-rose-500 hover:text-white hover:border-rose-400 hover:scale-110 active:scale-95 transition-all duration-150 ease-spring"
+        >
+          <X className="w-3 h-3" />
+        </button>
+      </Tooltip>
 
       {/* Resize handles (rect / ellipse) */}
       {resizable &&
@@ -299,6 +305,7 @@ export function FreeformCanvas({ scrollOrigin, sendCommand }: Props): React.Reac
   const removeAnnotation = useEaselStore((s) => s.removeAnnotation);
   const updateAnnotation = useEaselStore((s) => s.updateAnnotation);
   const annotations = useEaselStore((s) => s.annotations);
+  const freeformAnnotations = annotations.filter((a) => a.mode === 'freeform');
 
   const [tool, setTool] = useState<DrawTool>('rect');
   const [color, setColor] = useState(COLORS[0]);
@@ -375,16 +382,18 @@ export function FreeformCanvas({ scrollOrigin, sendCommand }: Props): React.Reac
     >
       <ToolBar activeTool={tool} activeColor={color} onTool={setTool} onColor={setColor} />
 
-      {/* Committed shapes + in-progress preview (visual, non-interactive) */}
+      {/* Committed shapes + in-progress preview (visual, non-interactive).
+          Only freeform marks belong to this canvas — element-pick annotations
+          are owned by ElementInspector, which manages their bound target. */}
       <svg className="absolute inset-0 w-full h-full pointer-events-none">
-        {annotations.map((a) => (
+        {freeformAnnotations.map((a) => (
           <Shape key={a.id} a={a} />
         ))}
         {isDrawing && <StrokePreview tool={tool} points={currentPoints} color={color} />}
       </svg>
 
       {/* Interactive frames (move / resize / remove) */}
-      {annotations.map((a) => (
+      {freeformAnnotations.map((a) => (
         <AnnotationFrame
           key={`frame-${a.id}`}
           a={a}

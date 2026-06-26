@@ -6,11 +6,23 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Send, X, Loader2, AlertTriangle, Info, Wand2, Zap, Plus, Trash2 } from 'lucide-react';
+import {
+  Send,
+  X,
+  Loader2,
+  AlertTriangle,
+  Info,
+  Wand2,
+  Zap,
+  Plus,
+  Trash2,
+  Layers,
+} from 'lucide-react';
 import type { ChatMessage, FileDiff, InstructionMacro } from '@shared/types';
 import { useEaselStore } from '../store';
 import { DiffViewer } from './DiffViewer';
 import { VoiceButton } from './VoiceButton';
+import { Tooltip } from './Tooltip';
 import { hotkeyMatches, normalizeHotkey } from '../lib/hotkeys';
 
 /**
@@ -155,40 +167,41 @@ function MacroBar({
           key={macro.id}
           className="group inline-flex items-center rounded-lg bg-ink-800/80 border border-white/10 text-[12px] text-gray-200 flex-shrink-0 overflow-hidden"
         >
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onRun(macro.id)}
-            title={
-              macro.hotkey
-                ? `${macro.instructionTemplate} (${macro.hotkey})`
-                : macro.instructionTemplate
-            }
-            className="px-2.5 py-1 hover:bg-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {macro.name}
-            {macro.hotkey && (
-              <kbd className="ml-1.5 font-mono text-[10px] text-gray-500">{macro.hotkey}</kbd>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => onDelete(macro.id)}
-            title="Delete macro"
-            className="grid place-items-center w-5 self-stretch text-gray-600 hover:text-rose-300 hover:bg-rose-500/10 transition-colors"
-          >
-            <Trash2 className="w-3 h-3" />
-          </button>
+          <Tooltip label={macro.instructionTemplate} shortcut={macro.hotkey} side="top">
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onRun(macro.id)}
+              className="px-2.5 py-1 hover:bg-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              {macro.name}
+              {macro.hotkey && (
+                <kbd className="ml-1.5 font-mono text-[10px] text-gray-500">{macro.hotkey}</kbd>
+              )}
+            </button>
+          </Tooltip>
+          <Tooltip label="Delete macro" side="top">
+            <button
+              type="button"
+              onClick={() => onDelete(macro.id)}
+              className="grid place-items-center w-5 self-stretch text-gray-600 hover:text-rose-300 hover:bg-rose-500/10 transition-colors"
+              aria-label="Delete macro"
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          </Tooltip>
         </span>
       ))}
-      <button
-        type="button"
-        onClick={onAdd}
-        title="Save a new macro"
-        className="grid place-items-center w-6 h-6 rounded-lg bg-ink-800/80 border border-white/10 text-gray-400 hover:text-brand-300 hover:border-brand-500/40 transition-colors flex-shrink-0"
-      >
-        <Plus className="w-3.5 h-3.5" />
-      </button>
+      <Tooltip label="Save a new macro" side="top">
+        <button
+          type="button"
+          onClick={onAdd}
+          className="grid place-items-center w-6 h-6 rounded-lg bg-ink-800/80 border border-white/10 text-gray-400 hover:text-brand-300 hover:border-brand-500/40 transition-all duration-150 ease-spring active:scale-90 flex-shrink-0"
+          aria-label="Save a new macro"
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -224,16 +237,26 @@ function SaveMacroDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 backdrop-blur-sm" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60 backdrop-blur-sm animate-fade-in"
+      onClick={onClose}
+    >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[min(420px,90vw)] rounded-2xl bg-ink-900 border border-white/10 shadow-2xl p-5 space-y-4"
+        className="glass-raised w-[min(420px,90vw)] p-5 space-y-4 animate-scale-in"
       >
         <div className="flex items-center justify-between">
           <h2 className="font-display text-sm font-semibold text-gray-100">Save instruction macro</h2>
-          <button type="button" onClick={onClose} className="text-gray-500 hover:text-gray-300">
-            <X className="w-4 h-4" />
-          </button>
+          <Tooltip label="Close" side="left">
+            <button
+              type="button"
+              onClick={onClose}
+              className="grid place-items-center w-7 h-7 rounded-lg text-gray-500 hover:text-gray-200 hover:bg-white/[0.07] transition-colors"
+              aria-label="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </Tooltip>
         </div>
 
         <label className="block space-y-1">
@@ -289,6 +312,58 @@ function SaveMacroDialog({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Selection context chip                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Surfaces the current draft selection (markup + element targets) directly above
+ * the composer. Because selections now persist across sends, this makes it
+ * obvious what's attached to the next message and gives a one-click "clear all".
+ * Per-mark removal lives on the canvas; this is the bulk affordance.
+ */
+function SelectionChip(): React.ReactElement | null {
+  const annotations = useEaselStore((s) => s.annotations);
+  const targets = useEaselStore((s) => s.targets);
+  const clearAnnotations = useEaselStore((s) => s.clearAnnotations);
+  const clearTargets = useEaselStore((s) => s.clearTargets);
+
+  // Element picks create a target AND a matching annotation that share an id;
+  // freeform creates only an annotation; region-resolved creates only a target.
+  // Count distinct ids so the total reflects the user's actual mark count.
+  const count = new Set([...annotations.map((a) => a.id), ...targets.map((t) => t.id)]).size;
+  if (count === 0) return null;
+
+  const clearAll = (): void => {
+    clearAnnotations();
+    clearTargets();
+  };
+
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded-xl border border-iris-500/25 bg-iris-500/[0.08] px-2.5 py-1.5 animate-slide-up">
+      <span className="grid place-items-center w-5 h-5 rounded-md bg-iris-500/15 text-iris-300">
+        <Layers className="w-3 h-3" />
+      </span>
+      <span className="flex-1 text-[11.5px] text-iris-100/90 leading-tight">
+        <span className="font-semibold">
+          {count} selection{count !== 1 ? 's' : ''}
+        </span>{' '}
+        <span className="text-iris-200/60">attached to your next message</span>
+      </span>
+      <Tooltip label="Clear selection" side="top">
+        <button
+          type="button"
+          onClick={clearAll}
+          className="grid place-items-center w-5 h-5 rounded-md text-iris-200/70 hover:text-white hover:bg-iris-500/25 transition-colors"
+          aria-label="Clear selection"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -447,6 +522,7 @@ export function ChatPanel(): React.ReactElement {
 
       {/* Composer */}
       <div className="flex-shrink-0 p-3 hairline-t">
+        <SelectionChip />
         <div
           className={`relative flex items-end gap-2 rounded-2xl bg-ink-800/80 border px-3 py-2.5 transition-all duration-200 ${
             composerDisabled
@@ -468,24 +544,28 @@ export function ChatPanel(): React.ReactElement {
           <div className="flex items-center gap-1 flex-shrink-0">
             <VoiceButton onTranscript={handleTranscript} disabled={composerDisabled} />
             {streaming ? (
-              <button
-                type="button"
-                onClick={() => void cancelEdit()}
-                title="Stop"
-                className="grid place-items-center w-8 h-8 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <Tooltip label="Stop generating" shortcut="Esc" side="top">
+                <button
+                  type="button"
+                  onClick={() => void cancelEdit()}
+                  className="grid place-items-center w-8 h-8 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 transition-all duration-150 ease-spring active:scale-90"
+                  aria-label="Stop generating"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </Tooltip>
             ) : (
-              <button
-                type="button"
-                onClick={() => void handleSubmit()}
-                disabled={!canSubmit}
-                title="Send (Enter)"
-                className="grid place-items-center w-8 h-8 rounded-xl bg-gradient-to-br from-brand-400 to-brand-600 text-ink-950 shadow-[0_0_16px_-4px_rgba(45,212,191,0.8)] transition-all hover:brightness-110 disabled:from-ink-700 disabled:to-ink-700 disabled:text-gray-600 disabled:shadow-none"
-              >
-                <Send className="w-3.5 h-3.5" />
-              </button>
+              <Tooltip label="Send message" shortcut="⏎" side="top">
+                <button
+                  type="button"
+                  onClick={() => void handleSubmit()}
+                  disabled={!canSubmit}
+                  className="grid place-items-center w-8 h-8 rounded-xl bg-gradient-to-br from-brand-400 to-brand-600 text-ink-950 shadow-[0_0_16px_-4px_rgba(45,212,191,0.8)] transition-all duration-150 ease-spring hover:brightness-110 active:scale-90 disabled:from-ink-700 disabled:to-ink-700 disabled:text-gray-600 disabled:shadow-none disabled:active:scale-100"
+                  aria-label="Send message"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                </button>
+              </Tooltip>
             )}
           </div>
         </div>

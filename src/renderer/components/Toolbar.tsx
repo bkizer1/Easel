@@ -5,6 +5,9 @@
  * hiddenInset title bar), so the whole header is a drag region and every
  * interactive control opts out with `no-drag`. On macOS we reserve space on the
  * left for the traffic-light buttons.
+ *
+ * Controls are organised into segmented clusters (`.seg`) — mode, edit, view —
+ * which reads as mature browser chrome rather than a loose row of icons.
  */
 
 import React, { useState } from 'react';
@@ -32,10 +35,13 @@ import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
 import { HistoryPanel } from './HistoryPanel';
 import { ConsolePanel } from './ConsolePanel';
+import { IconButton } from './IconButton';
+import { Tooltip } from './Tooltip';
 
 /** macOS reserves the top-left for window controls; pad the toolbar past them. */
 const IS_MAC =
   typeof navigator !== 'undefined' && navigator.userAgent.includes('Macintosh');
+const MOD = IS_MAC ? '⌘' : 'Ctrl';
 
 /* -------------------------------------------------------------------------- */
 /*  Wordmark                                                                  */
@@ -43,8 +49,8 @@ const IS_MAC =
 
 function Wordmark(): React.ReactElement {
   return (
-    <div className="flex items-center gap-2 pr-1">
-      <span className="grid place-items-center w-[21px] h-[21px] rounded-[7px] bg-gradient-to-br from-brand-300 via-brand-400 to-brand-600 shadow-[0_0_14px_-3px_rgba(52,211,176,0.75)]">
+    <div className="flex items-center gap-2 pr-1 select-none">
+      <span className="grid place-items-center w-[22px] h-[22px] rounded-[7px] bg-gradient-to-br from-brand-300 via-brand-400 to-brand-600 shadow-[0_0_16px_-3px_rgba(52,211,176,0.8)] ring-1 ring-white/20">
         {/* Easel mark — matches the app icon */}
         <svg viewBox="0 0 24 24" className="w-[15px] h-[15px]" aria-hidden="true">
           <g stroke="#ffffff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" fill="none">
@@ -77,7 +83,7 @@ function StatusDot(): React.ReactElement {
 
   const color =
     reachable === null ? 'bg-gray-600' : reachable ? 'bg-brand-400' : 'bg-rose-500';
-  const title =
+  const label =
     reachable === null
       ? 'No live preview'
       : reachable
@@ -85,12 +91,14 @@ function StatusDot(): React.ReactElement {
         : `Unreachable · ${previewStatus!.detail ?? previewStatus!.url}`;
 
   return (
-    <span className="relative flex items-center justify-center w-4 h-4" title={title}>
-      {reachable && (
-        <span className="absolute w-2.5 h-2.5 rounded-full bg-brand-400/40 animate-ping" />
-      )}
-      <span className={`relative w-2 h-2 rounded-full ${color}`} />
-    </span>
+    <Tooltip label={label} side="bottom">
+      <span className="no-drag relative flex items-center justify-center w-5 h-5">
+        {reachable && (
+          <span className="absolute w-2.5 h-2.5 rounded-full bg-brand-400/40 animate-ping" />
+        )}
+        <span className={`relative w-2 h-2 rounded-full ${color}`} />
+      </span>
+    </Tooltip>
   );
 }
 
@@ -112,58 +120,27 @@ function BackendIndicator(): React.ReactElement | null {
   const shortModel = model.replace(/^claude-/, '').replace(/-\d{6,}$/, '');
 
   return (
-    <button
-      type="button"
-      onClick={() => setSettingsOpen(true)}
-      className="no-drag group flex items-center gap-1.5 pl-2 pr-2.5 h-7 rounded-lg bg-ink-800/70 hover:bg-ink-700/80 border border-white/5 hover:border-brand-500/30 transition-colors"
-      title={`Backend: ${agentBackend} · Model: ${model} — click to change`}
-    >
-      <Sparkles className="w-3 h-3 text-brand-400" />
-      <span className="text-[11px] font-medium text-gray-300">{backendLabel[agentBackend] ?? agentBackend}</span>
-      <span className="w-px h-3 bg-white/10" />
-      <span className="text-[11px] font-mono text-gray-500 group-hover:text-gray-400">{shortModel}</span>
-    </button>
+    <Tooltip label={`Backend: ${agentBackend} · ${model} — click to change`} side="bottom">
+      <button
+        type="button"
+        onClick={() => setSettingsOpen(true)}
+        className="no-drag group flex items-center gap-1.5 pl-2 pr-2.5 h-7 rounded-lg bg-ink-800/70 hover:bg-ink-700/80 border border-white/5 hover:border-brand-500/30 transition-all duration-150 ease-spring active:scale-[0.98]"
+      >
+        <Sparkles className="w-3 h-3 text-brand-400" />
+        <span className="text-[11px] font-medium text-gray-300">{backendLabel[agentBackend] ?? agentBackend}</span>
+        <span className="w-px h-3 bg-white/10" />
+        <span className="text-[11px] font-mono text-gray-500 group-hover:text-gray-400">{shortModel}</span>
+      </button>
+    </Tooltip>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Icon button                                                               */
+/*  Segmented cluster                                                          */
 /* -------------------------------------------------------------------------- */
 
-interface IconButtonProps {
-  onClick: () => void;
-  title: string;
-  disabled?: boolean;
-  active?: boolean;
-  variant?: 'default' | 'danger';
-  children: React.ReactNode;
-}
-
-function IconButton({
-  onClick,
-  title,
-  disabled = false,
-  active = false,
-  variant = 'default',
-  children,
-}: IconButtonProps): React.ReactElement {
-  const base =
-    'no-drag flex items-center justify-center w-[30px] h-[30px] rounded-lg transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/60 disabled:opacity-30 disabled:cursor-not-allowed';
-  const color = active
-    ? 'bg-brand-500/15 text-brand-300 ring-1 ring-brand-500/40 shadow-[0_0_12px_-4px_rgba(45,212,191,0.8)]'
-    : variant === 'danger'
-      ? 'text-gray-500 hover:bg-rose-500/15 hover:text-rose-400'
-      : 'text-gray-400 hover:bg-white/[0.07] hover:text-gray-100';
-
-  return (
-    <button className={`${base} ${color}`} onClick={onClick} disabled={disabled} title={title}>
-      {children}
-    </button>
-  );
-}
-
-function Sep(): React.ReactElement {
-  return <span className="mx-1 w-px h-5 bg-white/[0.07]" />;
+function Seg({ children }: { children: React.ReactNode }): React.ReactElement {
+  return <div className="seg no-drag">{children}</div>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -178,7 +155,10 @@ function ViewportMenu({
   onPick: (width: number | null) => void;
 }): React.ReactElement {
   return (
-    <div className="absolute left-0 top-full mt-1.5 z-30 w-44 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 py-1 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+    <div className="glass-panel animate-panel-in absolute left-0 top-full mt-2 z-30 w-48 overflow-hidden py-1.5 origin-top">
+      <div className="px-3.5 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+        Viewport
+      </div>
       {VIEWPORT_PRESETS.map((p) => {
         const active = p.width === current;
         return (
@@ -189,7 +169,10 @@ function ViewportMenu({
               active ? 'bg-brand-500/10 text-brand-200' : 'text-gray-300 hover:bg-white/[0.05]'
             }`}
           >
-            <span>{p.label}</span>
+            <span className="flex items-center gap-2">
+              {active && <span className="w-1 h-1 rounded-full bg-brand-400" />}
+              <span className={active ? '' : 'pl-3'}>{p.label}</span>
+            </span>
             <span className="font-mono text-[11px] text-gray-500">{p.width ? `${p.width}px` : 'auto'}</span>
           </button>
         );
@@ -212,7 +195,7 @@ function GridPanel(): React.ReactElement {
   const setHover = useEaselStore((s) => s.setHover);
 
   return (
-    <div className="absolute right-0 top-full mt-1.5 z-30 w-80 overflow-hidden rounded-xl border border-white/10 bg-ink-900/95 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+    <div className="glass-panel animate-panel-in absolute right-0 top-full mt-2 z-30 w-80 overflow-hidden origin-top-right">
       <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 hairline-b">
         <div className="flex flex-col">
           <span className="text-[12.5px] font-medium text-gray-200">Alignment grid</span>
@@ -220,15 +203,16 @@ function GridPanel(): React.ReactElement {
             {gridConfig.columns} cols · {gridConfig.gutter}px gutter · {gridConfig.baseline}px baseline
           </span>
         </div>
-        <button
-          onClick={() => scanOffGrid()}
-          disabled={scanningOffGrid || streaming}
-          className="flex items-center gap-1.5 rounded-lg bg-ink-800/80 px-2.5 py-1.5 text-[11.5px] font-medium text-gray-200 hover:bg-ink-700/80 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          title="Scan the page for elements whose edges miss the grid"
-        >
-          <ScanLine className="w-3.5 h-3.5" />
-          {scanningOffGrid ? 'Scanning…' : 'Scan'}
-        </button>
+        <Tooltip label="Scan the page for elements whose edges miss the grid" side="bottom">
+          <button
+            onClick={() => scanOffGrid()}
+            disabled={scanningOffGrid || streaming}
+            className="flex items-center gap-1.5 rounded-lg bg-ink-800/80 px-2.5 py-1.5 text-[11.5px] font-medium text-gray-200 hover:bg-ink-700/80 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 ease-spring active:scale-[0.97]"
+          >
+            <ScanLine className="w-3.5 h-3.5" />
+            {scanningOffGrid ? 'Scanning…' : 'Scan'}
+          </button>
+        </Tooltip>
       </div>
 
       <div className="max-h-64 overflow-y-auto py-1">
@@ -269,18 +253,34 @@ function GridPanel(): React.ReactElement {
 
       {offGridElements.length > 0 && (
         <div className="hairline-t px-3.5 py-2.5">
-          <button
-            onClick={() => void snapToGrid(offGridElements.map((o) => o.id))}
-            disabled={streaming}
-            className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-700 px-3 py-2 text-[12px] font-medium text-white hover:bg-brand-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-            title="Ask the agent to align all listed elements in one edit (one checkpoint)"
-          >
-            <Wand2 className="w-3.5 h-3.5" />
-            Snap {offGridElements.length} to grid
-          </button>
+          <Tooltip label="Ask the agent to align all listed elements in one edit (one checkpoint)" side="top">
+            <button
+              onClick={() => void snapToGrid(offGridElements.map((o) => o.id))}
+              disabled={streaming}
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand-700 px-3 py-2 text-[12px] font-medium text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.15)] hover:bg-brand-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 ease-spring active:scale-[0.98]"
+            >
+              <Wand2 className="w-3.5 h-3.5" />
+              Snap {offGridElements.length} to grid
+            </button>
+          </Tooltip>
         </div>
       )}
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Count badge (errors / off-grid)                                            */
+/* -------------------------------------------------------------------------- */
+
+function CountBadge({ count, tone }: { count: number; tone: 'rose' | 'amber' }): React.ReactElement {
+  const cls = tone === 'rose' ? 'bg-rose-500' : 'bg-amber-500';
+  return (
+    <span
+      className={`pointer-events-none absolute -right-0.5 -top-0.5 z-10 grid h-[15px] min-w-[15px] place-items-center rounded-full ${cls} px-1 text-[9px] font-bold text-white ring-2 ring-ink-900`}
+    >
+      {count > 9 ? '9+' : count}
+    </span>
   );
 }
 
@@ -341,172 +341,199 @@ export function Toolbar(): React.ReactElement {
 
   return (
     <header
-      className="drag-region relative z-10 flex items-center gap-1 h-12 px-3 bg-ink-900/80 backdrop-blur-xl hairline-b select-none"
+      className="drag-region relative z-10 flex items-center gap-2 h-12 px-3 bg-ink-900/80 backdrop-blur-xl hairline-b select-none"
       style={{ paddingLeft: IS_MAC ? 80 : 12 }}
     >
       <Wordmark />
-      <Sep />
 
       {/* Project */}
       {!project ? (
-        <button
-          type="button"
-          onClick={() => void openProject()}
-          className="no-drag flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-lg text-[12px] text-gray-400 hover:text-gray-100 hover:bg-white/[0.07] transition-colors"
-          title="Open a project folder so the AI can edit its source"
-        >
-          <FolderOpen className="w-3.5 h-3.5" />
-          Open project
-        </button>
+        <Tooltip label="Open a project folder so the AI can edit its source" side="bottom">
+          <button
+            type="button"
+            onClick={() => void openProject()}
+            className="no-drag flex items-center gap-1.5 h-7 pl-2 pr-2.5 rounded-lg text-[12px] text-gray-400 hover:text-gray-100 hover:bg-white/[0.07] transition-all duration-150 ease-spring active:scale-[0.98]"
+          >
+            <FolderOpen className="w-3.5 h-3.5" />
+            Open project
+          </button>
+        </Tooltip>
       ) : (
         <div className="no-drag flex items-center gap-1 h-7 pl-2.5 pr-1 rounded-lg bg-ink-800/60 border border-white/5">
-          <span className="w-1.5 h-1.5 rounded-full bg-brand-400" />
-          <span className="text-[12px] font-medium text-gray-200 max-w-[160px] truncate" title={project.root}>
-            {project.name}
-          </span>
-          <button
-            onClick={() => void closeProject()}
-            title="Close project"
-            className="ml-0.5 grid place-items-center w-5 h-5 rounded-md text-gray-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-          >
-            <X className="w-3 h-3" />
-          </button>
+          <span className="w-1.5 h-1.5 rounded-full bg-brand-400 shadow-[0_0_8px_rgba(52,211,176,0.8)]" />
+          <Tooltip label={project.root} side="bottom">
+            <span className="text-[12px] font-medium text-gray-200 max-w-[160px] truncate">
+              {project.name}
+            </span>
+          </Tooltip>
+          <Tooltip label="Close project" side="bottom">
+            <button
+              onClick={() => void closeProject()}
+              className="ml-0.5 grid place-items-center w-5 h-5 rounded-md text-gray-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </Tooltip>
         </div>
       )}
 
-      <Sep />
-
-      {/* Interaction modes */}
-      <IconButton
-        onClick={() => setMode(mode === 'element-select' ? 'idle' : 'element-select')}
-        title="Select mode — click an element to target it"
-        active={mode === 'element-select'}
-        disabled={!project || streaming}
-      >
-        <MousePointer2 className="w-[17px] h-[17px]" />
-      </IconButton>
-      <IconButton
-        onClick={() => setMode(mode === 'freeform' ? 'idle' : 'freeform')}
-        title="Markup mode — draw on the page"
-        active={mode === 'freeform'}
-        disabled={!project || streaming}
-      >
-        <PenLine className="w-[17px] h-[17px]" />
-      </IconButton>
-
-      <Sep />
-
-      {/* Edit history: undo / redo / history timeline */}
-      <IconButton onClick={() => void undo()} title="Undo last change" disabled={!canUndo || streaming}>
-        <Undo2 className="w-[17px] h-[17px]" />
-      </IconButton>
-      <IconButton onClick={() => void redo()} title="Redo" disabled={!canRedo || streaming}>
-        <Redo2 className="w-[17px] h-[17px]" />
-      </IconButton>
-      <div className="relative no-drag">
+      {/* Mode cluster */}
+      <Seg>
         <IconButton
-          onClick={toggleHistory}
-          title="History — revert any change"
-          active={historyOpen}
-          disabled={!project || checkpoints.length === 0}
+          onClick={() => setMode(mode === 'element-select' ? 'idle' : 'element-select')}
+          tooltip="Select an element to target"
+          active={mode === 'element-select'}
+          disabled={!project || streaming}
+          aria-label="Select mode"
         >
-          <History className="w-[17px] h-[17px]" />
+          <MousePointer2 className="w-[17px] h-[17px]" />
         </IconButton>
-        {historyOpen && <HistoryPanel />}
-      </div>
-
-      <Sep />
-
-      {/* View tools: reload / viewport / devtools / console / open-external */}
-      <IconButton onClick={() => reloadPreview()} title="Reload preview" disabled={!previewUrl}>
-        <RefreshCw className="w-[17px] h-[17px]" />
-      </IconButton>
-      <div className="relative no-drag">
         <IconButton
-          onClick={() => toggleMenu('viewport')}
-          title="Responsive viewport"
-          active={menu === 'viewport' || viewportWidth !== null}
+          onClick={() => setMode(mode === 'freeform' ? 'idle' : 'freeform')}
+          tooltip="Markup mode — draw on the page"
+          active={mode === 'freeform'}
+          disabled={!project || streaming}
+          aria-label="Markup mode"
+        >
+          <PenLine className="w-[17px] h-[17px]" />
+        </IconButton>
+      </Seg>
+
+      {/* Edit-history cluster */}
+      <Seg>
+        <IconButton
+          onClick={() => void undo()}
+          tooltip="Undo last change"
+          shortcut={`${MOD}Z`}
+          disabled={!canUndo || streaming}
+          aria-label="Undo"
+        >
+          <Undo2 className="w-[17px] h-[17px]" />
+        </IconButton>
+        <IconButton
+          onClick={() => void redo()}
+          tooltip="Redo"
+          shortcut={`${MOD}⇧Z`}
+          disabled={!canRedo || streaming}
+          aria-label="Redo"
+        >
+          <Redo2 className="w-[17px] h-[17px]" />
+        </IconButton>
+        <div className="relative no-drag">
+          <IconButton
+            onClick={toggleHistory}
+            tooltip="History — revert any change"
+            active={historyOpen}
+            disabled={!project || checkpoints.length === 0}
+            aria-label="History"
+          >
+            <History className="w-[17px] h-[17px]" />
+          </IconButton>
+          {historyOpen && <HistoryPanel />}
+        </div>
+      </Seg>
+
+      {/* View-tools cluster */}
+      <Seg>
+        <IconButton
+          onClick={() => reloadPreview()}
+          tooltip="Reload preview"
           disabled={!previewUrl}
+          aria-label="Reload preview"
         >
-          <Monitor className="w-[17px] h-[17px]" />
+          <RefreshCw className="w-[17px] h-[17px]" />
         </IconButton>
-        {menu === 'viewport' && (
-          <ViewportMenu
-            current={viewportWidth}
-            onPick={(w) => {
-              setViewportWidth(w);
-              setMenu(null);
+        <div className="relative no-drag">
+          <IconButton
+            onClick={() => toggleMenu('viewport')}
+            tooltip="Responsive viewport"
+            active={menu === 'viewport' || viewportWidth !== null}
+            disabled={!previewUrl}
+            aria-label="Responsive viewport"
+          >
+            <Monitor className="w-[17px] h-[17px]" />
+          </IconButton>
+          {menu === 'viewport' && (
+            <ViewportMenu
+              current={viewportWidth}
+              onPick={(w) => {
+                setViewportWidth(w);
+                setMenu(null);
+              }}
+            />
+          )}
+        </div>
+        <IconButton
+          onClick={() => toggleDevTools()}
+          tooltip="Toggle DevTools for the preview"
+          disabled={!previewUrl}
+          aria-label="Toggle DevTools"
+        >
+          <Code2 className="w-[17px] h-[17px]" />
+        </IconButton>
+        <div className="relative no-drag">
+          <IconButton
+            onClick={() => {
+              // Toggling the button shows/hides the grid AND opens/closes its panel.
+              const opening = menu !== 'grid';
+              setGridVisible(opening);
+              toggleMenu('grid');
             }}
-          />
-        )}
-      </div>
-      <IconButton onClick={() => toggleDevTools()} title="Toggle DevTools for the preview" disabled={!previewUrl}>
-        <Code2 className="w-[17px] h-[17px]" />
-      </IconButton>
-      <div className="relative no-drag">
+            tooltip="Alignment grid — overlay a column/baseline grid and flag off-grid elements"
+            active={menu === 'grid' || gridVisible}
+            disabled={!previewUrl}
+            aria-label="Alignment grid"
+          >
+            <Grid3x3 className="w-[17px] h-[17px]" />
+          </IconButton>
+          {offGridElements.length > 0 && menu !== 'grid' && (
+            <CountBadge count={offGridElements.length} tone="amber" />
+          )}
+          {menu === 'grid' && <GridPanel />}
+        </div>
+        <div className="relative no-drag">
+          <IconButton
+            onClick={() => toggleMenu('console')}
+            tooltip="Page console — warnings & errors from the previewed page"
+            active={menu === 'console'}
+            variant={errorCount > 0 ? 'danger' : 'default'}
+            disabled={!previewUrl}
+            aria-label="Page console"
+          >
+            <Terminal className="w-[17px] h-[17px]" />
+          </IconButton>
+          {errorCount > 0 && <CountBadge count={errorCount} tone="rose" />}
+          {menu === 'console' && <ConsolePanel />}
+        </div>
+        <IconButton
+          onClick={() => setXrayOpen(!xrayOpen)}
+          tooltip="State X-Ray — live state, network & time-travel"
+          active={xrayOpen}
+          disabled={!previewUrl}
+          aria-label="State X-Ray"
+        >
+          <ScanEye className="w-[17px] h-[17px]" />
+        </IconButton>
         <IconButton
           onClick={() => {
-            // Toggling the button shows/hides the grid AND opens/closes its panel.
-            const opening = menu !== 'grid';
-            setGridVisible(opening);
-            toggleMenu('grid');
+            if (previewUrl) void easel.preview.openExternal({ url: previewUrl });
           }}
-          title="Alignment grid — overlay a column/baseline grid and flag off-grid elements"
-          active={menu === 'grid' || gridVisible}
+          tooltip="Open in your browser"
           disabled={!previewUrl}
+          aria-label="Open in browser"
         >
-          <Grid3x3 className="w-[17px] h-[17px]" />
+          <ExternalLink className="w-[17px] h-[17px]" />
         </IconButton>
-        {offGridElements.length > 0 && menu !== 'grid' && (
-          <span className="pointer-events-none absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-full bg-amber-500 px-1 text-[9px] font-bold text-white ring-2 ring-ink-900">
-            {offGridElements.length > 9 ? '9+' : offGridElements.length}
-          </span>
-        )}
-        {menu === 'grid' && <GridPanel />}
-      </div>
-      <div className="relative no-drag">
-        <IconButton
-          onClick={() => toggleMenu('console')}
-          title="Page console — warnings & errors from the previewed page"
-          active={menu === 'console'}
-          variant={errorCount > 0 ? 'danger' : 'default'}
-          disabled={!previewUrl}
-        >
-          <Terminal className="w-[17px] h-[17px]" />
-        </IconButton>
-        {errorCount > 0 && (
-          <span className="pointer-events-none absolute -right-0.5 -top-0.5 grid h-[15px] min-w-[15px] place-items-center rounded-full bg-rose-500 px-1 text-[9px] font-bold text-white ring-2 ring-ink-900">
-            {errorCount > 9 ? '9+' : errorCount}
-          </span>
-        )}
-        {menu === 'console' && <ConsolePanel />}
-      </div>
-      <IconButton
-        onClick={() => setXrayOpen(!xrayOpen)}
-        title="State X-Ray — live state, network & time-travel for the page"
-        active={xrayOpen}
-        disabled={!previewUrl}
-      >
-        <ScanEye className="w-[17px] h-[17px]" />
-      </IconButton>
-      <IconButton
-        onClick={() => {
-          if (previewUrl) void easel.preview.openExternal({ url: previewUrl });
-        }}
-        title="Open in your browser"
-        disabled={!previewUrl}
-      >
-        <ExternalLink className="w-[17px] h-[17px]" />
-      </IconButton>
+      </Seg>
 
       <div className="flex-1" />
 
       {/* Right cluster */}
       <BackendIndicator />
-      <div className="no-drag flex items-center px-1.5">
+      <div className="no-drag flex items-center px-1">
         <StatusDot />
       </div>
-      <IconButton onClick={() => setSettingsOpen(true)} title="Settings">
+      <IconButton onClick={() => setSettingsOpen(true)} tooltip="Settings" aria-label="Settings">
         <Settings className="w-[17px] h-[17px]" />
       </IconButton>
 

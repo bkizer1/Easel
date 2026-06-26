@@ -853,7 +853,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   /* ---- Annotations --------------------------------------------------------- */
 
   addAnnotation(a) {
-    set((s) => ({ annotations: [...s.annotations, a] }));
+    // Dedup by id so re-picking the same element (which reuses the target id)
+    // can't stack duplicate annotations → React key collisions / inflated counts.
+    set((s) => (s.annotations.some((x) => x.id === a.id) ? {} : { annotations: [...s.annotations, a] }));
   },
 
   removeAnnotation(id) {
@@ -940,8 +942,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       lastError: null,
     }));
 
-    // Clear the draft batch so the overlay is clean while the edit runs.
-    set({ annotations: [], targets: [] });
+    // Intentionally keep the draft selection (annotations + targets) on screen
+    // after submitting. Persisting it is a better UX: the user can fire several
+    // instructions at the same region, and removes the selection themselves via
+    // the per-mark "×" bubble (or the composer's "Clear selection" chip) when
+    // they're ready to move on. The request above already carries its own copy.
 
     const result = await easel.edit.submit({
       request: {
@@ -1591,6 +1596,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     set({ xrayOpen: open });
     // Opening the Network tab implicitly refreshes the log.
     if (open && get().xrayTab === 'network') void get().loadNetworkLog();
+    // The cockpit is useless until an element is picked, and picking requires
+    // element-select mode in the guest. Auto-arm Select mode when X-Ray opens
+    // from idle so clicking an element "just works" (don't override freeform
+    // markup, and don't arm when there's no project/preview to inspect).
+    if (open && get().mode === 'idle' && get().project && get().previewUrl) {
+      get().setMode('element-select');
+    }
   },
 
   setXrayTab(tab) {

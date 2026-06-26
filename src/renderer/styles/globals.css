@@ -101,17 +101,30 @@
     color: var(--color-text-primary);
     font-feature-settings: 'cv01', 'cv03', 'ss03';
     letter-spacing: -0.011em;
+    text-rendering: optimizeLegibility;
   }
 
   /* Focus-visible ring — replaces browser default outlines with a branded ring */
   *:focus-visible {
-    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-white dark:ring-offset-gray-950;
+    @apply outline-none ring-2 ring-brand-500/70 ring-offset-2 ring-offset-white dark:ring-offset-ink-950;
   }
 
   /* Selection highlight */
   ::selection {
     background-color: rgba(45, 212, 191, 0.28);
     color: #ecfdf8;
+  }
+
+  /* Honour the OS "reduce motion" preference: collapse all animation/motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
@@ -120,68 +133,77 @@
 /* -------------------------------------------------------------------------- */
 
 @layer components {
-  /* Buttons */
+  /* Buttons — motion baked in: spring transitions + a subtle press on click. */
   .btn-primary {
     @apply inline-flex items-center justify-center gap-2
            px-4 py-2 rounded-lg
            bg-brand-600 text-white text-sm font-medium
-           hover:bg-brand-700 active:bg-brand-800
+           shadow-[inset_0_1px_0_0_rgba(255,255,255,0.18)]
+           hover:bg-brand-500 active:bg-brand-700
+           active:scale-[0.98]
            disabled:opacity-40 disabled:pointer-events-none
-           transition-colors duration-[var(--duration-fast)];
+           transition-all duration-150 ease-spring;
   }
 
   .btn-secondary {
     @apply inline-flex items-center justify-center gap-2
            px-4 py-2 rounded-lg
-           bg-gray-100 dark:bg-gray-800
+           bg-gray-100 dark:bg-white/[0.06]
            text-gray-900 dark:text-gray-50 text-sm font-medium
-           hover:bg-gray-200 dark:hover:bg-gray-700
-           active:bg-gray-300 dark:active:bg-gray-600
+           dark:border dark:border-white/10
+           hover:bg-gray-200 dark:hover:bg-white/[0.10]
+           active:bg-gray-300 dark:active:bg-white/[0.05]
+           active:scale-[0.98]
            disabled:opacity-40 disabled:pointer-events-none
-           transition-colors duration-[var(--duration-fast)];
+           transition-all duration-150 ease-spring;
   }
 
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-2
            px-3 py-1.5 rounded-lg
            text-gray-600 dark:text-gray-400 text-sm font-medium
-           hover:bg-gray-100 dark:hover:bg-gray-800
-           active:bg-gray-200 dark:active:bg-gray-700
+           hover:bg-gray-100 dark:hover:bg-white/[0.07]
+           hover:text-gray-900 dark:hover:text-gray-100
+           active:scale-[0.98]
            disabled:opacity-40 disabled:pointer-events-none
-           transition-colors duration-[var(--duration-fast)];
+           transition-all duration-150 ease-spring;
   }
 
   .btn-icon {
     @apply inline-flex items-center justify-center
            w-8 h-8 rounded-lg
            text-gray-600 dark:text-gray-400
-           hover:bg-gray-100 dark:hover:bg-gray-800
-           active:bg-gray-200 dark:active:bg-gray-700
+           hover:bg-gray-100 dark:hover:bg-white/[0.07]
+           hover:text-gray-900 dark:hover:text-gray-100
+           active:scale-[0.94]
            disabled:opacity-40 disabled:pointer-events-none
-           transition-colors duration-[var(--duration-fast)];
+           transition-all duration-150 ease-spring;
   }
 
   /* Inputs */
   .input-field {
     @apply w-full px-3 py-2 rounded-lg text-sm
-           border border-gray-300 dark:border-gray-600
-           bg-white dark:bg-gray-800
+           border border-gray-300 dark:border-white/10
+           bg-white dark:bg-ink-800/80
            text-gray-900 dark:text-gray-50
            placeholder-gray-400 dark:placeholder-gray-500
-           focus:border-brand-500 focus:ring-1 focus:ring-brand-500
+           focus:outline-none focus:border-brand-500/60
+           focus:ring-2 focus:ring-brand-500/15
            disabled:opacity-40 disabled:bg-gray-50 dark:disabled:bg-gray-900
-           transition-colors duration-[var(--duration-fast)];
+           transition-all duration-150 ease-spring;
   }
 
   .input-label {
     @apply block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1;
   }
 
-  /* Select */
+  /* Select — chevron drawn via a raw background-image. (The data-URL is kept out
+     of @apply: Tailwind splits @apply values on whitespace, and the inline SVG
+     contains spaces, which would otherwise be parsed as bogus class names.) */
   .select-field {
-    @apply input-field appearance-none pr-8
-           bg-[url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E")]
-           bg-no-repeat bg-[right_0.75rem_center];
+    @apply input-field appearance-none pr-8 bg-no-repeat;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-position: right 0.75rem center;
   }
 
   /* Cards */
@@ -317,12 +339,14 @@
 /* -------------------------------------------------------------------------- */
 
 @layer components {
-  /* Deep ink base with a soft jade aurora in the upper corners. */
+  /* Deep ink base with a jade aurora at top-left, a faint iris counter-glow at
+     top-right, and a soft vignette that settles focus toward the center. */
   .shell-atmosphere {
     background-color: #06080c;
     background-image:
-      radial-gradient(120% 95% at -5% -10%, rgba(45, 212, 191, 0.08), transparent 55%),
-      radial-gradient(90% 70% at 105% -8%, rgba(52, 211, 176, 0.05), transparent 60%),
+      radial-gradient(120% 90% at -8% -12%, rgba(45, 212, 191, 0.10), transparent 52%),
+      radial-gradient(95% 75% at 108% -10%, rgba(166, 132, 255, 0.06), transparent 58%),
+      radial-gradient(140% 120% at 50% 120%, rgba(0, 0, 0, 0.55), transparent 60%),
       linear-gradient(180deg, #080b11 0%, #06080c 100%);
   }
 
@@ -345,6 +369,91 @@
   /* Electron hiddenInset title-bar drag helpers. */
   .drag-region { -webkit-app-region: drag; }
   .no-drag { -webkit-app-region: no-drag; }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Material system — floating surfaces "lit from above"                       */
+/* -------------------------------------------------------------------------- */
+
+@layer components {
+  /*
+   * Glass panel: the canonical material for floating chrome (menus, popovers,
+   * cockpit panels, dialogs). A blurred ink fill, a hairline edge, and an inner
+   * top-highlight that reads as a lit bevel — the depth cue that separates a
+   * mature browser from a flat dark theme.
+   */
+  .glass-panel {
+    @apply rounded-xl border border-white/10 bg-ink-900/85 shadow-glass backdrop-blur-xl;
+  }
+
+  .glass-raised {
+    @apply rounded-2xl border border-white/10 bg-ink-900/90 shadow-glass-lg backdrop-blur-2xl;
+  }
+
+  /* Recessed well — inputs, scroll wells, code blocks. The inverse of glass:
+     it sinks into the surface rather than floating above it. */
+  .surface-inset {
+    @apply rounded-lg border border-white/[0.06] bg-black/25
+           shadow-[inset_0_1px_2px_0_rgba(0,0,0,0.4)];
+  }
+
+  /* Standalone top-edge highlight for custom-built surfaces. */
+  .edge-light { box-shadow: var(--tw-shadow, 0 0 #0000), inset 0 1px 0 0 rgba(255, 255, 255, 0.06); }
+
+  /* Keyboard-hint chip — used inside tooltips and menus to surface shortcuts. */
+  .kbd {
+    @apply inline-flex items-center justify-center min-w-[1.25rem] h-[1.125rem] px-1
+           rounded-[5px] border border-white/15 bg-white/[0.06]
+           font-mono text-[10px] font-medium leading-none text-gray-300;
+  }
+
+  /* Segmented control — a grouped cluster of related toggle/icon buttons that
+     share one recessed track (mode switches, view toggles). */
+  .seg {
+    @apply inline-flex items-center gap-0.5 rounded-xl border border-white/[0.07]
+           bg-black/20 p-0.5;
+  }
+
+  /* Indeterminate top-loading bar (browser-chrome navigation progress). */
+  .loadbar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    overflow: hidden;
+    pointer-events: none;
+  }
+  .loadbar > span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      theme('colors.brand.400'),
+      theme('colors.iris.400'),
+      transparent
+    );
+    will-change: left, right;
+    animation: indeterminate 1.15s cubic-bezier(0.65, 0.05, 0.36, 1) infinite;
+  }
+
+  /* Shimmer skeleton — loading placeholder blocks. */
+  .skeleton {
+    @apply relative overflow-hidden rounded-md bg-white/[0.04];
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 -translate-x-full;
+    background-image: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.06),
+      transparent
+    );
+    animation: shimmer 1.6s infinite;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
