@@ -22,6 +22,8 @@ import type {
   SettingsClearSecretRequest,
   SettingsSetMacrosRequest,
   CheckpointRestoreRequest,
+  CheckpointGetShotsRequest,
+  CheckpointScratchStartRequest,
   PreviewReloadRequest,
   PreviewCaptureRequest,
   PreviewRequestImageRequest,
@@ -29,6 +31,8 @@ import type {
   XraySetNetworkCaptureRequest,
   XraySaveSnapshotRequest,
   XrayGetSnapshotRequest,
+  TokensMatchRequest,
+  PublishOpenPrRequest,
 } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { ok, okVoid, fail } from '@shared/result';
@@ -57,6 +61,9 @@ import {
   restoreCheckpoint,
   undoCheckpoint,
   redoCheckpoint,
+  startScratch,
+  keepScratch,
+  discardScratch,
 } from '@main/checkpoints';
 import { getMainWindow, capturePreview } from '@main/window';
 import { createLogger } from '@main/logger';
@@ -251,6 +258,31 @@ export function registerIpcHandlers(): void {
     return ok({ checkpoint });
   });
 
+  handle(IpcChannels.checkpointGetShots, async (req: CheckpointGetShotsRequest) => {
+    if (!req.checkpointId) return fail('checkpointId is required', 'validation');
+    const { readShots } = await import('@main/checkpointShots');
+    const shots = await readShots(req.checkpointId);
+    return ok(shots);
+  });
+
+  // ── Issue #11: scratch experiments ──────────────────────────────────────────
+
+  handle(IpcChannels.checkpointScratchStart, async (req: CheckpointScratchStartRequest) => {
+    if (!getCurrentProject()) return fail('No project open', 'no-project');
+    const scratch = await startScratch(req?.name);
+    return ok({ scratch });
+  });
+
+  handle(IpcChannels.checkpointScratchKeep, async () => {
+    const scratch = await keepScratch();
+    return ok({ scratch });
+  });
+
+  handle(IpcChannels.checkpointScratchDiscard, async () => {
+    const scratch = await discardScratch();
+    return ok({ scratch });
+  });
+
   // ── preview.* ─────────────────────────────────────────────────────────────
 
   handle(IpcChannels.previewReload, (req: PreviewReloadRequest | void) => {
@@ -341,6 +373,68 @@ export function registerIpcHandlers(): void {
     return ok({ checkpointIds: listSnapshots() });
   });
 
+  // ── tokens.* (Issue #8) ──────────────────────────────────────────────────────
+
+  handle(IpcChannels.tokensMatch, async (req: TokensMatchRequest) => {
+    const project = getCurrentProject();
+    if (!project) return fail('No project open', 'no-project');
+    const { resolveTokens } = await import('@main/tokens');
+    const matches = await resolveTokens(project.root, req.values ?? {});
+    return ok({ matches });
+  });
+
+  // ── publish.* (Issue #10) ────────────────────────────────────────────────────
+
+  handle(IpcChannels.publishOpenPr, async (req: PublishOpenPrRequest) => {
+    const project = getCurrentProject();
+    if (!project) return fail('No project open', 'no-project');
+
+    // The session's accepted edits are the checkpoints that carry a requestId
+    // (the initial "Original" snapshot does not).
+    const { checkpoints } = listCheckpoints();
+    const edits = checkpoints.filter((c) => c.requestId);
+    if (edits.length === 0) return fail('No accepted edits to publish yet', 'no-checkpoints');
+
+    // Accumulate instructions + changed files + provenance. Arrays (targets/
+    // sources) are unioned; scalar fields take the most recent non-empty value.
+    const { getCheckpointProvenance } = await import('@main/checkpoints');
+    const instructions: string[] = [];
+    const files = new Set<string>();
+    const allTargets = new Set<string>();
+    const allSources = new Set<string>();
+    const scalar: Pick<CheckpointProvenance, 'model' | 'backend' | 'confidence'> = {};
+    for (const c of edits) {
+      for (const f of c.changedFiles) files.add(f);
+      const prov = await getCheckpointProvenance(c.commitSha);
+      if (prov.instruction) instructions.push(prov.instruction);
+      for (const t of prov.targets ?? []) allTargets.add(t);
+      for (const s of prov.sources ?? []) allSources.add(s);
+      if (prov.model) scalar.model = prov.model;
+      if (prov.backend) scalar.backend = prov.backend;
+      if (prov.confidence) scalar.confidence = prov.confidence;
+    }
+    const mergedProvenance: CheckpointProvenance = {
+      ...scalar,
+      instruction: instructions.length > 0 ? instructions.join(' | ') : undefined,
+      targets: allTargets.size > 0 ? [...allTargets] : undefined,
+      sources: allSources.size > 0 ? [...allSources] : undefined,
+    };
+
+    const { openPr, buildPrContent } = await import('@main/publish');
+    const content = buildPrContent({ instructions, changedFiles: [...files] });
+    const result = await openPr({
+      root: project.root,
+      checkpoints: edits,
+      title: req.title?.trim() || content.title,
+      body: content.body,
+      branchName: req.branchName?.trim() || undefined,
+      provenance: mergedProvenance,
+    });
+
+    if (!result.ok) return fail(result.message, result.code);
+    return ok({ branch: result.branch, prUrl: result.prUrl });
+  });
+
   log.info('IPC handlers registered');
 }
 
@@ -348,7 +442,7 @@ export function registerIpcHandlers(): void {
 /*  Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-import type { AppSettings, AgentBackendId } from '@shared/types';
+import type { AppSettings, AgentBackendId, CheckpointProvenance } from '@shared/types';
 import type { SettingsChangedPayload } from '@shared/ipc';
 
 /** Return the secret ids the given backend may need decrypted at call time. */

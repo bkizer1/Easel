@@ -30,7 +30,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import crypto from 'node:crypto';
-import type { Checkpoint, CheckpointProvenance } from '@shared/types';
+import type { Checkpoint, CheckpointProvenance, ScratchInfo } from '@shared/types';
 import type { CheckpointChangedPayload } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { getMainWindow } from '@main/window';
@@ -50,6 +50,9 @@ const log = createLogger('checkpoints');
  */
 const EASEL_REF = 'refs/easel/checkpoint';
 
+/** Issue #11: scratch experiment refs live exclusively under this prefix. */
+const SCRATCH_REF_PREFIX = 'refs/easel/scratch/';
+
 /** Maximum message length stored in the commit subject line. */
 const MAX_MSG_LEN = 72;
 
@@ -65,6 +68,26 @@ let _timeline: Checkpoint[] = [];
  * -1 means the working tree is before any checkpoint (initial state).
  */
 let _currentIndex = -1;
+
+/** Issue #11: the active scratch experiment, or null when on the main line. */
+interface ScratchState {
+  id: string;
+  name?: string;
+  /** Full ref, e.g. `refs/easel/scratch/ab12cd34`. */
+  ref: string;
+  /** The pre-scratch checkpoint's commit SHA the scratch forked from. */
+  baseCommitSha: string;
+  /** `_currentIndex` at the moment the scratch started. */
+  preScratchIndex: number;
+  /** Checkpoint id the scratch forked from (for display). */
+  preScratchCheckpointId: string;
+}
+let _activeScratch: ScratchState | null = null;
+
+/** The ref new checkpoints are written to: the scratch ref when one is active. */
+function _activeRef(): string {
+  return _activeScratch ? _activeScratch.ref : EASEL_REF;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Git shell helpers                                                          */
@@ -121,6 +144,7 @@ export async function initCheckpoints(root: string): Promise<void> {
   _projectRoot = root;
   _timeline = [];
   _currentIndex = -1;
+  _activeScratch = null; // Issue #11: a freshly opened project has no scratch.
 
   // Ensure the project is a git repo.
   if (!(await isGitRepo(root))) {
@@ -304,15 +328,17 @@ export async function createCheckpoint(
   // The subject carries the legacy requestId/files encoding (still parsed by
   // _loadTimelineFromGit); structured provenance rides in a trailing trailer
   // paragraph appended as a second `-m` (git separates them with a blank line).
-  const parentSha = await resolveRefFull(root, EASEL_REF);
+  // Issue #11: while a scratch is active, checkpoints chain on the scratch ref.
+  const activeRef = _activeRef();
+  const parentSha = await resolveRefFull(root, activeRef);
   const commitArgs = ['commit-tree', treeHash, '-m', _encodeSubject(message, requestId, changedFiles)];
   const trailers = formatProvenanceTrailers(_withSourceFallback(provenance, changedFiles));
   if (trailers) commitArgs.push('-m', trailers);
   if (parentSha) commitArgs.push('-p', parentSha);
   const commitSha = await git(root, ...commitArgs);
 
-  // Update EASEL_REF to point to the new commit.
-  await git(root, 'update-ref', EASEL_REF, commitSha);
+  // Update the active ref (scratch ref when experimenting, else EASEL_REF).
+  await git(root, 'update-ref', activeRef, commitSha);
 
   // Truncate redo branch if we had undone edits.
   if (_currentIndex < _timeline.length - 1) {
@@ -466,8 +492,10 @@ async function _getChangedFiles(root: string): Promise<string[]> {
     // Silently ignore — this is best-effort before the real stage.
   }
 
-  const refExists = await resolveRef(root, EASEL_REF);
-  const base = refExists ? EASEL_REF : null;
+  // Issue #11: diff against the active ref (scratch tip when experimenting).
+  const activeRef = _activeRef();
+  const refExists = await resolveRef(root, activeRef);
+  const base = refExists ? activeRef : null;
 
   try {
     let diffOutput: string;
@@ -490,7 +518,8 @@ function _broadcastChanged(): void {
   if (!win || win.isDestroyed()) return;
 
   const { checkpoints, currentId } = listCheckpoints();
-  const payload: CheckpointChangedPayload = { checkpoints, currentId };
+  // Issue #11: ride the active-scratch state on the existing change broadcast.
+  const payload: CheckpointChangedPayload = { checkpoints, currentId, scratch: getScratch() };
   win.webContents.send(IpcChannels.checkpointChanged, payload);
 }
 
@@ -500,4 +529,95 @@ function _broadcastChanged(): void {
  */
 export function generateCheckpointId(): string {
   return crypto.randomBytes(4).toString('hex');
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #11: Scratch branches (throwaway experiments)                        */
+/* -------------------------------------------------------------------------- */
+
+/** Snapshot of the current scratch experiment for the renderer. */
+export function getScratch(): ScratchInfo {
+  if (!_activeScratch) return { active: false };
+  return {
+    active: true,
+    id: _activeScratch.id,
+    name: _activeScratch.name,
+    baseCheckpointId: _activeScratch.preScratchCheckpointId || undefined,
+  };
+}
+
+/**
+ * Start a scratch experiment: fork `refs/easel/scratch/<id>` from the current
+ * checkpoint and route subsequent checkpoints there. No-op (returns the active
+ * scratch) if one is already running.
+ */
+export async function startScratch(name?: string): Promise<ScratchInfo> {
+  const root = _requireRoot();
+  if (_activeScratch) return getScratch();
+
+  const current = _currentIndex >= 0 ? _timeline[_currentIndex] : undefined;
+  const baseSha = current?.commitSha ?? (await resolveRefFull(root, EASEL_REF));
+  if (!baseSha) throw new Error('Cannot start a scratch experiment: no checkpoint to fork from');
+
+  const id = generateCheckpointId();
+  const ref = `${SCRATCH_REF_PREFIX}${id}`;
+  await git(root, 'update-ref', ref, baseSha);
+
+  _activeScratch = {
+    id,
+    name: name?.trim() || undefined,
+    ref,
+    baseCommitSha: baseSha,
+    preScratchIndex: _currentIndex,
+    preScratchCheckpointId: current?.id ?? '',
+  };
+  log.info('Started scratch experiment', { id, name: _activeScratch.name });
+  _broadcastChanged();
+  return getScratch();
+}
+
+/**
+ * Keep the scratch: fast-forward the main Easel checkpoint ref to the scratch
+ * tip (the experiment's checkpoints already chain from the pre-scratch base),
+ * then delete the scratch ref. The in-memory timeline already holds the kept
+ * checkpoints, so the cursor is unchanged.
+ */
+export async function keepScratch(): Promise<ScratchInfo> {
+  const root = _requireRoot();
+  if (!_activeScratch) return { active: false };
+  const scratch = _activeScratch;
+
+  const tip = await resolveRefFull(root, scratch.ref);
+  if (tip) await git(root, 'update-ref', EASEL_REF, tip);
+  await git(root, 'update-ref', '-d', scratch.ref).catch(() => undefined);
+
+  _activeScratch = null;
+  log.info('Kept scratch experiment', { id: scratch.id });
+  _broadcastChanged();
+  return { active: false };
+}
+
+/**
+ * Discard the scratch: restore the working tree to the pre-scratch checkpoint
+ * (via the existing restore path), truncate the timeline back to that point,
+ * and delete the scratch ref. The main Easel ref is never advanced.
+ */
+export async function discardScratch(): Promise<ScratchInfo> {
+  const root = _requireRoot();
+  if (!_activeScratch) return { active: false };
+  const scratch = _activeScratch;
+
+  if (scratch.baseCommitSha) {
+    await _applyTree(root, scratch.baseCommitSha);
+  }
+  _timeline = _timeline.slice(0, scratch.preScratchIndex + 1);
+  // The working tree was restored to the pre-scratch checkpoint, so the cursor
+  // must point exactly there (even if the user had undone past it mid-scratch).
+  _currentIndex = scratch.preScratchIndex;
+  await git(root, 'update-ref', '-d', scratch.ref).catch(() => undefined);
+
+  _activeScratch = null;
+  log.info('Discarded scratch experiment', { id: scratch.id });
+  _broadcastChanged();
+  return { active: false };
 }

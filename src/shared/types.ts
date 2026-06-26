@@ -123,6 +123,12 @@ export interface ElementTarget {
    * may downgrade this after verifying the source on disk (HMR race detection).
    */
   confidence: ConfidenceLevel;
+  /**
+   * Issue #8: a curated set of the element's computed CSS values (color,
+   * spacing, typography) keyed by kebab-case property, so the token panel can
+   * match them to project design tokens.
+   */
+  computedStyles?: Record<string, string>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -710,4 +716,71 @@ export interface ImageProvider {
   isAvailable(): boolean;
   /** Produce or transform an image per the request. */
   request(input: ImageRequest): Promise<ImageResult>;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #6: Live DOM/CSS tweak — structured style delta                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One ephemeral inline-style change made via the tweak tool. Accumulated per
+ * element and shipped to the agent by "Apply to source" so the edit is precise.
+ */
+export interface StyleEdit {
+  /** CSS property name in kebab-case, e.g. `padding`, `border-radius`. */
+  property: string;
+  /** The element's value for {@link property} before the first tweak. */
+  oldValue: string;
+  /** The value the user tweaked it to (applied live as an inline style). */
+  newValue: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #8: Live token inspector — design tokens                             */
+/* -------------------------------------------------------------------------- */
+
+/** Where a design token came from (drives the suggested source replacement). */
+export type TokenKind = 'css-var' | 'tailwind';
+
+/** A resolved design token discovered in the project's token sources. */
+export interface DesignToken {
+  /** Token identity, e.g. `--color-slate-800` or `slate-800`. */
+  name: string;
+  /** The token's raw value, e.g. `#1e293b` or `1rem`. */
+  value: string;
+  /** Source kind. */
+  kind: TokenKind;
+  /** What to write in source to use this token (CSS var) or a hint (Tailwind). */
+  replacement: string;
+}
+
+/** A computed value and the design token it maps to (or null when off-system). */
+export interface TokenMatch {
+  /** CSS property the value came from. */
+  property: string;
+  /** The element's computed value for {@link property}. */
+  value: string;
+  /** The matched token, or null when no token matches (off-system). */
+  token: DesignToken | null;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #11: Scratch branches — throwaway experiment state                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The current scratch-experiment state. While a scratch is active, new
+ * checkpoints are routed to a `refs/easel/scratch/<id>` ref; "Keep" lands them
+ * on the main checkpoint line and "Discard" deletes the ref and restores the
+ * pre-scratch tree. The user's real git `HEAD`/branches are never touched.
+ */
+export interface ScratchInfo {
+  /** Whether a scratch experiment is currently active. */
+  active: boolean;
+  /** The scratch id (also the `refs/easel/scratch/<id>` segment). */
+  id?: string;
+  /** Optional user-supplied name for the experiment. */
+  name?: string;
+  /** The checkpoint id the scratch was forked from. */
+  baseCheckpointId?: string;
 }
