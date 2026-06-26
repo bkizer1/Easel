@@ -32,6 +32,11 @@ function refExists(dir: string, ref: string): boolean {
 
 const APP = (body: string): string => `export const App = () => ${body};\n`;
 
+/** Read a file, normalizing CRLF → LF (Windows git checks out with autocrlf). */
+function readNorm(path: string): string {
+  return readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
+}
+
 function makeRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'easel-scratch-'));
   git(dir, 'init', '-q');
@@ -93,13 +98,13 @@ describe('scratch experiments', () => {
 
     writeFileSync(join(dir, 'app.tsx'), APP('<main>experiment</main>'));
     await createCheckpoint('experiment', 'r1');
-    expect(readFileSync(join(dir, 'app.tsx'), 'utf8')).toContain('experiment');
+    expect(readNorm(join(dir, 'app.tsx'))).toContain('experiment');
 
     const result = await discardScratch();
     expect(result.active).toBe(false);
     expect(getScratch().active).toBe(false);
     // Working tree is back to the pre-scratch content.
-    expect(readFileSync(join(dir, 'app.tsx'), 'utf8')).toBe(APP('null'));
+    expect(readNorm(join(dir, 'app.tsx'))).toBe(APP('null'));
     // The cursor points back at the pre-scratch checkpoint (not before it).
     expect(listCheckpoints().currentId).toBe(preScratchId);
     // The scratch ref is gone.
