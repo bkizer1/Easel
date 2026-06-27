@@ -24,6 +24,7 @@ import {
   Lock,
   Loader2,
   Sparkles,
+  Wand2,
 } from 'lucide-react';
 import type { BoundingBox, ElementTarget, Point } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
@@ -90,34 +91,43 @@ interface DidFailLoadEvent extends Event {
 /*  Empty state                                                              */
 /* -------------------------------------------------------------------------- */
 
-function EmptyState({ onOpen }: { onOpen: () => void }): React.ReactElement {
+function EmptyState({ onOpen, onNewSite }: { onOpen: () => void; onNewSite: () => void }): React.ReactElement {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-5 text-gray-500 select-none px-6 text-center animate-fade-in">
-      {/* Layered emblem: a soft jade halo behind the canvas mark. */}
+      {/* Layered emblem: a soft jade halo behind the wand mark. */}
       <div className="relative grid place-items-center">
-        <div className="absolute h-28 w-28 rounded-full bg-brand-500/10 blur-2xl" />
+        <div className="absolute h-28 w-28 rounded-full bg-brand-500/15 blur-2xl" />
         <div className="relative grid place-items-center h-16 w-16 rounded-2xl border border-white/10 bg-ink-800/70 shadow-glass">
-          <Globe className="h-7 w-7 text-gray-500" />
+          <Wand2 className="h-7 w-7 text-brand-300" />
         </div>
       </div>
       <div className="max-w-sm">
-        <p className="text-[15px] font-semibold text-gray-200">Nothing loaded yet</p>
+        <p className="text-[15px] font-semibold text-gray-200">Start with a blank canvas</p>
         <p className="text-[12.5px] mt-1.5 leading-relaxed text-gray-500">
-          Type a dev-server URL in the address bar above —{' '}
-          <span className="font-mono text-gray-300">http://localhost:3000</span> — and press Enter.
-          Open a project folder too, so Claude can edit its source.
+          Tell Easel about the site you have in mind — it&rsquo;ll scaffold a project and build a
+          first draft for you. Already have something running? Open it instead.
         </p>
       </div>
-      <button
-        onClick={onOpen}
-        className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium rounded-xl bg-brand-600 text-white shadow-[inset_0_1px_0_0_rgba(255,255,255,0.18)] hover:bg-brand-500 transition-all duration-150 ease-spring active:scale-[0.98]"
-      >
-        <FolderOpen className="w-4 h-4" />
-        Open project folder
-      </button>
+      <div className="flex flex-col gap-2.5 w-full max-w-[260px]">
+        <button
+          onClick={onNewSite}
+          className="flex items-center justify-center gap-2 px-4 py-2.5 text-[13px] font-semibold rounded-xl bg-gradient-to-br from-brand-400 to-brand-600 text-white shadow-[0_0_22px_-6px_rgba(52,211,176,0.9),inset_0_1px_0_0_rgba(255,255,255,0.18)] hover:brightness-110 transition-all duration-150 ease-spring active:scale-[0.98]"
+        >
+          <Wand2 className="w-4 h-4" />
+          Start a new site
+        </button>
+        <button
+          onClick={onOpen}
+          className="flex items-center justify-center gap-2 px-4 py-2.5 text-[13px] font-medium rounded-xl border border-white/10 bg-ink-800/60 text-gray-200 hover:bg-ink-800 hover:border-white/20 transition-all duration-150 ease-spring active:scale-[0.98]"
+        >
+          <FolderOpen className="w-4 h-4" />
+          Open existing project
+        </button>
+      </div>
       <div className="flex items-center gap-1.5 text-[11px] text-gray-600">
         <Sparkles className="w-3 h-3 text-brand-500/70" />
-        Select an element or draw markup, then describe the change
+        …or type a dev-server URL above, like{' '}
+        <span className="font-mono text-gray-400">localhost:3000</span>
       </div>
     </div>
   );
@@ -143,6 +153,7 @@ export function PreviewPane(): React.ReactElement {
   const mode = useEaselStore((s) => s.mode);
 
   const openProject = useEaselStore((s) => s.openProject);
+  const openNewSite = useEaselStore((s) => s.openNewSite);
   const addTarget = useEaselStore((s) => s.addTarget);
   const setHover = useEaselStore((s) => s.setHover);
   const addAnnotation = useEaselStore((s) => s.addAnnotation);
@@ -675,7 +686,7 @@ export function PreviewPane(): React.ReactElement {
       {/* Preview surface */}
       <div className="flex-1 relative overflow-hidden bg-gray-950">
         {!previewUrl ? (
-          <EmptyState onOpen={() => void openProject()} />
+          <EmptyState onOpen={() => void openProject()} onNewSite={() => openNewSite()} />
         ) : showDevServerOverlay ? (
           <DevServerOverlay
             url={previewUrl}

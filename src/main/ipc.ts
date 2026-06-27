@@ -33,6 +33,7 @@ import type {
   XrayGetSnapshotRequest,
   TokensMatchRequest,
   PublishOpenPrRequest,
+  ProjectCreateNewRequest,
 } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { ok, okVoid, fail } from '@shared/result';
@@ -48,6 +49,7 @@ import {
   getCurrentProject,
   closeProject,
 } from '@main/project';
+import { chooseNewSiteLocation, createNewSite } from '@main/scaffold';
 import {
   startDevServer,
   stopDevServer,
@@ -138,6 +140,24 @@ export function registerIpcHandlers(): void {
     stopDevServer();
     closeProject();
     return okVoid();
+  });
+
+  handle(IpcChannels.projectChooseLocation, async () => {
+    const parentDir = await chooseNewSiteLocation();
+    return ok({ parentDir });
+  });
+
+  handle(IpcChannels.projectCreateNew, async (req: ProjectCreateNewRequest) => {
+    if (!req.parentDir || !req.name?.trim()) return fail('A name and location are required', 'validation');
+    // Scaffold the new project (writes files, installs deps, git-inits, loads it).
+    const project = await createNewSite(req);
+    // Same post-open wiring as projectOpen: checkpoints + auto-start its dev server.
+    await initCheckpoints(project.root).catch((err) =>
+      log.warn('Checkpoint init failed', { err: String(err) }),
+    );
+    stopDevServer();
+    void maybeAutoStartDevServer(project);
+    return ok({ project });
   });
 
   // ── edit.* ────────────────────────────────────────────────────────────────

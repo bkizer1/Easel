@@ -31,6 +31,7 @@ import type {
 } from './types';
 import type { GridConfig } from './grid';
 import type { ElementStateSnapshot, NetworkEntry, StateSnapshot } from './xray';
+import type { NewSiteBrief } from './siteBrief';
 
 /* -------------------------------------------------------------------------- */
 /*  Channel names                                                              */
@@ -51,6 +52,12 @@ export const IpcChannels = {
   projectClose: 'project.close',
   /** Emitted by main when the open project changes. */
   projectChanged: 'project.changed',
+  /** Open a folder dialog to choose where a new site is created. */
+  projectChooseLocation: 'project.chooseLocation',
+  /** Scaffold a brand-new site project from a creative brief. */
+  projectCreateNew: 'project.createNew',
+  /** Streamed scaffolding progress (writing / installing / git / done / error). */
+  projectScaffoldEvent: 'project.scaffoldEvent',
 
   // Edit pipeline -----------------------------------------------------------
   /** Submit an EditRequest; main runs the agent and streams events back. */
@@ -437,6 +444,33 @@ export interface ProjectChangedPayload {
   project: ProjectConfig | null;
 }
 
+/** Result of the choose-location folder dialog. */
+export interface ProjectChooseLocationResponse {
+  /** Absolute parent directory the user picked, or null if cancelled. */
+  parentDir: string | null;
+}
+
+/** Request to scaffold a brand-new site project from a creative brief. */
+export interface ProjectCreateNewRequest {
+  brief: NewSiteBrief;
+  /** Parent directory to create the project under. */
+  parentDir: string;
+  /** Desired project / folder name. */
+  name: string;
+}
+export interface ProjectCreateNewResponse {
+  project: ProjectConfig;
+}
+
+/** Streamed scaffolding progress, pushed on {@link IpcChannels.projectScaffoldEvent}. */
+export interface ScaffoldEventPayload {
+  phase: 'writing' | 'installing' | 'git' | 'done' | 'error';
+  /** Recent `npm install` output line, when phase is 'installing'. */
+  log?: string;
+  /** Human message for the current phase (or the error text). */
+  message?: string;
+}
+
 export interface SettingsChangedPayload {
   settings: AppSettings;
 }
@@ -466,6 +500,12 @@ export interface EaselApi {
     open(): Promise<IpcResult<ProjectOpenResponse>>;
     getCurrent(): Promise<IpcResult<ProjectGetCurrentResponse>>;
     close(): Promise<IpcResult<void>>;
+    /** Open a folder dialog to pick where a new site is created. */
+    chooseLocation(): Promise<IpcResult<ProjectChooseLocationResponse>>;
+    /** Scaffold + open a brand-new site from a creative brief. */
+    createNew(req: ProjectCreateNewRequest): Promise<IpcResult<ProjectCreateNewResponse>>;
+    /** Subscribe to scaffolding progress. */
+    onScaffold(handler: (payload: ScaffoldEventPayload) => void): Unsubscribe;
     onChanged(handler: (payload: ProjectChangedPayload) => void): Unsubscribe;
   };
 
@@ -573,6 +613,8 @@ export interface IpcInvokeMap {
   [IpcChannels.projectOpen]: { request: void; response: IpcResult<ProjectOpenResponse> };
   [IpcChannels.projectGetCurrent]: { request: void; response: IpcResult<ProjectGetCurrentResponse> };
   [IpcChannels.projectClose]: { request: void; response: IpcResult<void> };
+  [IpcChannels.projectChooseLocation]: { request: void; response: IpcResult<ProjectChooseLocationResponse> };
+  [IpcChannels.projectCreateNew]: { request: ProjectCreateNewRequest; response: IpcResult<ProjectCreateNewResponse> };
 
   [IpcChannels.editSubmit]: { request: EditSubmitRequest; response: IpcResult<EditSubmitResponse> };
   [IpcChannels.editCancel]: { request: EditCancelRequest; response: IpcResult<void> };
@@ -629,6 +671,7 @@ export interface IpcInvokeMap {
  */
 export interface IpcEventMap {
   [IpcChannels.projectChanged]: ProjectChangedPayload;
+  [IpcChannels.projectScaffoldEvent]: ScaffoldEventPayload;
   [IpcChannels.editEvent]: EditEventPayload;
   [IpcChannels.settingsChanged]: SettingsChangedPayload;
   [IpcChannels.checkpointChanged]: CheckpointChangedPayload;

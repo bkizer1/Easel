@@ -34,7 +34,8 @@ import type {
   StyleEdit,
   TokenMatch,
 } from '@shared/types';
-import type { DevServerStatePayload, InspectorCommand, PreviewStatusPayload } from '@shared/ipc';
+import type { DevServerStatePayload, InspectorCommand, PreviewStatusPayload, ScaffoldEventPayload } from '@shared/ipc';
+import { buildSitePrompt, type NewSiteBrief } from '@shared/siteBrief';
 import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
@@ -166,6 +167,10 @@ export interface EaselState {
   devServer: DevServerStatePayload | null;
   /** URL currently loaded in the preview <webview> (browser-style address bar). */
   previewUrl: string | null;
+  /** Whether the "start a new site" intake wizard is open. */
+  newSiteOpen: boolean;
+  /** Live scaffolding progress while a new site is created; null when idle. */
+  scaffold: ScaffoldEventPayload | null;
   /** Bumped to force the preview <webview> to reload (e.g. after a revert). */
   previewReloadNonce: number;
   /** Bumped to toggle the preview <webview> devtools. */
@@ -276,6 +281,14 @@ export interface EaselActions {
 
   /** Point the embedded preview at a URL (browser-style address bar). */
   setPreviewUrl(url: string): void;
+
+  /** Open / close the "start a new site" intake wizard. */
+  openNewSite(): void;
+  closeNewSite(): void;
+  /** Open a folder dialog; resolves to the chosen parent directory (or null). */
+  chooseSiteLocation(): Promise<string | null>;
+  /** Scaffold a brand-new site from the brief, open it, and kick off the build. */
+  createNewSite(brief: NewSiteBrief, parentDir: string, name: string): Promise<void>;
 
   /** Start the current project's dev server (runs its detected command). */
   startDevServer(): Promise<void>;
@@ -527,6 +540,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   previewStatus: null,
   devServer: null,
   previewUrl: null,
+  newSiteOpen: false,
+  scaffold: null,
   previewReloadNonce: 0,
   devToolsNonce: 0,
   viewportWidth: null,
@@ -589,6 +604,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ devServer: payload });
     });
 
+    const unsubScaffold = easel.project.onScaffold((payload) => {
+      set({ scaffold: payload });
+    });
+
     const unsubEdit = easel.edit.onEvent(({ event }) => {
       get().applyAgentEvent(event);
     });
@@ -638,6 +657,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       unsubCheckpoint();
       unsubPreview();
       unsubDevServer();
+      unsubScaffold();
       unsubEdit();
       unsubNetwork();
     };
@@ -699,6 +719,47 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       publishing: false,
       lastPrUrl: null,
     });
+  },
+
+  /* ---- New site (from scratch) --------------------------------------------- */
+
+  openNewSite() {
+    set({ newSiteOpen: true });
+  },
+
+  closeNewSite() {
+    set({ newSiteOpen: false, scaffold: null });
+  },
+
+  async chooseSiteLocation() {
+    const result = await easel.project.chooseLocation();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return null;
+    }
+    return result.value.parentDir;
+  },
+
+  async createNewSite(brief, parentDir, name) {
+    // Switch the wizard to its progress view immediately; main streams real
+    // phase updates over project.onScaffold while createNew runs (npm install, etc.).
+    set({ scaffold: { phase: 'writing', message: 'Creating your project…' } });
+    const result = await easel.project.createNew({ brief, parentDir, name });
+    if (!result.ok) {
+      set({ lastError: result.error, scaffold: { phase: 'error', message: result.error } });
+      return;
+    }
+    const project = result.value.project;
+    set({
+      project,
+      previewUrl: project.devServerUrl ? normalizePreviewUrl(project.devServerUrl) : null,
+      newSiteOpen: false,
+      scaffold: null,
+      lastError: null,
+    });
+    await get().listCheckpoints();
+    // Hand the brief to the agent to build the actual site on top of the scaffold.
+    void get().submitEdit(buildSitePrompt(brief));
   },
 
   /* ---- Interaction mode ---------------------------------------------------- */
