@@ -57,6 +57,7 @@ interface WebviewElement extends HTMLElement {
   canGoForward(): boolean;
   stop(): void;
   getURL(): string;
+  isLoading(): boolean;
   send(channel: string, ...args: unknown[]): void;
   openDevTools(): void;
   closeDevTools(): void;
@@ -393,6 +394,14 @@ export function PreviewPane(): React.ReactElement {
     const onStopLoading = () => {
       setLoading(false);
       setNavState(readNav());
+      // Reliable readiness signal: by the time loading stops, the guest
+      // inspector has initialised. `dom-ready` and `inspector-ready` are
+      // one-shots that a listener re-attach (this effect re-runs on mode /
+      // previewUrl changes) can land in the gap of and miss — which freezes the
+      // guest (no hover/pick) and deadens the set-style forwarding. Assert
+      // readiness here too, then sync the current mode.
+      setWebviewReady(true);
+      sendCommand({ type: 'set-mode', mode });
     };
     const onNavigate = () => setNavState(readNav());
     const onFavicon = (e: Event) => {
@@ -436,6 +445,21 @@ export function PreviewPane(): React.ReactElement {
     wv.addEventListener('did-navigate-in-page', onNavigate);
     wv.addEventListener('page-favicon-updated', onFavicon);
     wv.addEventListener('page-title-updated', onTitle);
+
+    // Recovery for the readiness race: if the webview already finished loading
+    // before this (re)attach, the one-shot load events above were missed.
+    // Detect the already-loaded page and assert readiness now so the guest is
+    // never left frozen.
+    try {
+      const url = wv.getURL();
+      if (!wv.isLoading() && url && !url.startsWith('about:')) {
+        setWebviewReady(true);
+        sendCommand({ type: 'set-mode', mode });
+      }
+    } catch {
+      /* webview not queryable yet — the load events above will cover it */
+    }
+
     return () => {
       wv.removeEventListener('ipc-message', listener);
       wv.removeEventListener('dom-ready', domReady);
