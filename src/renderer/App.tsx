@@ -25,6 +25,7 @@ import { PreviewPane } from './components/PreviewPane';
 import { ChatPanel } from './components/ChatPanel';
 import { DiffViewer } from './components/DiffViewer';
 import { SettingsDialog } from './components/SettingsDialog';
+import { NewSiteWizard } from './components/NewSiteWizard';
 import { PolicyPrompt } from './components/PolicyPrompt';
 import { StateXRayPanel } from './components/StateXRayPanel';
 import { TweakPanel } from './components/TweakPanel';
@@ -144,6 +145,7 @@ export default function App(): JSX.Element {
   const settingsOpen = useEaselStore((s) => s.settingsOpen);
   const needsAuth = useEaselStore((s) => s.needsAuth);
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
+  const newSiteOpen = useEaselStore((s) => s.newSiteOpen);
 
   // Apply theme whenever settings change.
   useTheme(settings?.theme);
@@ -238,6 +240,9 @@ export default function App(): JSX.Element {
 
       {/* Settings dialog: modal overlay */}
       {settingsOpen && <SettingsDialog />}
+
+      {/* New-site intake wizard: shown when starting a site from scratch */}
+      {newSiteOpen && <NewSiteWizard />}
 
       {/* Guardrail allow-once prompt (when a requireConfirm write is paused) */}
       <PolicyPrompt />

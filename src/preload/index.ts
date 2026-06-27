@@ -88,6 +88,18 @@ const api: EaselApi = {
     close() {
       return ipcRenderer.invoke(IpcChannels.projectClose);
     },
+    chooseLocation() {
+      return ipcRenderer.invoke(IpcChannels.projectChooseLocation);
+    },
+    createNew(req) {
+      return ipcRenderer.invoke(IpcChannels.projectCreateNew, req);
+    },
+    prewarmToolchain() {
+      return ipcRenderer.invoke(IpcChannels.projectPrewarmToolchain);
+    },
+    onScaffold(handler) {
+      return subscribe(IpcChannels.projectScaffoldEvent, handler);
+    },
     onChanged(handler) {
       return subscribe(IpcChannels.projectChanged, handler);
     },
