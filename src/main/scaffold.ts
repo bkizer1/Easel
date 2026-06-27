@@ -9,8 +9,8 @@
  */
 
 import { dialog } from 'electron';
-import { spawn, execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, writeFile, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import os from 'node:os';
@@ -19,8 +19,10 @@ import type { ProjectConfig } from '@shared/types';
 import type { NewSiteBrief } from '@shared/siteBrief';
 import type { ScaffoldEventPayload } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
+import { TEMPLATE_DEPENDENCIES, TEMPLATE_DEV_DEPENDENCIES } from '@shared/toolchainDeps';
 import { getMainWindow } from '@main/window';
 import { loadProject } from '@main/project';
+import { ensureToolchain, isToolchainReady, toolchainModulesPath } from '@main/toolchain';
 import { createLogger } from '@main/logger';
 
 const execFileAsync = promisify(execFile);
@@ -66,12 +68,8 @@ function templateFiles(name: string, slug: string): Record<string, string> {
           version: '0.0.0',
           type: 'module',
           scripts: { dev: 'vite', build: 'vite build', preview: 'vite preview' },
-          dependencies: { react: '^18.3.1', 'react-dom': '^18.3.1' },
-          devDependencies: {
-            '@vitejs/plugin-react': '^4.3.1',
-            typescript: '^5.5.4',
-            vite: '^5.3.4',
-          },
+          dependencies: TEMPLATE_DEPENDENCIES,
+          devDependencies: TEMPLATE_DEV_DEPENDENCIES,
         },
         null,
         2,
@@ -79,8 +77,12 @@ function templateFiles(name: string, slug: string): Record<string, string> {
     'vite.config.ts':
       "import { defineConfig } from 'vite';\n" +
       "import react from '@vitejs/plugin-react';\n\n" +
+      "// cacheDir is project-local (not the default node_modules/.vite) because\n" +
+      "// node_modules is a symlink to Easel's shared toolchain — keep prebundle\n" +
+      '// caches separate per project.\n' +
       'export default defineConfig({\n' +
       '  plugins: [react()],\n' +
+      "  cacheDir: '.vite',\n" +
       '  server: { port: 3000 },\n' +
       '});\n',
     'index.html':
@@ -110,7 +112,7 @@ function templateFiles(name: string, slug: string): Record<string, string> {
         null,
         2,
       ) + '\n',
-    '.gitignore': 'node_modules\ndist\n*.local\n.DS_Store\n',
+    '.gitignore': 'node_modules\ndist\n.vite\n*.local\n.DS_Store\n',
     'src/main.tsx':
       "import React from 'react';\n" +
       "import ReactDOM from 'react-dom/client';\n" +
@@ -178,8 +180,16 @@ export async function createNewSite(opts: {
     await writeFile(p, content, 'utf8');
   }
 
-  emit({ phase: 'installing', message: 'Installing dependencies (this takes a moment)…' });
-  await npmInstall(dir);
+  // Reuse Easel's shared toolchain instead of a per-project install: warm it
+  // (instant if already done — it's pre-warmed when the wizard opens) and symlink
+  // the project's node_modules to it. The project stays source-only and creation
+  // is ~instant. The package.json still declares real deps, so the project is a
+  // standard, standalone-installable project if taken elsewhere.
+  if (!isToolchainReady()) {
+    emit({ phase: 'installing', message: "Setting up Easel's toolchain (one-time)…" });
+  }
+  await ensureToolchain((line) => emit({ phase: 'installing', log: line }));
+  await symlink(toolchainModulesPath(), path.join(dir, 'node_modules'), 'junction');
 
   emit({ phase: 'git', message: 'Initialising git…' });
   await gitInit(dir);
@@ -187,28 +197,6 @@ export async function createNewSite(opts: {
   emit({ phase: 'done', message: 'Ready' });
   log.info('New site scaffolded', { dir });
   return loadProject(dir);
-}
-
-function npmInstall(dir: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('npm', ['install', '--no-audit', '--no-fund'], {
-      cwd: dir,
-      shell: true,
-      env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
-    });
-    const onData = (d: Buffer): void => {
-      const last = d.toString().split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop();
-      if (last) emit({ phase: 'installing', log: last });
-    };
-    proc.stdout?.on('data', onData);
-    proc.stderr?.on('data', onData);
-    proc.on('error', (err) =>
-      reject(new Error(`Couldn't run npm install: ${err.message}. Is Node.js / npm on your PATH?`)),
-    );
-    proc.on('exit', (code) =>
-      code === 0 ? resolve() : reject(new Error(`npm install exited with code ${code ?? 'null'}.`)),
-    );
-  });
 }
 
 async function gitInit(dir: string): Promise<void> {

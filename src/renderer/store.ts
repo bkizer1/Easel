@@ -725,6 +725,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   openNewSite() {
     set({ newSiteOpen: true });
+    // Warm Easel's shared toolchain now so the one-time install (if any) overlaps
+    // the time the user spends answering the brief — by "Build it" it's ready.
+    void easel.project.prewarmToolchain();
   },
 
   closeNewSite() {

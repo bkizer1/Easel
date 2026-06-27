@@ -94,6 +94,9 @@ const api: EaselApi = {
     createNew(req) {
       return ipcRenderer.invoke(IpcChannels.projectCreateNew, req);
     },
+    prewarmToolchain() {
+      return ipcRenderer.invoke(IpcChannels.projectPrewarmToolchain);
+    },
     onScaffold(handler) {
       return subscribe(IpcChannels.projectScaffoldEvent, handler);
     },

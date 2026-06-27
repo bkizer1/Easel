@@ -58,6 +58,8 @@ export const IpcChannels = {
   projectCreateNew: 'project.createNew',
   /** Streamed scaffolding progress (writing / installing / git / done / error). */
   projectScaffoldEvent: 'project.scaffoldEvent',
+  /** Pre-warm Easel's shared build toolchain (fire-and-forget; overlaps the intake). */
+  projectPrewarmToolchain: 'project.prewarmToolchain',
 
   // Edit pipeline -----------------------------------------------------------
   /** Submit an EditRequest; main runs the agent and streams events back. */
@@ -504,6 +506,8 @@ export interface EaselApi {
     chooseLocation(): Promise<IpcResult<ProjectChooseLocationResponse>>;
     /** Scaffold + open a brand-new site from a creative brief. */
     createNew(req: ProjectCreateNewRequest): Promise<IpcResult<ProjectCreateNewResponse>>;
+    /** Pre-warm Easel's shared toolchain so the one-time install overlaps the intake. */
+    prewarmToolchain(): Promise<IpcResult<void>>;
     /** Subscribe to scaffolding progress. */
     onScaffold(handler: (payload: ScaffoldEventPayload) => void): Unsubscribe;
     onChanged(handler: (payload: ProjectChangedPayload) => void): Unsubscribe;
@@ -615,6 +619,7 @@ export interface IpcInvokeMap {
   [IpcChannels.projectClose]: { request: void; response: IpcResult<void> };
   [IpcChannels.projectChooseLocation]: { request: void; response: IpcResult<ProjectChooseLocationResponse> };
   [IpcChannels.projectCreateNew]: { request: ProjectCreateNewRequest; response: IpcResult<ProjectCreateNewResponse> };
+  [IpcChannels.projectPrewarmToolchain]: { request: void; response: IpcResult<void> };
 
   [IpcChannels.editSubmit]: { request: EditSubmitRequest; response: IpcResult<EditSubmitResponse> };
   [IpcChannels.editCancel]: { request: EditCancelRequest; response: IpcResult<void> };

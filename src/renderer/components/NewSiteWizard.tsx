@@ -315,7 +315,7 @@ export function NewSiteWizard(): React.ReactElement {
 
 const PHASE_LABEL: Record<string, string> = {
   writing: 'Creating your project',
-  installing: 'Installing dependencies',
+  installing: "Preparing Easel's toolchain",
   git: 'Setting up version history',
   done: 'Ready — building your site',
   error: 'Something went wrong',

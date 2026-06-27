@@ -50,6 +50,7 @@ import {
   closeProject,
 } from '@main/project';
 import { chooseNewSiteLocation, createNewSite } from '@main/scaffold';
+import { prewarmToolchain } from '@main/toolchain';
 import {
   startDevServer,
   stopDevServer,
@@ -145,6 +146,12 @@ export function registerIpcHandlers(): void {
   handle(IpcChannels.projectChooseLocation, async () => {
     const parentDir = await chooseNewSiteLocation();
     return ok({ parentDir });
+  });
+
+  handle(IpcChannels.projectPrewarmToolchain, () => {
+    // Fire-and-forget: warm the shared toolchain while the user fills out the brief.
+    prewarmToolchain();
+    return okVoid();
   });
 
   handle(IpcChannels.projectCreateNew, async (req: ProjectCreateNewRequest) => {
