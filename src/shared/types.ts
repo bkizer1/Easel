@@ -546,6 +546,13 @@ export interface ChatMessage {
   diffs?: FileDiff[];
   /** Checkpoint id created by this turn, enabling per-message undo. */
   checkpointId?: string;
+  /**
+   * For an assistant turn that is a self-heal RETRY attempt (issue #32, fix C):
+   * the upcoming attempt number. The retry reuses the originating `requestId`
+   * but gets its OWN bubble so its narration/summary aren't merged into the
+   * first attempt's. Lets the UI render a subtle "Retried" divider above it.
+   */
+  retryAttempt?: number;
 }
 
 /* -------------------------------------------------------------------------- */

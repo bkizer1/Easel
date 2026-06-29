@@ -40,6 +40,7 @@ import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
+import { mergeFileDiffs } from './lib/mergeFileDiffs';
 import {
   nextCorrelationOnRetrying,
   selfHealPhaseOnRetrying,
@@ -1300,6 +1301,16 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'done': {
         if (e.requestId !== activeRequestId) return;
 
+        // Issue #32 fix B: when this `done` finalizes a self-heal RETRY attempt,
+        // the backend reports ONLY the retry invocation's diffs. Replacing the
+        // bubble/live diffs with those would drop files attempt 1 edited but the
+        // retry didn't re-touch. UNION the incoming diffs over the already-
+        // accumulated `liveDiffs` (keyed by filePath, incoming wins). A brand-new
+        // turn's first `done` has `selfHealPhase === null` and still REPLACES.
+        const sh = get().selfHealPhase;
+        const isRetryDone = sh?.phase === 'retrying' && sh.requestId === e.requestId;
+        const finalDiffs = isRetryDone ? mergeFileDiffs(get().liveDiffs, e.diffs) : e.diffs;
+
         // Terminal success: finalize the last assistant turn with the summary
         // and complete diff set, then clear streaming state.
         set((s) => {
@@ -1310,11 +1321,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
               // Prefer the streaming content if it's been built up; fall
               // through to the summary if the backend sent it only at done.
               content: last.content || e.summary,
-              diffs: e.diffs.length > 0 ? e.diffs : undefined,
+              diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
             };
             return {
               chat: [...s.chat.slice(0, -1), updated],
-              liveDiffs: e.diffs,
+              liveDiffs: finalDiffs,
               streaming: false,
               activeRequestId: null,
               pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
@@ -1329,11 +1340,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             content: e.summary,
             createdAt: Date.now(),
             requestId: e.requestId,
-            diffs: e.diffs.length > 0 ? e.diffs : undefined,
+            diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
           };
           return {
             chat: [...s.chat, doneMsg],
-            liveDiffs: e.diffs,
+            liveDiffs: finalDiffs,
             streaming: false,
             activeRequestId: null,
             pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
@@ -1469,9 +1480,29 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         // activeRequestId, so this event is UN-gated and RE-ARMS correlation —
         // restoring activeRequestId + streaming so the retry attempt's
         // thinking/message/checkpoint/done events are processed, not dropped.
-        set({
-          ...nextCorrelationOnRetrying(e.requestId),
-          selfHealPhase: selfHealPhaseOnRetrying(e.requestId, e.attempt, e.rationale),
+        //
+        // Issue #32 fix C: start a FRESH empty assistant bubble for the retry
+        // attempt (same requestId). Without it, attempt 2's thinking/message
+        // would append to attempt 1's already-finalized bubble, and the retry's
+        // `done` (`content: last.content || e.summary`) would DROP attempt 2's
+        // summary because attempt-1 content is non-empty. A new bubble keeps each
+        // attempt's narration + summary distinct.
+        set((s) => {
+          const retryBubble: ChatMessage = {
+            id: genId(),
+            role: 'assistant',
+            content: '',
+            createdAt: Date.now(),
+            requestId: e.requestId,
+            // Mark the start of a retry attempt so the UI can render a subtle
+            // "Retried" divider above it.
+            retryAttempt: e.attempt,
+          };
+          return {
+            ...nextCorrelationOnRetrying(e.requestId),
+            chat: [...s.chat, retryBubble],
+            selfHealPhase: selfHealPhaseOnRetrying(e.requestId, e.attempt, e.rationale),
+          };
         });
         break;
       }

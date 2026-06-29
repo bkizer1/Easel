@@ -18,6 +18,7 @@ import {
   Trash2,
   Layers,
   CheckCircle2,
+  RotateCcw,
 } from 'lucide-react';
 import type { ChatMessage, FileDiff, InstructionMacro } from '@shared/types';
 import { useEaselStore } from '../store';
@@ -26,6 +27,8 @@ import { VoiceButton } from './VoiceButton';
 import { Tooltip } from './Tooltip';
 import { hotkeyMatches, normalizeHotkey } from '../lib/hotkeys';
 import { parseVerifyBadge } from '../lib/verifyBadge';
+import { resolveRollbackTarget } from '../lib/rollback';
+import { selfHealPhaseLabel } from '../lib/selfHealLabel';
 
 /**
  * Stable empty-array reference for the macros selector. Returning a fresh `[]`
@@ -38,7 +41,15 @@ const EMPTY_MACROS: InstructionMacro[] = [];
 /*  System badges (confidence / warning / error / note)                       */
 /* -------------------------------------------------------------------------- */
 
-function SystemBadge({ content }: { content: string }): React.ReactElement {
+function SystemBadge({
+  content,
+  requestId,
+}: {
+  content: string;
+  /** The requestId this badge belongs to — used to locate the turn's checkpoint
+   * so a terminal verify:fail can offer a one-click rollback. */
+  requestId?: string;
+}): React.ReactElement {
   const isWarning = content.startsWith('Warning:');
   const isConfidence = content.startsWith('[confidence:');
   const isError = content.startsWith('Error:');
@@ -55,13 +66,16 @@ function SystemBadge({ content }: { content: string }): React.ReactElement {
     return (
       <div className={`flex items-start gap-2 px-3 py-2 rounded-xl border text-xs ${cls}`}>
         <Icon className="w-3.5 h-3.5 mt-px flex-shrink-0" />
-        <span>
+        <span className="flex-1">
           <span className="font-semibold">{verify.pass ? 'Verified' : 'Verify: needs another pass'}</span>
           {verify.confidencePct !== undefined ? (
             <span className="opacity-60"> ({verify.confidencePct}%)</span>
           ) : null}
           {verify.message ? <span className="opacity-80"> — {verify.message}</span> : ''}
         </span>
+        {/* Issue #32, Deliverable 2: a terminal verify:fail (after the bounded
+            retry) offers a one-click rollback to the pre-edit checkpoint. */}
+        {!verify.pass && requestId ? <RollbackButton requestId={requestId} /> : null}
       </div>
     );
   }
@@ -102,6 +116,71 @@ function SystemBadge({ content }: { content: string }): React.ReactElement {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Verify-fail rollback button (issue #32, Deliverable 2)                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One-click rollback offered on a terminal `verify:fail` badge. Resolves the
+ * failed turn's checkpoint (the assistant message sharing this `requestId`
+ * carries it) and restores the checkpoint immediately before it — mirroring
+ * DiffViewer's Reject exactly via the shared {@link resolveRollbackTarget}.
+ * Hidden when there is no pre-edit checkpoint to roll back to.
+ */
+function RollbackButton({ requestId }: { requestId: string }): React.ReactElement | null {
+  const checkpoints = useEaselStore((s) => s.checkpoints);
+  const restoreCheckpoint = useEaselStore((s) => s.restoreCheckpoint);
+  // The turn's checkpoint id lives on its assistant message (set in the store's
+  // `checkpoint` case). Find the last assistant turn for this requestId.
+  const checkpointId = useEaselStore((s) => {
+    for (let i = s.chat.length - 1; i >= 0; i--) {
+      const m = s.chat[i];
+      if (m.role === 'assistant' && m.requestId === requestId && m.checkpointId) {
+        return m.checkpointId;
+      }
+    }
+    return undefined;
+  });
+
+  const target = resolveRollbackTarget(checkpoints, checkpointId);
+  if (!target) return null;
+
+  return (
+    <Tooltip label="Roll back this edit (restore previous checkpoint)" side="bottom">
+      <button
+        type="button"
+        aria-label="Roll back this edit"
+        onClick={() => void restoreCheckpoint(target)}
+        className="flex flex-shrink-0 items-center gap-1 rounded-md bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-200 transition-all duration-150 ease-spring hover:bg-amber-500/25 active:scale-[0.97]"
+      >
+        <RotateCcw className="h-3 w-3" />
+        Roll back
+      </button>
+    </Tooltip>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Self-heal phase indicator (issue #32, Deliverable 1)                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Transient inline indicator for the in-flight self-heal lifecycle, rendered
+ * above the composer. Mirrors the header "Working…" spinner treatment. Shows
+ * "Verifying edit…" while the judge runs and "Retrying (attempt N)… — <why>"
+ * while a bounded retry is underway. Renders nothing when idle.
+ */
+function SelfHealIndicator(): React.ReactElement | null {
+  const selfHealPhase = useEaselStore((s) => s.selfHealPhase);
+  if (!selfHealPhase) return null;
+  return (
+    <div className="mb-2 flex items-center gap-1.5 px-1 text-[11px] font-medium text-brand-300 animate-slide-up">
+      <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+      <span className="truncate">{selfHealPhaseLabel(selfHealPhase)}</span>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Message bubble                                                            */
 /* -------------------------------------------------------------------------- */
 
@@ -117,7 +196,8 @@ function MessageBubble({
 }): React.ReactElement {
   const [diffsDismissed, setDiffsDismissed] = useState(false);
 
-  if (message.role === 'system') return <SystemBadge content={message.content} />;
+  if (message.role === 'system')
+    return <SystemBadge content={message.content} requestId={message.requestId} />;
 
   if (message.role === 'user') {
     return (
@@ -149,6 +229,15 @@ function MessageBubble({
   const diffs: FileDiff[] = message.diffs ?? [];
   return (
     <div className="flex flex-col gap-2.5">
+      {/* Issue #32, fix C: a self-heal retry attempt gets its own bubble; mark
+          it with a subtle divider so its narration reads as a fresh attempt. */}
+      {message.retryAttempt !== undefined && (
+        <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wide text-amber-300/70">
+          <RotateCcw className="w-3 h-3 flex-shrink-0" />
+          <span>Retried</span>
+          <span className="h-px flex-1 bg-amber-500/15" />
+        </div>
+      )}
       {message.content && (
         <div className="text-[13px] text-gray-300 leading-relaxed whitespace-pre-wrap">
           {message.content}
@@ -547,6 +636,7 @@ export function ChatPanel(): React.ReactElement {
 
       {/* Composer */}
       <div className="flex-shrink-0 p-3 hairline-t">
+        <SelfHealIndicator />
         <SelectionChip />
         <div
           className={`relative flex items-end gap-2 rounded-2xl bg-ink-800/80 border px-3 py-2.5 transition-all duration-200 ${
