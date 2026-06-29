@@ -17,6 +17,7 @@ import {
   Plus,
   Trash2,
   Layers,
+  CheckCircle2,
 } from 'lucide-react';
 import type { ChatMessage, FileDiff, InstructionMacro } from '@shared/types';
 import { useEaselStore } from '../store';
@@ -40,6 +41,26 @@ function SystemBadge({ content }: { content: string }): React.ReactElement {
   const isWarning = content.startsWith('Warning:');
   const isConfidence = content.startsWith('[confidence:');
   const isError = content.startsWith('Error:');
+  const isVerify = content.startsWith('[verify:');
+
+  if (isVerify) {
+    // Issue #16: self-heal verdict badge — pass (jade) / fail (amber).
+    const pass = /\[verify:\s*pass\]/.test(content);
+    const msg = content.replace(/\[verify:\s*\w+\]\s*/, '');
+    const cls = pass
+      ? 'text-brand-300 bg-brand-500/10 border-brand-500/25'
+      : 'text-amber-300 bg-amber-500/10 border-amber-500/25';
+    const Icon = pass ? CheckCircle2 : AlertTriangle;
+    return (
+      <div className={`flex items-start gap-2 px-3 py-2 rounded-xl border text-xs ${cls}`}>
+        <Icon className="w-3.5 h-3.5 mt-px flex-shrink-0" />
+        <span>
+          <span className="font-semibold">{pass ? 'Verified' : 'Verify: needs another pass'}</span>
+          {msg ? <span className="opacity-80"> — {msg}</span> : ''}
+        </span>
+      </div>
+    );
+  }
 
   if (isConfidence) {
     const level = /\[confidence:\s*(\w+)\]/.exec(content)?.[1] ?? 'none';

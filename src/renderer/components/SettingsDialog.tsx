@@ -624,6 +624,7 @@ export function SettingsDialog(): React.ReactElement | null {
                     ['showThinking', 'Show agent reasoning in chat'],
                     ['autoCheckpoint', 'Auto git checkpoint before edits'],
                     ['imageGeneration', 'Image generation (replace_image tool)'],
+                    ['selfHealVerify', 'Self-heal: verify edits with vision'],
                   ] as const
                 ).map(([key, label]) => (
                   <label key={key} className="flex items-center justify-between gap-3 cursor-pointer">

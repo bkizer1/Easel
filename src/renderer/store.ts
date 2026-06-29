@@ -1412,6 +1412,22 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         // A future version could show inline tool progress in the chat.
         break;
       }
+
+      case 'verify': {
+        // Issue #16: self-heal verdict. Emitted AFTER the terminal `done` has
+        // already cleared `activeRequestId`, so it must NOT be gated on it (the
+        // usual guard would drop it). Surface the judge's verdict as a system
+        // badge keyed to the request that just completed.
+        const verifyMsg: ChatMessage = {
+          id: genId(),
+          role: 'system',
+          content: `[verify:${e.verdict}] ${e.rationale}`.trim(),
+          createdAt: Date.now(),
+          requestId: e.requestId,
+        };
+        set((s) => ({ chat: [...s.chat, verifyMsg] }));
+        break;
+      }
     }
   },
 

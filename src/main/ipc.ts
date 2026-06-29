@@ -70,7 +70,8 @@ import {
 } from '@main/checkpoints';
 import { getMainWindow, capturePreview } from '@main/window';
 import { createLogger } from '@main/logger';
-import { runEditStream } from '@main/editRunner';
+import { runEditStream, type VerifyFn } from '@main/editRunner';
+import { buildJudgePrompt, runVisionJudge, type VisionClient } from '@main/agents/visionJudge';
 import {
   setNetworkCapture,
   getNetworkLog,
@@ -190,6 +191,7 @@ export function registerIpcHandlers(): void {
       secrets,
       projectRoot: project.root,
       createCheckpointFn: (msg, rid, provenance) => createCheckpoint(msg, rid, provenance),
+      verify: _makeVerifyFn(settings),
     });
 
     return ok({ requestId });
@@ -484,6 +486,32 @@ function _secretIdsForBackend(backendId: AgentBackendId): string[] {
     default:
       return [];
   }
+}
+
+/**
+ * Build the self-heal vision judge (issue #16) for an edit, or `undefined` when
+ * it cannot run. The judge calls the Anthropic Messages API directly (vision),
+ * so it needs an `anthropic` API key regardless of the active edit backend;
+ * absent the flag or a key it is skipped and the verify step no-ops (fail-open).
+ */
+function _makeVerifyFn(settings: AppSettings): VerifyFn | undefined {
+  if (!settings.featureFlags.selfHealVerify) return undefined;
+  const apiKey = resolveSecrets(['anthropic'])['anthropic'];
+  if (!apiKey) return undefined;
+  const baseURL = settings.backends['anthropic-api']?.baseUrl;
+
+  return async ({ instruction, before, after }) => {
+    try {
+      const Anthropic = (await import('@anthropic-ai/sdk')).default;
+      const client = new Anthropic(baseURL ? { apiKey, baseURL } : { apiKey });
+      const prompt = buildJudgePrompt(instruction, before, after);
+      return await runVisionJudge(client as unknown as VisionClient, prompt, {
+        model: settings.model,
+      });
+    } catch {
+      return null;
+    }
+  };
 }
 
 function _broadcastSettingsChanged(settings: AppSettings): void {
