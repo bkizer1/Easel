@@ -29,6 +29,25 @@ export function shouldDropStreamEvent(
 }
 
 /**
+ * Whether a self-heal lifecycle event (`verifying`/`retrying`/`verify`/
+ * `verify-skipped`) is STALE — i.e. a *newer* turn already owns the foreground.
+ *
+ * These events are intentionally un-gated (they arrive after their turn's `done`
+ * cleared `activeRequestId`), but a self-heal judge call runs for seconds during
+ * which the user can submit a NEW edit. If the older turn's `retrying` then
+ * blindly re-armed correlation it would HIJACK `activeRequestId`/`streaming` from
+ * the new turn and silently drop its entire stream. An event is stale when a
+ * different request is currently active; the only safe times to act are when no
+ * turn is active (`null`, the normal post-`done` case) or when this same turn is.
+ */
+export function isStaleSelfHeal(
+  activeRequestId: string | null,
+  eventRequestId: string,
+): boolean {
+  return activeRequestId !== null && activeRequestId !== eventRequestId;
+}
+
+/**
  * The correlation re-arm applied on a `retrying` event. Restores
  * `activeRequestId` to the (reused) request id and flips `streaming` back on so
  * the retry attempt's gated events (`thinking`/`message`/`checkpoint`/`done`)

@@ -27,7 +27,7 @@ import { VoiceButton } from './VoiceButton';
 import { Tooltip } from './Tooltip';
 import { hotkeyMatches, normalizeHotkey } from '../lib/hotkeys';
 import { parseVerifyBadge } from '../lib/verifyBadge';
-import { resolveRollbackTarget } from '../lib/rollback';
+import { earliestTurnCheckpointId, resolveRollbackTarget } from '../lib/rollback';
 import { selfHealPhaseLabel } from '../lib/selfHealLabel';
 
 /**
@@ -129,17 +129,11 @@ function SystemBadge({
 function RollbackButton({ requestId }: { requestId: string }): React.ReactElement | null {
   const checkpoints = useEaselStore((s) => s.checkpoints);
   const restoreCheckpoint = useEaselStore((s) => s.restoreCheckpoint);
-  // The turn's checkpoint id lives on its assistant message (set in the store's
-  // `checkpoint` case). Find the last assistant turn for this requestId.
-  const checkpointId = useEaselStore((s) => {
-    for (let i = s.chat.length - 1; i >= 0; i--) {
-      const m = s.chat[i];
-      if (m.role === 'assistant' && m.requestId === requestId && m.checkpointId) {
-        return m.checkpointId;
-      }
-    }
-    return undefined;
-  });
+  // Roll the WHOLE turn back to its pre-edit state. A self-heal turn can create
+  // several checkpoints (attempt 1 → C1, the retry → C2); the pre-edit state is
+  // the predecessor of the EARLIEST one (C1), so target that — not the latest,
+  // which would only undo the retry. See earliestTurnCheckpointId.
+  const checkpointId = useEaselStore((s) => earliestTurnCheckpointId(s.chat, requestId));
 
   const target = resolveRollbackTarget(checkpoints, checkpointId);
   if (!target) return null;
@@ -196,6 +190,16 @@ function MessageBubble({
 }): React.ReactElement {
   const [diffsDismissed, setDiffsDismissed] = useState(false);
 
+  // The checkpoint a DiffViewer "Reject" rolls back to. For a self-heal RETRY
+  // bubble (whose diffs are the whole turn's cumulative set), reject to the
+  // turn's EARLIEST checkpoint so it undoes the entire turn — matching the
+  // verify-fail "Roll back" button — instead of only the retry attempt.
+  const diffCheckpointId = useEaselStore((s) =>
+    message.retryAttempt !== undefined && message.requestId
+      ? earliestTurnCheckpointId(s.chat, message.requestId)
+      : message.checkpointId,
+  );
+
   if (message.role === 'system')
     return <SystemBadge content={message.content} requestId={message.requestId} />;
 
@@ -247,7 +251,7 @@ function MessageBubble({
         </div>
       )}
       {!diffsDismissed && diffs.length > 0 && (
-        <DiffViewer diffs={diffs} checkpointId={message.checkpointId} onDismiss={() => setDiffsDismissed(true)} />
+        <DiffViewer diffs={diffs} checkpointId={diffCheckpointId} onDismiss={() => setDiffsDismissed(true)} />
       )}
     </div>
   );

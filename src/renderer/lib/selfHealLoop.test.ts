@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  isStaleSelfHeal,
   shouldDropStreamEvent,
   nextCorrelationOnRetrying,
   selfHealPhaseOnRetrying,
@@ -33,6 +34,21 @@ describe('nextCorrelationOnRetrying re-arms dropped retry events', () => {
 
     // Now the retry's same-id stream events are processed, not dropped.
     expect(shouldDropStreamEvent('r1', armed.activeRequestId)).toBe(false);
+  });
+});
+
+describe('isStaleSelfHeal (issue #31 concurrency guard)', () => {
+  it('is NOT stale when no turn is active (normal post-done case) — the re-arm may fire', () => {
+    expect(isStaleSelfHeal(null, 'r1')).toBe(false);
+  });
+
+  it('is NOT stale when the same turn is active (its own retry events)', () => {
+    expect(isStaleSelfHeal('r1', 'r1')).toBe(false);
+  });
+
+  it('is STALE when a NEWER turn owns the foreground — an older retry must not hijack it', () => {
+    // r1's slow judge fires `retrying` after the user submitted r2; r1 is stale.
+    expect(isStaleSelfHeal('r2', 'r1')).toBe(true);
   });
 });
 

@@ -42,6 +42,7 @@ import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { mergeFileDiffs } from './lib/mergeFileDiffs';
 import {
+  isStaleSelfHeal,
   nextCorrelationOnRetrying,
   selfHealPhaseOnRetrying,
   selfHealPhaseOnVerifying,
@@ -1460,8 +1461,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         // Insert right after the turn it judged (located by requestId), not at
         // the tail — see placeVerifyMessage. Prevents a late verdict from
         // landing inside a newer edit's stream. The terminal `verify` ends the
-        // self-heal lifecycle, so clear the phase after placing the badge.
-        set((s) => ({ chat: placeVerifyMessage(s.chat, verifyMsg), selfHealPhase: null }));
+        // self-heal lifecycle, so clear the phase after placing the badge — but
+        // ONLY when the phase still belongs to this turn (a newer turn may have
+        // taken over `selfHealPhase` while this judge was running; don't wipe it).
+        set((s) => ({
+          chat: placeVerifyMessage(s.chat, verifyMsg),
+          selfHealPhase: s.selfHealPhase?.requestId === e.requestId ? null : s.selfHealPhase,
+        }));
         break;
       }
 
@@ -1470,6 +1476,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         // settled. UN-gated (it arrives after `done`, with activeRequestId
         // already cleared). Record the phase for #32's UI; do NOT re-arm
         // streaming — no further stream events correlate to this phase.
+        //
+        // Drop it when a NEWER turn already owns the foreground, so a slow judge
+        // from an older turn can't flash a stale "verifying…" over the new edit.
+        if (isStaleSelfHeal(activeRequestId, e.requestId)) break;
         set({ selfHealPhase: selfHealPhaseOnVerifying(e.requestId) });
         break;
       }
@@ -1480,6 +1490,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         // activeRequestId, so this event is UN-gated and RE-ARMS correlation —
         // restoring activeRequestId + streaming so the retry attempt's
         // thinking/message/checkpoint/done events are processed, not dropped.
+        //
+        // BUT only when no NEWER turn owns the foreground: if the user submitted
+        // a fresh edit while this turn's judge was running, re-arming here would
+        // HIJACK activeRequestId/streaming and silently drop the new edit's whole
+        // stream. Drop the stale retry instead (its writes still land main-side
+        // and its terminal `verify` badge is still placed by requestId).
+        if (isStaleSelfHeal(activeRequestId, e.requestId)) break;
         //
         // Issue #32 fix C: start a FRESH empty assistant bubble for the retry
         // attempt (same requestId). Without it, attempt 2's thinking/message
@@ -1510,8 +1527,12 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'verify-skipped': {
         // Issue #31: the judge could not produce a verdict (fail-open). UN-gated;
         // it carries no verdict, so it appends NO badge — it exists only to clear
-        // the transient `verifying` phase so the affordance never sticks.
-        set({ selfHealPhase: null });
+        // the transient `verifying` phase so the affordance never sticks. Clear
+        // ONLY when the phase still belongs to this turn (don't wipe a newer
+        // turn's phase if this fail-open arrives late).
+        set((s) => ({
+          selfHealPhase: s.selfHealPhase?.requestId === e.requestId ? null : s.selfHealPhase,
+        }));
         break;
       }
 
@@ -1963,6 +1984,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       streaming: true,
       liveDiffs: [],
       lastError: null,
+      // Issue #31/#32: a new turn always starts from a clean self-heal phase, so
+      // a prior turn's phase can't bleed in (mirrors submitEdit).
+      selfHealPhase: null,
     }));
 
     const result = await easel.edit.submit({ request });
