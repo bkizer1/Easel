@@ -624,11 +624,20 @@ export function SettingsDialog(): React.ReactElement | null {
                     ['showThinking', 'Show agent reasoning in chat'],
                     ['autoCheckpoint', 'Auto git checkpoint before edits'],
                     ['imageGeneration', 'Image generation (replace_image tool)'],
-                    ['selfHealVerify', 'Self-heal: verify edits with vision'],
+                    [
+                      'selfHealVerify',
+                      'Self-heal: verify edits with vision',
+                      'After each edit, sends before/after screenshots of your page to the Anthropic API to judge whether it matched your request. Requires an Anthropic API key (Provider tab) — unavailable on OAuth/inherit login.',
+                    ],
                   ] as const
-                ).map(([key, label]) => (
-                  <label key={key} className="flex items-center justify-between gap-3 cursor-pointer">
-                    <span className="text-sm text-gray-300">{label}</span>
+                ).map(([key, label, description]) => (
+                  <label key={key} className="flex items-start justify-between gap-3 cursor-pointer">
+                    <span className="text-sm text-gray-300">
+                      {label}
+                      {description ? (
+                        <span className="mt-0.5 block text-xs text-gray-500">{description}</span>
+                      ) : null}
+                    </span>
                     <input
                       type="checkbox"
                       checked={draft.featureFlags[key]}
@@ -638,7 +647,7 @@ export function SettingsDialog(): React.ReactElement | null {
                           [key]: e.target.checked,
                         })
                       }
-                      className="w-4 h-4 accent-brand-500 cursor-pointer"
+                      className="mt-0.5 w-4 h-4 flex-shrink-0 accent-brand-500 cursor-pointer"
                     />
                   </label>
                 ))}

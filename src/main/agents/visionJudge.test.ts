@@ -50,6 +50,19 @@ describe('buildJudgePrompt', () => {
     expect(blocks(prompt).filter((b) => b['type'] === 'text').length).toBeGreaterThanOrEqual(2);
   });
 
+  it('skips media types the Anthropic vision API rejects, e.g. svg (issue #13)', () => {
+    const svg = 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=';
+    const prompt = buildJudgePrompt('x', undefined, svg);
+    expect(blocks(prompt).filter((b) => b['type'] === 'image')).toHaveLength(0);
+  });
+
+  it('accepts the supported types (png, jpeg)', () => {
+    for (const dataUrl of [PNG, JPEG]) {
+      const prompt = buildJudgePrompt('x', undefined, dataUrl);
+      expect(blocks(prompt).filter((b) => b['type'] === 'image')).toHaveLength(1);
+    }
+  });
+
   it('always asks for a JSON-only reply in the system prompt', () => {
     const prompt = buildJudgePrompt('x', PNG, PNG);
     expect(prompt.system).toMatch(/json/i);
@@ -71,6 +84,18 @@ describe('parseJudgeResult', () => {
   it('extracts JSON embedded in prose / a markdown code fence', () => {
     const raw = 'Here is my assessment:\n```json\n{"verdict":"pass","rationale":"ok"}\n```\nDone.';
     expect(parseJudgeResult(raw)).toEqual({ verdict: 'pass', rationale: 'ok' });
+  });
+
+  it('extracts the first complete object even when trailed by prose with braces (issue #5)', () => {
+    const raw = '{"verdict":"fail","rationale":"unchanged"}\n\nNote: try margin {e.g. 16px}.';
+    expect(parseJudgeResult(raw)).toEqual({ verdict: 'fail', rationale: 'unchanged' });
+  });
+
+  it('is unfazed by braces inside string values', () => {
+    expect(parseJudgeResult('{"verdict":"pass","rationale":"use {token} syntax"}')).toEqual({
+      verdict: 'pass',
+      rationale: 'use {token} syntax',
+    });
   });
 
   it('clamps an out-of-range confidence into [0, 1]', () => {

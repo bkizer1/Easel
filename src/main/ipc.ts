@@ -71,7 +71,8 @@ import {
 import { getMainWindow, capturePreview } from '@main/window';
 import { createLogger } from '@main/logger';
 import { runEditStream, type VerifyFn } from '@main/editRunner';
-import { buildJudgePrompt, runVisionJudge, type VisionClient } from '@main/agents/visionJudge';
+import { buildJudgePrompt, runVisionJudge } from '@main/agents/visionJudge';
+import { createAnthropicClient } from '@main/agents/anthropicClient';
 import {
   setNetworkCapture,
   getNetworkLog,
@@ -500,14 +501,11 @@ function _makeVerifyFn(settings: AppSettings): VerifyFn | undefined {
   if (!apiKey) return undefined;
   const baseURL = settings.backends['anthropic-api']?.baseUrl;
 
-  return async ({ instruction, before, after }) => {
+  return async ({ instruction, before, after, signal }) => {
     try {
-      const Anthropic = (await import('@anthropic-ai/sdk')).default;
-      const client = new Anthropic(baseURL ? { apiKey, baseURL } : { apiKey });
+      const client = await createAnthropicClient(apiKey, baseURL);
       const prompt = buildJudgePrompt(instruction, before, after);
-      return await runVisionJudge(client as unknown as VisionClient, prompt, {
-        model: settings.model,
-      });
+      return await runVisionJudge(client, prompt, { model: settings.model, signal });
     } catch {
       return null;
     }

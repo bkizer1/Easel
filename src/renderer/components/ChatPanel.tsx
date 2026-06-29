@@ -25,6 +25,7 @@ import { DiffViewer } from './DiffViewer';
 import { VoiceButton } from './VoiceButton';
 import { Tooltip } from './Tooltip';
 import { hotkeyMatches, normalizeHotkey } from '../lib/hotkeys';
+import { parseVerifyBadge } from '../lib/verifyBadge';
 
 /**
  * Stable empty-array reference for the macros selector. Returning a fresh `[]`
@@ -41,22 +42,25 @@ function SystemBadge({ content }: { content: string }): React.ReactElement {
   const isWarning = content.startsWith('Warning:');
   const isConfidence = content.startsWith('[confidence:');
   const isError = content.startsWith('Error:');
-  const isVerify = content.startsWith('[verify:');
 
-  if (isVerify) {
-    // Issue #16: self-heal verdict badge — pass (jade) / fail (amber).
-    const pass = /\[verify:\s*pass\]/.test(content);
-    const msg = content.replace(/\[verify:\s*\w+\]\s*/, '');
-    const cls = pass
+  // Issue #16: self-heal verdict badge — pass (jade) / fail (amber). Parsed by a
+  // pure helper anchored to the leading token, so the rendered state depends
+  // only on the verdict token, never on the rationale text.
+  const verify = parseVerifyBadge(content);
+  if (verify) {
+    const cls = verify.pass
       ? 'text-brand-300 bg-brand-500/10 border-brand-500/25'
       : 'text-amber-300 bg-amber-500/10 border-amber-500/25';
-    const Icon = pass ? CheckCircle2 : AlertTriangle;
+    const Icon = verify.pass ? CheckCircle2 : AlertTriangle;
     return (
       <div className={`flex items-start gap-2 px-3 py-2 rounded-xl border text-xs ${cls}`}>
         <Icon className="w-3.5 h-3.5 mt-px flex-shrink-0" />
         <span>
-          <span className="font-semibold">{pass ? 'Verified' : 'Verify: needs another pass'}</span>
-          {msg ? <span className="opacity-80"> — {msg}</span> : ''}
+          <span className="font-semibold">{verify.pass ? 'Verified' : 'Verify: needs another pass'}</span>
+          {verify.confidencePct !== undefined ? (
+            <span className="opacity-60"> ({verify.confidencePct}%)</span>
+          ) : null}
+          {verify.message ? <span className="opacity-80"> — {verify.message}</span> : ''}
         </span>
       </div>
     );

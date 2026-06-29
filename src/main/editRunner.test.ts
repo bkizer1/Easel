@@ -249,12 +249,13 @@ describe('runVerifyStep (issue #16 self-heal verify)', () => {
     expect('confidence' in (noConf.events[0] as Record<string, unknown>)).toBe(false);
   });
 
-  it('passes the instruction + before/after frames to the judge', async () => {
-    let seen: { instruction: string; before?: string; after: string } | undefined;
+  it('passes the instruction, before/after frames, and the abort signal to the judge', async () => {
+    let seen: Parameters<VerifyFn>[0] | undefined;
     const verify: VerifyFn = async (input) => {
       seen = input;
       return { verdict: 'pass', rationale: 'ok' };
     };
+    const ctrl = new AbortController();
     await runVerifyStep({
       request: req(),
       settings: settingsWith(true),
@@ -262,8 +263,32 @@ describe('runVerifyStep (issue #16 self-heal verify)', () => {
       after: 'data:a',
       verify,
       emit: () => {},
+      signal: ctrl.signal,
     });
-    expect(seen).toEqual({ instruction: 'make it pop', before: 'data:b', after: 'data:a' });
+    expect(seen).toMatchObject({ instruction: 'make it pop', before: 'data:b', after: 'data:a' });
+    expect(seen?.signal).toBe(ctrl.signal);
+  });
+
+  it('skips the judge entirely when the signal is already aborted', async () => {
+    const { emit, events } = collector();
+    let called = false;
+    const verify: VerifyFn = async () => {
+      called = true;
+      return { verdict: 'pass', rationale: 'x' };
+    };
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'b',
+      after: 'a',
+      verify,
+      emit,
+      signal: ctrl.signal,
+    });
+    expect(called).toBe(false);
+    expect(events).toHaveLength(0);
   });
 
   it('is gated: emits nothing when the feature flag is off (and never calls the judge)', async () => {

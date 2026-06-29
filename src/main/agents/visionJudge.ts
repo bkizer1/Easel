@@ -51,14 +51,49 @@ const JUDGE_SYSTEM = [
   '{"verdict":"pass"|"fail","rationale":"<one concise sentence>","confidence":<number 0-1>}',
 ].join('\n');
 
+/** The image media types the Anthropic vision API accepts. */
+const SUPPORTED_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
 /**
  * Convert a `data:` URL (as produced by `capturePreview`) into an Anthropic
- * base64 image block. Returns `null` if the string is not a base64 image URL.
+ * base64 image block. Returns `null` when the string is not a base64 image URL
+ * or carries a media type the vision API would reject (so we never build a block
+ * the API is guaranteed to 400 on).
  */
 function dataUrlToImageBlock(dataUrl: string): Extract<ContentBlock, { type: 'image' }> | null {
-  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl.trim());
   if (!match) return null;
-  return { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } };
+  const mediaType = match[1].toLowerCase();
+  if (!SUPPORTED_MEDIA_TYPES.has(mediaType)) return null;
+  return { type: 'image', source: { type: 'base64', media_type: mediaType, data: match[2] } };
+}
+
+/**
+ * Extract the first *complete top-level* JSON object from a string, tolerating
+ * surrounding prose / markdown fences and trailing commentary. Walks brace depth
+ * from the first `{` and returns at the matching close, so a valid object
+ * followed by a sentence that itself contains braces still parses. String-literal
+ * aware, so braces inside JSON string values don't skew the depth count.
+ */
+function extractFirstJsonObject(raw: string): string | null {
+  const start = raw.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return raw.slice(start, i + 1);
+  }
+  return null;
 }
 
 /**
@@ -102,22 +137,21 @@ export function buildJudgePrompt(
 
 /**
  * Parse the model's reply into a {@link VisionVerdict}. Tolerates surrounding
- * prose / markdown fences by extracting the first balanced-looking JSON object.
- * Returns `null` (never throws) when the reply is missing, unparseable, or does
- * not carry a valid `pass`/`fail` verdict — the caller treats `null` as "no
- * verdict" and stays silent rather than guessing.
+ * prose / markdown fences by extracting the first complete top-level JSON object
+ * (see {@link extractFirstJsonObject}). Returns `null` (never throws) when the
+ * reply is missing, unparseable, or does not carry a valid `pass`/`fail`
+ * verdict — the caller treats `null` as "no verdict" and stays silent rather
+ * than guessing.
  */
 export function parseJudgeResult(raw: string): VisionVerdict | null {
   if (typeof raw !== 'string' || raw.trim() === '') return null;
 
-  // Grab the outermost {...}; the model is asked for a bare object but may wrap
-  // it in a ```json fence or a sentence. Greedy match spans the whole object.
-  const match = /\{[\s\S]*\}/.exec(raw);
-  if (!match) return null;
+  const json = extractFirstJsonObject(raw);
+  if (json === null) return null;
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(match[0]);
+    parsed = JSON.parse(json);
   } catch {
     return null;
   }

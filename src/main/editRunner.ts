@@ -272,6 +272,8 @@ export type VerifyFn = (input: {
   instruction: string;
   before?: string;
   after: string;
+  /** Aborts the (potentially slow) judge call when the edit is cancelled. */
+  signal?: AbortSignal;
 }) => Promise<VisionVerdict | null>;
 
 export interface RunEditStreamOptions {
@@ -395,14 +397,26 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
       }
     }
 
-    // Issue #7: persist before/after frames for the resulting checkpoint. The
-    // settled "after" frame is reused by the verify step below (no re-capture).
-    const afterShot = await _persistCheckpointShots(shotCheckpointId, beforeShot);
+    // Whether the self-heal verify step (issue #16) will actually run. Computed
+    // up front so we only pay the HMR settle + capture when an "after" frame is
+    // genuinely needed (a checkpoint to illustrate, or verify enabled) — not on
+    // every successful no-checkpoint edit with verify off.
+    const wantVerify =
+      succeeded && settings.featureFlags.selfHealVerify && opts.verify !== undefined;
+
+    // Issue #7 + #16: capture the settled "after" frame ONCE and reuse it for
+    // both the checkpoint visual diff and the verify judge (no double settle).
+    let afterShot: string | undefined;
+    if (shotCheckpointId !== undefined || wantVerify) {
+      afterShot = await _captureAfterShot();
+    }
+    await _persistCheckpointShots(shotCheckpointId, beforeShot, afterShot);
 
     // Issue #16: self-heal verify — only judge edits that completed successfully.
     // Purely additive and fail-open: it runs after the terminal event was already
-    // pushed, so it can never alter the edit it follows.
-    if (succeeded) {
+    // pushed, so it can never alter the edit it follows. Decoupled from the
+    // checkpoint, so it also fires for successful edits that made no checkpoint.
+    if (wantVerify) {
       await runVerifyStep({
         request,
         settings,
@@ -410,6 +424,7 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
         after: afterShot,
         verify: opts.verify,
         emit: _pushEvent,
+        signal: controller.signal,
       });
     }
   } catch (err) {
@@ -455,29 +470,30 @@ async function _captureShot(): Promise<string | undefined> {
   }
 }
 
+/** Wait for HMR to settle, then capture the "after" preview frame (best-effort). */
+async function _captureAfterShot(): Promise<string | undefined> {
+  await new Promise((resolve) => setTimeout(resolve, SHOT_SETTLE_MS));
+  return _captureShot();
+}
+
 /**
- * Persist the before/after preview frames for a checkpoint. The "after" frame is
- * captured once HMR has settled. Entirely best-effort: the visual diff is a
- * non-essential aid, so any failure here must never affect the edit.
- *
- * Returns the settled "after" frame (when captured) so the verify step (issue
- * #16) can reuse it instead of re-capturing and re-settling.
+ * Persist the before/after preview frames for a checkpoint. Entirely
+ * best-effort: the visual diff is a non-essential aid, so any failure here must
+ * never affect the edit. The `after` frame is captured by the caller (once, via
+ * {@link _captureAfterShot}) so it can be shared with the verify step (#16).
  */
 async function _persistCheckpointShots(
   checkpointId: string | undefined,
   before: string | undefined,
-): Promise<string | undefined> {
-  if (!checkpointId) return undefined;
+  after: string | undefined,
+): Promise<void> {
+  if (!checkpointId) return;
   try {
     const { writeShot } = await import('@main/checkpointShots');
     if (before) await writeShot(checkpointId, 'before', before);
-    await new Promise((resolve) => setTimeout(resolve, SHOT_SETTLE_MS));
-    const after = await _captureShot();
     if (after) await writeShot(checkpointId, 'after', after);
-    return after;
   } catch {
     // Visual diff is non-essential; swallow.
-    return undefined;
   }
 }
 
@@ -506,28 +522,32 @@ export async function runVerifyStep(opts: {
   after: string | undefined;
   verify: VerifyFn | undefined;
   emit: (event: AgentEvent) => void;
+  /** When aborted, the step skips the judge and emits nothing. */
+  signal?: AbortSignal;
 }): Promise<void> {
-  const { request, settings, before, after, verify, emit } = opts;
-
-  if (!settings.featureFlags.selfHealVerify) return;
-  if (!verify || !after) return;
-
-  let verdict: VisionVerdict | null;
+  // The entire body is wrapped so NOTHING here — the judge call, the settings
+  // read, or the emit — can throw into runEditStream's catch and produce a
+  // spurious post-`done` error. The step is strictly fail-open.
   try {
-    verdict = await verify({ instruction: request.instruction, before, after });
-  } catch {
-    // Fail-open: a judge failure must never disrupt the edit it follows.
-    return;
-  }
-  if (!verdict) return;
+    const { request, settings, before, after, verify, emit, signal } = opts;
 
-  emit({
-    type: 'verify',
-    requestId: request.id,
-    verdict: verdict.verdict,
-    rationale: verdict.rationale,
-    ...(verdict.confidence !== undefined ? { confidence: verdict.confidence } : {}),
-  });
+    if (!settings.featureFlags.selfHealVerify) return;
+    if (!verify || !after) return;
+    if (signal?.aborted) return;
+
+    const verdict = await verify({ instruction: request.instruction, before, after, signal });
+    if (!verdict) return;
+
+    emit({
+      type: 'verify',
+      requestId: request.id,
+      verdict: verdict.verdict,
+      rationale: verdict.rationale,
+      ...(verdict.confidence !== undefined ? { confidence: verdict.confidence } : {}),
+    });
+  } catch {
+    // Fail-open: a verify failure must never disrupt the edit it follows.
+  }
 }
 
 /* -------------------------------------------------------------------------- */

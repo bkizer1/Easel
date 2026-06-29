@@ -39,6 +39,7 @@ import { buildSitePrompt, type NewSiteBrief } from '@shared/siteBrief';
 import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
+import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
 import {
@@ -1421,11 +1422,23 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         const verifyMsg: ChatMessage = {
           id: genId(),
           role: 'system',
-          content: `[verify:${e.verdict}] ${e.rationale}`.trim(),
+          content: formatVerifyContent(e.verdict, e.rationale, e.confidence),
           createdAt: Date.now(),
           requestId: e.requestId,
         };
-        set((s) => ({ chat: [...s.chat, verifyMsg] }));
+        // Insert right after the turn it judged (located by requestId), not at
+        // the tail — see placeVerifyMessage. Prevents a late verdict from
+        // landing inside a newer edit's stream.
+        set((s) => ({ chat: placeVerifyMessage(s.chat, verifyMsg) }));
+        break;
+      }
+
+      default: {
+        // Exhaustiveness guard: a new AgentEvent variant added to the shared
+        // union will fail to compile here until it is handled above, instead of
+        // silently falling through and being dropped.
+        const _exhaustive: never = e;
+        void _exhaustive;
         break;
       }
     }
