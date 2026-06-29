@@ -447,6 +447,19 @@ export type AgentEvent =
       attempt: number;
       /** The judge's fail rationale, carried so the UI can explain the retry. */
       rationale: string;
+    }
+  | {
+      /**
+       * Self-heal verify, skipped (issue #31). Emitted after a `verifying` event
+       * when the judge could NOT produce a verdict (fail-open: no key mid-edit,
+       * the judge threw, unparseable output, or the edit was aborted). It carries
+       * no verdict — it exists purely to TEAR DOWN the transient `verifying` phase
+       * the UI showed, so a fail-open verification never leaves a stuck
+       * "verifying…" affordance. Like `verify`, it arrives after `done` and must
+       * NOT be gated on `activeRequestId`; unlike `verify`, it appends no badge.
+       */
+      type: 'verify-skipped';
+      requestId: string;
     };
 
 /** Narrows {@link AgentEvent} to a specific `type`. */

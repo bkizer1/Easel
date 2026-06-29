@@ -17,6 +17,7 @@ import {
   isDegenerateCrop,
   pollUntilStable,
   respondPolicyConfirm,
+  RETRY_CEILING,
   runSelfHealLoop,
   runVerifyStep,
   type WriteGate,
@@ -579,6 +580,8 @@ describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
     succeeds?: boolean;
     verdicts: Array<VisionVerdict | null>;
     after?: string;
+    /** Per-attempt after-frames (overrides `after`); index by attempt - 1. */
+    afters?: Array<string | undefined>;
   }) {
     const events: AgentEvent[] = [];
     const attemptReqs: EditRequest[] = [];
@@ -588,8 +591,9 @@ describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
     const runAttempt = async (
       r: EditRequest,
     ): Promise<{ succeeded: boolean; after: string | undefined }> => {
+      const after = opts.afters ? opts.afters[attemptReqs.length] : opts.after;
       attemptReqs.push(r);
-      return { succeeded: succeeds, after: opts.after };
+      return { succeeded: succeeds, after };
     };
 
     const judge = async (): Promise<VisionVerdict | null> => {
@@ -702,7 +706,7 @@ describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
     expect(h.judgeCalls()).toBe(0);
   });
 
-  it('(e) judge returns null → one attempt, one verifying, no verify, no retrying', async () => {
+  it('(e) judge returns null (fail-open) → one attempt; verifying then verify-skipped tears down the phase; no verify/retrying', async () => {
     const h = harness({ verdicts: [null] });
     await runSelfHealLoop({
       request: req(),
@@ -714,7 +718,11 @@ describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
       signal: new AbortController().signal,
     });
     expect(h.attemptReqs).toHaveLength(1);
-    expect(types(h.events)).toEqual(['verifying']);
+    // verify-skipped MUST follow verifying so the renderer can clear the phase —
+    // otherwise the transient "verifying…" affordance would stick forever.
+    expect(types(h.events)).toEqual(['verifying', 'verify-skipped']);
+    expect(h.events.some((e) => e.type === 'verify')).toBe(false);
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
   });
 
   it('(f) signal.aborted before the retry → no retrying; terminal verify:fail (does not loop)', async () => {
@@ -734,6 +742,76 @@ describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
     expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
     expect(types(h.events)).toEqual(['verifying', 'verify']);
     expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'fail' });
+  });
+
+  it('(g) maxRetries:0 (observe-only) + fail → one attempt, NO retrying, terminal verify:fail', async () => {
+    const h = harness({ after: 'data:a', verdicts: [{ verdict: 'fail', rationale: 'nope' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 0,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(types(h.events)).toEqual(['verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'fail' });
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+  });
+
+  it('(h) clamps a misconfigured maxRetries to RETRY_CEILING (never spins unbounded)', async () => {
+    // Always-fail verdicts; with maxRetries far above the ceiling the loop must
+    // still stop at 1 + RETRY_CEILING attempts and emit exactly RETRY_CEILING retrying events.
+    const h = harness({ after: 'data:a', verdicts: [{ verdict: 'fail', rationale: 'no' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 99,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1 + RETRY_CEILING);
+    expect(h.events.filter((e) => e.type === 'retrying')).toHaveLength(RETRY_CEILING);
+    expect(h.events.filter((e) => e.type === 'verify')).toHaveLength(1);
+  });
+
+  it('(i) multi-retry (maxRetries:2, fail→fail→pass) → two retrying events; each retry augmented from the ORIGINAL once, with that attempt’s after-frame', async () => {
+    const h = harness({
+      afters: ['data:after-1', 'data:after-2', 'data:after-3'],
+      verdicts: [
+        { verdict: 'fail', rationale: 'r1' },
+        { verdict: 'fail', rationale: 'r2' },
+        { verdict: 'pass', rationale: 'ok' },
+      ],
+    });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 2,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(3);
+    const retryings = h.events.filter((e) => e.type === 'retrying');
+    expect(retryings).toHaveLength(2);
+    expect(retryings[0]).toMatchObject({ attempt: 2, rationale: 'r1' });
+    expect(retryings[1]).toMatchObject({ attempt: 3, rationale: 'r2' });
+
+    // Retry 1 carries r1 + attempt-1's after-frame; retry 2 carries r2 + attempt-2's.
+    expect(h.attemptReqs[1].screenshotDataUrl).toBe('data:after-1');
+    expect(h.attemptReqs[2].screenshotDataUrl).toBe('data:after-2');
+    // Each retry is built from the ORIGINAL request, so the instruction is
+    // augmented exactly once (no compounding "[Self-heal retry]" blocks).
+    const blocks = (h.attemptReqs[2].instruction.match(/\[Self-heal retry\]/g) ?? []).length;
+    expect(blocks).toBe(1);
+    expect(h.attemptReqs[2].instruction).toContain('make it pop');
+    expect(h.attemptReqs[2].instruction).toContain('r2');
   });
 
   it('stops when the attempt did not succeed (no verify on a failed edit)', async () => {

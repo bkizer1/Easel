@@ -1020,6 +1020,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       streaming: true,
       liveDiffs: [],
       lastError: null,
+      // Issue #31: a new turn always starts from a clean self-heal phase, so a
+      // prior turn's phase (e.g. a fail-open verify) can never bleed into it.
+      selfHealPhase: null,
     }));
 
     // Intentionally keep the draft selection (annotations + targets) on screen
@@ -1470,6 +1473,14 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
           ...nextCorrelationOnRetrying(e.requestId),
           selfHealPhase: selfHealPhaseOnRetrying(e.requestId, e.attempt, e.rationale),
         });
+        break;
+      }
+
+      case 'verify-skipped': {
+        // Issue #31: the judge could not produce a verdict (fail-open). UN-gated;
+        // it carries no verdict, so it appends NO badge — it exists only to clear
+        // the transient `verifying` phase so the affordance never sticks.
+        set({ selfHealPhase: null });
         break;
       }
 

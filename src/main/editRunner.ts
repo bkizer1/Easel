@@ -603,8 +603,14 @@ export async function runSelfHealLoop(opts: {
     emit({ type: 'verifying', requestId });
 
     const verdict = await judge(after);
-    // Fail-open: no verdict ⇒ stop and emit nothing more.
-    if (verdict == null) return;
+    // Fail-open: no verdict (no key / judge threw / unparseable / aborted). Emit
+    // `verify-skipped` to TEAR DOWN the `verifying` phase the UI just showed —
+    // otherwise the transient affordance would stick forever — then stop. No
+    // verify badge (there is no verdict to report).
+    if (verdict == null) {
+      emit({ type: 'verify-skipped', requestId });
+      return;
+    }
 
     const outOfRetries = attempt > retryBudget;
     if (verdict.verdict === 'pass' || outOfRetries || signal.aborted) {
