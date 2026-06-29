@@ -13,7 +13,9 @@ import {
   buildProvenance,
   createWriteGate,
   respondPolicyConfirm,
+  runVerifyStep,
   type WriteGate,
+  type VerifyFn,
 } from './editRunner';
 
 const tmpDirs: string[] = [];
@@ -187,5 +189,187 @@ describe('buildProvenance', () => {
     const p = buildProvenance(request([]), settings, undefined);
     expect(p.targets).toBeUndefined();
     expect(p.sources).toBeUndefined();
+  });
+});
+
+describe('runVerifyStep (issue #16 self-heal verify)', () => {
+  function settingsWith(selfHealVerify: boolean): AppSettings {
+    return { featureFlags: { selfHealVerify } } as AppSettings;
+  }
+  function req(): EditRequest {
+    return { id: 'req-9', instruction: 'make it pop' } as EditRequest;
+  }
+  /** Collect emitted events for assertions. */
+  function collector(): { emit: (e: AgentEvent) => void; events: AgentEvent[] } {
+    const events: AgentEvent[] = [];
+    return { emit: (e) => events.push(e), events };
+  }
+
+  it('emits a single verify event carrying the judge verdict + rationale', async () => {
+    const { emit, events } = collector();
+    const verify: VerifyFn = async () => ({ verdict: 'pass', rationale: 'looks good' });
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'data:before',
+      after: 'data:after',
+      verify,
+      emit,
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'verify',
+      requestId: 'req-9',
+      verdict: 'pass',
+      rationale: 'looks good',
+    });
+  });
+
+  it('carries the judge confidence through when present, omits it otherwise', async () => {
+    const withConf = collector();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: undefined,
+      after: 'data:after',
+      verify: async () => ({ verdict: 'fail', rationale: 'no change', confidence: 0.4 }),
+      emit: withConf.emit,
+    });
+    expect(withConf.events[0]).toMatchObject({ verdict: 'fail', confidence: 0.4 });
+
+    const noConf = collector();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: undefined,
+      after: 'data:after',
+      verify: async () => ({ verdict: 'fail', rationale: 'no change' }),
+      emit: noConf.emit,
+    });
+    expect('confidence' in (noConf.events[0] as Record<string, unknown>)).toBe(false);
+  });
+
+  it('passes the instruction, before/after frames, and the abort signal to the judge', async () => {
+    let seen: Parameters<VerifyFn>[0] | undefined;
+    const verify: VerifyFn = async (input) => {
+      seen = input;
+      return { verdict: 'pass', rationale: 'ok' };
+    };
+    const ctrl = new AbortController();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'data:b',
+      after: 'data:a',
+      verify,
+      emit: () => {},
+      signal: ctrl.signal,
+    });
+    expect(seen).toMatchObject({ instruction: 'make it pop', before: 'data:b', after: 'data:a' });
+    expect(seen?.signal).toBe(ctrl.signal);
+  });
+
+  it('skips the judge entirely when the signal is already aborted', async () => {
+    const { emit, events } = collector();
+    let called = false;
+    const verify: VerifyFn = async () => {
+      called = true;
+      return { verdict: 'pass', rationale: 'x' };
+    };
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'b',
+      after: 'a',
+      verify,
+      emit,
+      signal: ctrl.signal,
+    });
+    expect(called).toBe(false);
+    expect(events).toHaveLength(0);
+  });
+
+  it('is gated: emits nothing when the feature flag is off (and never calls the judge)', async () => {
+    const { emit, events } = collector();
+    let called = false;
+    const verify: VerifyFn = async () => {
+      called = true;
+      return { verdict: 'pass', rationale: 'x' };
+    };
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(false),
+      before: 'b',
+      after: 'a',
+      verify,
+      emit,
+    });
+    expect(called).toBe(false);
+    expect(events).toHaveLength(0);
+  });
+
+  it('emits nothing when no judge is injected', async () => {
+    const { emit, events } = collector();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'b',
+      after: 'a',
+      verify: undefined,
+      emit,
+    });
+    expect(events).toHaveLength(0);
+  });
+
+  it('emits nothing and never calls the judge when no after frame was captured', async () => {
+    const { emit, events } = collector();
+    let called = false;
+    const verify: VerifyFn = async () => {
+      called = true;
+      return { verdict: 'pass', rationale: 'x' };
+    };
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'b',
+      after: undefined,
+      verify,
+      emit,
+    });
+    expect(called).toBe(false);
+    expect(events).toHaveLength(0);
+  });
+
+  it('fails open: a throwing judge emits nothing and does not reject', async () => {
+    const { emit, events } = collector();
+    const verify: VerifyFn = async () => {
+      throw new Error('judge exploded');
+    };
+    await expect(
+      runVerifyStep({
+        request: req(),
+        settings: settingsWith(true),
+        before: 'b',
+        after: 'a',
+        verify,
+        emit,
+      }),
+    ).resolves.toBeUndefined();
+    expect(events).toHaveLength(0);
+  });
+
+  it('stays silent when the judge returns null (no verdict)', async () => {
+    const { emit, events } = collector();
+    await runVerifyStep({
+      request: req(),
+      settings: settingsWith(true),
+      before: 'b',
+      after: 'a',
+      verify: async () => null,
+      emit,
+    });
+    expect(events).toHaveLength(0);
   });
 });

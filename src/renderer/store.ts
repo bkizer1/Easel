@@ -39,6 +39,7 @@ import { buildSitePrompt, type NewSiteBrief } from '@shared/siteBrief';
 import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
+import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
 import {
@@ -1410,6 +1411,34 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'tool-call': {
         // Tool-call events are transient; they don't update chat or diffs.
         // A future version could show inline tool progress in the chat.
+        break;
+      }
+
+      case 'verify': {
+        // Issue #16: self-heal verdict. Emitted AFTER the terminal `done` has
+        // already cleared `activeRequestId`, so it must NOT be gated on it (the
+        // usual guard would drop it). Surface the judge's verdict as a system
+        // badge keyed to the request that just completed.
+        const verifyMsg: ChatMessage = {
+          id: genId(),
+          role: 'system',
+          content: formatVerifyContent(e.verdict, e.rationale, e.confidence),
+          createdAt: Date.now(),
+          requestId: e.requestId,
+        };
+        // Insert right after the turn it judged (located by requestId), not at
+        // the tail — see placeVerifyMessage. Prevents a late verdict from
+        // landing inside a newer edit's stream.
+        set((s) => ({ chat: placeVerifyMessage(s.chat, verifyMsg) }));
+        break;
+      }
+
+      default: {
+        // Exhaustiveness guard: a new AgentEvent variant added to the shared
+        // union will fail to compile here until it is handled above, instead of
+        // silently falling through and being dropped.
+        const _exhaustive: never = e;
+        void _exhaustive;
         break;
       }
     }

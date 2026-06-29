@@ -79,6 +79,7 @@ function defaultSettings(): AppSettings {
       imageGeneration: false,
       showThinking: true,
       autoCheckpoint: true,
+      selfHealVerify: false,
     },
     theme: 'system',
     macros: [],

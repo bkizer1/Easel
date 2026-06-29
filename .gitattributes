@@ -1,0 +1,14 @@
+# Force textual diffs for source files.
+#
+# git auto-detects a file as "binary" (and hides its diff) if it finds a NUL
+# byte in the first 8 KB of the blob. A stray control byte accidentally embedded
+# in a string literal can therefore make a perfectly ordinary source file
+# un-reviewable in diffs. Setting the `diff` attribute tells git to always treat
+# these paths as text — without touching line-ending normalization (no `text`
+# attribute), so nothing gets re-normalized.
+*.ts   diff
+*.tsx  diff
+*.js   diff
+*.jsx  diff
+*.json diff
+*.css  diff

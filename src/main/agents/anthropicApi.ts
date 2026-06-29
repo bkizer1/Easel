@@ -19,6 +19,8 @@ import {
   parseToolInput,
   type ToolExecutorContext,
 } from '@main/agents/tools';
+import { createAnthropicClient } from '@main/agents/anthropicClient';
+import type { VisionClient } from '@main/agents/visionJudge';
 
 const log = createLogger('backend:anthropic-api');
 
@@ -85,9 +87,9 @@ export function anthropicApiBackend(_settings: AppSettings): AgentBackend {
         return;
       }
 
-      let Anthropic: typeof import('@anthropic-ai/sdk').default;
+      let client: VisionClient;
       try {
-        Anthropic = (await import('@anthropic-ai/sdk')).default;
+        client = await createAnthropicClient(apiKey, ctx.settings.backends['anthropic-api'].baseUrl);
       } catch (err) {
         yield {
           type: 'error',
@@ -98,9 +100,6 @@ export function anthropicApiBackend(_settings: AppSettings): AgentBackend {
         };
         return;
       }
-
-      const baseURL = ctx.settings.backends['anthropic-api'].baseUrl;
-      const client = new Anthropic(baseURL ? { apiKey, baseURL } : { apiKey });
 
       const toolCtx: ToolExecutorContext = {
         fs: ctx.fs,

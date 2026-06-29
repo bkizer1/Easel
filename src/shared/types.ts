@@ -286,6 +286,22 @@ export interface FileDiff {
 }
 
 /**
+ * The self-heal vision judge's verdict on whether an applied edit met the
+ * user's stated goal, derived by comparing the before/after preview frames.
+ */
+export type VerifyVerdict = 'pass' | 'fail';
+
+/** Structured result returned by the self-heal vision judge ({@link VerifyVerdict}). */
+export interface VisionVerdict {
+  /** Whether the post-edit page satisfies the instruction. */
+  verdict: VerifyVerdict;
+  /** One-line, human-readable justification for the verdict. */
+  rationale: string;
+  /** Optional model-reported confidence, clamped to [0, 1]. */
+  confidence?: number;
+}
+
+/**
  * A discriminated union of everything the agent can stream back during an edit.
  * The renderer switches on `type` to drive the chat/diff UI. Every variant
  * carries `requestId` so multiple concurrent (or replayed) edits stay separated.
@@ -384,6 +400,25 @@ export type AgentEvent =
        * with an explicit file hint, keeping the event stream one-way.
        */
       candidates?: string[];
+    }
+  | {
+      /**
+       * Self-heal verification (issue #16). Emitted *after* the terminal `done`
+       * once the post-edit preview frame has settled: a vision judge compared
+       * the before/after frames against the user's instruction. Non-terminal and
+       * fail-open — it is omitted entirely when verification is disabled, the
+       * judge errors, or no verdict could be produced, so it never disrupts the
+       * edit. Because it arrives after `done` has cleared the active request, the
+       * renderer must NOT drop it on the usual `activeRequestId` guard.
+       */
+      type: 'verify';
+      requestId: string;
+      /** Whether the post-edit page satisfied the instruction. */
+      verdict: VerifyVerdict;
+      /** One-line rationale for the verdict. */
+      rationale: string;
+      /** Optional model-reported confidence in [0, 1]. */
+      confidence?: number;
     };
 
 /** Narrows {@link AgentEvent} to a specific `type`. */
@@ -613,6 +648,13 @@ export interface FeatureFlags {
   showThinking: boolean;
   /** Auto-create a git checkpoint before every applied edit. */
   autoCheckpoint: boolean;
+  /**
+   * Self-heal verify (issue #16): after each edit settles, run a vision
+   * pass/fail judgment on whether the page now matches the instruction and
+   * surface the verdict in chat. Off by default — it makes one extra vision
+   * call per edit and requires an Anthropic API key.
+   */
+  selfHealVerify: boolean;
 }
 
 /**
