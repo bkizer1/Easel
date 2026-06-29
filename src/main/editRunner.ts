@@ -293,6 +293,12 @@ export interface RunEditStreamOptions {
    * edit's checkpoint settles. Omitted ⇒ the verify step is skipped entirely.
    */
   verify?: VerifyFn;
+  /**
+   * Issue #31: max bounded auto-retries after a failed verify verdict. Defaults
+   * to `settings.maxRetries` at the IPC layer; 0 disables retry (verify becomes
+   * observe-only). Hard-capped by {@link RETRY_CEILING} regardless.
+   */
+  maxRetries?: number;
 }
 
 /**
@@ -353,27 +359,24 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
   const logger = createLogger(`agent:${requestId.slice(0, 8)}`);
 
   // Track the latest confidence the backend reports so it can be recorded as
-  // checkpoint provenance when the backend requests a checkpoint.
+  // checkpoint provenance when the backend requests a checkpoint. Reset per
+  // attempt so a retry's checkpoint records its own confidence.
   let latestConfidence: ConfidenceLevel | undefined;
 
-  const ctx: AgentBackendContext = {
-    projectRoot,
-    settings,
-    secrets,
-    fs: fsInstance,
-    imageProvider: getActiveImageProvider(),
-    logger,
-    signal: controller.signal,
-    createCheckpoint: (message, rid) =>
-      createCheckpointFn(message, rid, buildProvenance(request, settings, latestConfidence)),
-    checkWrite: (relativePath) => gate.check(relativePath),
-  };
+  // Issue #16: whether the self-heal verify step can run AT ALL. Computed once
+  // (flag on + a judge injected); the per-attempt `succeeded` gate is applied
+  // inside the loop. When false, the loop short-circuits exactly like today's
+  // verify-off path (no settle, no verify/verifying/retrying).
+  const verifyEnabled = settings.featureFlags.selfHealVerify && opts.verify !== undefined;
+  const maxRetries = opts.maxRetries ?? 0;
 
-  // Issue #7: capture the pre-edit preview frame before the agent runs.
+  // Issue #7: capture the pre-edit preview frame ONCE before any attempt runs.
+  // Reused for every attempt's checkpoint visual diff and full-frame verify.
   const beforeShot = await _captureShot();
-  let shotCheckpointId: string | undefined;
 
   try {
+    // Resolve the backend ONCE outside the loop; every attempt re-runs its
+    // editStream with the same context (the AbortController + gate are shared).
     const { getBackendRegistry } = await import('@main/agents/index');
     const registry = getBackendRegistry();
     const backend = registry[settings.agentBackend](settings);
@@ -383,78 +386,117 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
       backend: backend.id,
       model: settings.model,
       policy: loadedPolicy.source,
+      maxRetries,
     });
 
-    let succeeded = false;
-    for await (const event of backend.editStream(request, ctx)) {
-      if (event.type === 'confidence') latestConfidence = event.level;
-      // Issue #7: remember the checkpoint to key before/after screenshots on.
-      if (event.type === 'checkpoint') shotCheckpointId = event.checkpoint.id;
-      _pushEvent(event);
-      // A terminal event ends the stream.
-      if (event.type === 'done' || event.type === 'error') {
-        succeeded = event.type === 'done';
-        break;
-      }
-    }
+    /**
+     * Run ONE edit attempt for `req`: stream the backend, push each event,
+     * track the checkpoint for the visual diff, capture the settled after-frame,
+     * and persist the FULL-viewport before/after shots. Returns whether the
+     * attempt ended on `done` plus the settled after-frame for the judge.
+     */
+    const runAttempt = async (
+      req: EditRequest,
+    ): Promise<{ succeeded: boolean; after: string | undefined }> => {
+      latestConfidence = undefined;
+      let shotCheckpointId: string | undefined;
 
-    // Whether the self-heal verify step (issue #16) will actually run. Computed
-    // up front so we only pay the HMR settle + capture when an "after" frame is
-    // genuinely needed (a checkpoint to illustrate, or verify enabled) — not on
-    // every successful no-checkpoint edit with verify off.
-    const wantVerify =
-      succeeded && settings.featureFlags.selfHealVerify && opts.verify !== undefined;
+      const ctx: AgentBackendContext = {
+        projectRoot,
+        settings,
+        secrets,
+        fs: fsInstance,
+        imageProvider: getActiveImageProvider(),
+        logger,
+        signal: controller.signal,
+        createCheckpoint: (message, rid) =>
+          createCheckpointFn(message, rid, buildProvenance(req, settings, latestConfidence)),
+        checkWrite: (relativePath) => gate.check(relativePath),
+      };
 
-    // Issue #7 + #16: capture the settled "after" frame ONCE and reuse it for
-    // both the checkpoint visual diff and the verify judge (no double settle).
-    let afterShot: string | undefined;
-    if (shotCheckpointId !== undefined || wantVerify) {
-      afterShot = await _captureAfterShot();
-    }
-    // Issue #33 INVARIANT: persist the FULL-viewport before/after frames for the
-    // #7 checkpoint visual diff. The cropped frame below is a separate copy used
-    // only by the verify judge — the persisted shots are never cropped.
-    await _persistCheckpointShots(shotCheckpointId, beforeShot, afterShot);
-
-    // Issue #16: self-heal verify — only judge edits that completed successfully.
-    // Purely additive and fail-open: it runs after the terminal event was already
-    // pushed, so it can never alter the edit it follows. Decoupled from the
-    // checkpoint, so it also fires for successful edits that made no checkpoint.
-    if (wantVerify) {
-      // Issue #33: focus the judge on the edited element when we have a usable
-      // target box. We capture a FRESH cropped "after" via capturePreview(box)
-      // and pass the judge { before: undefined, after: cropped } — cropping the
-      // pre-edit "before" is not feasible (no in-repo PNG cropper), and the judge
-      // tolerates an absent before. Any failure (degenerate box, no targets, or a
-      // capture error) falls back to the full-frame before/after path below.
-      const cropBox = request.targets[0]?.boundingBox;
-      let croppedAfter: string | undefined;
-      if (!isDegenerateCrop(cropBox)) {
-        croppedAfter = await _captureCroppedShot(cropBox!);
+      let succeeded = false;
+      for await (const event of backend.editStream(req, ctx)) {
+        if (event.type === 'confidence') latestConfidence = event.level;
+        // Issue #7: remember the checkpoint to key before/after screenshots on.
+        if (event.type === 'checkpoint') shotCheckpointId = event.checkpoint.id;
+        _pushEvent(event);
+        // A terminal event ends the stream.
+        if (event.type === 'done' || event.type === 'error') {
+          succeeded = event.type === 'done';
+          break;
+        }
       }
 
-      await runVerifyStep(
-        croppedAfter !== undefined
-          ? {
-              request,
-              settings,
-              before: undefined,
-              after: croppedAfter,
-              verify: opts.verify,
-              emit: _pushEvent,
-              signal: controller.signal,
-            }
-          : {
-              request,
-              settings,
-              before: beforeShot,
-              after: afterShot,
-              verify: opts.verify,
-              emit: _pushEvent,
-              signal: controller.signal,
-            },
-      );
-    }
+      // Issue #7 + #16: capture the settled "after" frame ONCE and reuse it for
+      // both the checkpoint visual diff and the verify judge (no double settle).
+      // Only pay the HMR settle + capture when an after-frame is genuinely needed
+      // (a checkpoint to illustrate, or verify enabled for a successful attempt).
+      let after: string | undefined;
+      if (shotCheckpointId !== undefined || (verifyEnabled && succeeded)) {
+        after = await _captureAfterShot();
+      }
+      // Issue #33 INVARIANT: persist the FULL-viewport before/after frames for the
+      // #7 checkpoint visual diff. The cropped frame in `judge` is a separate copy
+      // used only by the verify judge — the persisted shots are never cropped.
+      await _persistCheckpointShots(shotCheckpointId, beforeShot, after);
+
+      return { succeeded, after };
+    };
+
+    /**
+     * Return the judge's verdict for an attempt WITHOUT emitting. Applies the
+     * #33 crop logic (a fresh region-cropped after-frame focuses the judge on the
+     * edited element; falls back to the full before/after frames otherwise) and
+     * calls the injected judge. Fail-open: never throws, returns `null` on any
+     * failure / flag-off / no-judge so the loop stops cleanly.
+     */
+    const judge = async (after: string | undefined): Promise<VisionVerdict | null> => {
+      try {
+        if (!verifyEnabled || !opts.verify) return null;
+        if (controller.signal.aborted) return null;
+
+        // Issue #33: focus the judge on the edited element when we have a usable
+        // target box. We capture a FRESH cropped "after" via capturePreview(box)
+        // and pass { before: undefined, after: cropped } — cropping the pre-edit
+        // "before" is not feasible (no in-repo PNG cropper), and the judge
+        // tolerates an absent before. Any failure (degenerate box, no targets, or
+        // a capture error) falls back to the full-frame before/after path.
+        const cropBox = request.targets[0]?.boundingBox;
+        let croppedAfter: string | undefined;
+        if (!isDegenerateCrop(cropBox)) {
+          croppedAfter = await _captureCroppedShot(cropBox!);
+        }
+
+        if (croppedAfter !== undefined) {
+          return await opts.verify({
+            instruction: request.instruction,
+            before: undefined,
+            after: croppedAfter,
+            signal: controller.signal,
+          });
+        }
+        if (!after) return null;
+        return await opts.verify({
+          instruction: request.instruction,
+          before: beforeShot,
+          after,
+          signal: controller.signal,
+        });
+      } catch {
+        // Fail-open: a verify failure must never disrupt the edit it follows.
+        return null;
+      }
+    };
+
+    await runSelfHealLoop({
+      request,
+      maxRetries,
+      wantVerify: verifyEnabled,
+      runAttempt,
+      judge,
+      emit: _pushEvent,
+      signal: controller.signal,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error('Edit stream error', { requestId, err: msg });
@@ -467,6 +509,122 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
   } finally {
     _inFlight.delete(requestId);
     log.info('Edit stream complete', { requestId });
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #31: bounded one-shot self-heal auto-retry                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Hard ceiling on auto-retries regardless of the configured `maxRetries`, so a
+ * misconfigured setting can never spin the edit loop unboundedly. Total attempts
+ * are bounded by `1 + min(maxRetries, RETRY_CEILING)`.
+ */
+export const RETRY_CEILING = 5;
+
+/**
+ * Issue #31: build the retry {@link EditRequest} for a failed verify verdict.
+ * Pure and exported for direct unit testing. The retry:
+ *  - reuses the SAME `id` (the renderer re-arms correlation on the `retrying`
+ *    event so the reused id's events are not dropped),
+ *  - augments the instruction with a clearly-delimited self-heal block embedding
+ *    the judge's rationale, and
+ *  - passes the current visual state (`afterFrame`) as the screenshot context so
+ *    the agent sees what it produced last time.
+ * All other fields (annotations/targets/projectRoot/devServerUrl) are copied
+ * from the original request unchanged.
+ */
+export function buildRetryRequest(
+  original: EditRequest,
+  rationale: string,
+  afterFrame: string | undefined,
+): EditRequest {
+  return {
+    id: original.id,
+    instruction:
+      original.instruction +
+      `\n\n[Self-heal retry] The previous attempt did not satisfy the request. ` +
+      `Reviewer feedback: ${rationale}\nPlease correct the issue.`,
+    annotations: original.annotations,
+    targets: original.targets,
+    screenshotDataUrl: afterFrame,
+    projectRoot: original.projectRoot,
+    devServerUrl: original.devServerUrl,
+  };
+}
+
+/**
+ * Issue #31: the testable, Electron-free core of the bounded self-heal loop. It
+ * runs edit attempts and, on a failed verify verdict, resubmits the edit ONCE
+ * per allowed retry (converge-or-stop). Every effect is injected (`runAttempt`,
+ * `judge`, `emit`) so it can be unit tested without a real backend or GUI.
+ *
+ * Loop semantics (attempt counter starts at 1):
+ *  1. Run the current request via `runAttempt`.
+ *  2. If verify is off or the attempt did not succeed → STOP (matches today's
+ *     behavior for failed/observe-off edits; no verify/verifying/retrying).
+ *  3. Emit `verifying`, then call `judge` (no emit).
+ *  4. `null` verdict (fail-open: flag off / no judge / threw / unparseable) →
+ *     STOP, emit nothing more.
+ *  5. `pass` OR out of retries OR aborted → emit the TERMINAL `verify` event and
+ *     STOP.
+ *  6. Otherwise (fail AND retries left AND not aborted) → emit `retrying`
+ *     (instead of an intermediate `verify`), rebuild the request, and loop.
+ *
+ * INVARIANTS: the `verify` event is emitted EXACTLY ONCE per turn (the terminal
+ * verdict). The loop is HARD-bounded by `1 + min(maxRetries, RETRY_CEILING)`.
+ * It never throws (the judge is fail-open at the call site).
+ */
+export async function runSelfHealLoop(opts: {
+  request: EditRequest;
+  maxRetries: number;
+  wantVerify: boolean;
+  runAttempt: (req: EditRequest) => Promise<{ succeeded: boolean; after: string | undefined }>;
+  judge: (after: string | undefined) => Promise<VisionVerdict | null>;
+  emit: (e: AgentEvent) => void;
+  signal: AbortSignal;
+}): Promise<void> {
+  const { request, wantVerify, runAttempt, judge, emit, signal } = opts;
+  const requestId = request.id;
+  const retryBudget = Math.max(0, Math.min(opts.maxRetries, RETRY_CEILING));
+
+  let currentRequest = request;
+  let attempt = 1;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { succeeded, after } = await runAttempt(currentRequest);
+
+    // No verify (flag off / no judge) or the attempt failed: stop exactly like
+    // today's behavior — no verify/verifying/retrying for failed/observe-off edits.
+    if (!wantVerify || !succeeded) return;
+
+    emit({ type: 'verifying', requestId });
+
+    const verdict = await judge(after);
+    // Fail-open: no verdict ⇒ stop and emit nothing more.
+    if (verdict == null) return;
+
+    const outOfRetries = attempt > retryBudget;
+    if (verdict.verdict === 'pass' || outOfRetries || signal.aborted) {
+      // Terminal verdict: emit the single `verify` event exactly as runVerifyStep
+      // does, then stop.
+      emit({
+        type: 'verify',
+        requestId,
+        verdict: verdict.verdict,
+        rationale: verdict.rationale,
+        ...(verdict.confidence !== undefined ? { confidence: verdict.confidence } : {}),
+      });
+      return;
+    }
+
+    // Fail AND a retry is allowed AND not aborted: re-arm the renderer and loop.
+    // Emit `retrying` INSTEAD of an intermediate `verify`.
+    emit({ type: 'retrying', requestId, attempt: attempt + 1, rationale: verdict.rationale });
+    currentRequest = buildRetryRequest(request, verdict.rationale, after);
+    attempt++;
   }
 }
 

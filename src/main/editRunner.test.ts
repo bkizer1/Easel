@@ -8,13 +8,16 @@ import type { LoadedPolicy } from './policy';
 // editRunner pulls in the main window for event push; stub it for Node tests.
 vi.mock('@main/window', () => ({ getMainWindow: () => null }));
 
+import type { VisionVerdict } from '@shared/types';
 import {
   buildProjectFs,
   buildProvenance,
+  buildRetryRequest,
   createWriteGate,
   isDegenerateCrop,
   pollUntilStable,
   respondPolicyConfirm,
+  runSelfHealLoop,
   runVerifyStep,
   type WriteGate,
   type VerifyFn,
@@ -518,5 +521,234 @@ describe('isDegenerateCrop (issue #33 region-cropped verify frame)', () => {
     expect(isDegenerateCrop({ x: 10, y: 760, width: 100, height: 80 }, viewport)).toBe(true);
     // Starts off-screen.
     expect(isDegenerateCrop({ x: -5, y: 20, width: 100, height: 80 }, viewport)).toBe(true);
+  });
+});
+
+describe('buildRetryRequest (issue #31)', () => {
+  function baseRequest(): EditRequest {
+    return {
+      id: 'req-31',
+      instruction: 'Make the hero bigger',
+      annotations: [{ id: 'a1' } as unknown as EditRequest['annotations'][number]],
+      targets: [{ id: 't1', selector: 'h1.hero' } as unknown as ElementTarget],
+      screenshotDataUrl: 'data:original',
+      projectRoot: '/proj',
+      devServerUrl: 'http://localhost:3000',
+    };
+  }
+
+  it('reuses the same id and preserves targets/annotations/roots', () => {
+    const original = baseRequest();
+    const retry = buildRetryRequest(original, 'too small', 'data:after');
+    expect(retry.id).toBe('req-31');
+    expect(retry.targets).toEqual(original.targets);
+    expect(retry.annotations).toEqual(original.annotations);
+    expect(retry.projectRoot).toBe('/proj');
+    expect(retry.devServerUrl).toBe('http://localhost:3000');
+  });
+
+  it('augments the instruction with the original text AND the rationale', () => {
+    const retry = buildRetryRequest(baseRequest(), 'the heading is unchanged', 'data:after');
+    expect(retry.instruction).toContain('Make the hero bigger');
+    expect(retry.instruction).toContain('the heading is unchanged');
+    expect(retry.instruction).toContain('[Self-heal retry]');
+  });
+
+  it('uses the after-frame as the screenshot context (current visual state)', () => {
+    const retry = buildRetryRequest(baseRequest(), 'fix', 'data:after-frame');
+    expect(retry.screenshotDataUrl).toBe('data:after-frame');
+    // undefined after-frame ⇒ undefined screenshot (no stale original carried).
+    expect(buildRetryRequest(baseRequest(), 'fix', undefined).screenshotDataUrl).toBeUndefined();
+  });
+});
+
+describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
+  function req(): EditRequest {
+    return {
+      id: 'req-31',
+      instruction: 'make it pop',
+      annotations: [],
+      targets: [],
+      projectRoot: '/proj',
+      devServerUrl: 'http://localhost:3000',
+    };
+  }
+
+  /** Collect emitted events + count attempts and the requests they received. */
+  function harness(opts: {
+    succeeds?: boolean;
+    verdicts: Array<VisionVerdict | null>;
+    after?: string;
+  }) {
+    const events: AgentEvent[] = [];
+    const attemptReqs: EditRequest[] = [];
+    let judgeCalls = 0;
+    const succeeds = opts.succeeds ?? true;
+
+    const runAttempt = async (
+      r: EditRequest,
+    ): Promise<{ succeeded: boolean; after: string | undefined }> => {
+      attemptReqs.push(r);
+      return { succeeded: succeeds, after: opts.after };
+    };
+
+    const judge = async (): Promise<VisionVerdict | null> => {
+      const v = opts.verdicts[Math.min(judgeCalls, opts.verdicts.length - 1)];
+      judgeCalls++;
+      return v;
+    };
+
+    return {
+      events,
+      attemptReqs,
+      runAttempt,
+      judge,
+      judgeCalls: () => judgeCalls,
+      emit: (e: AgentEvent) => events.push(e),
+    };
+  }
+
+  const types = (events: AgentEvent[]): string[] => events.map((e) => e.type);
+
+  it('(a) PASS first try → one attempt, one verifying + terminal verify:pass, NO retrying', async () => {
+    const h = harness({ verdicts: [{ verdict: 'pass', rationale: 'great' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(types(h.events)).toEqual(['verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'pass', rationale: 'great' });
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+  });
+
+  it('(b) FAIL→PASS (maxRetries 1) → two attempts; retrying then verify:pass; retry req is augmented', async () => {
+    const h = harness({
+      after: 'data:after-1',
+      verdicts: [
+        { verdict: 'fail', rationale: 'still too small' },
+        { verdict: 'pass', rationale: 'now good' },
+      ],
+    });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(2);
+    expect(types(h.events)).toEqual(['verifying', 'retrying', 'verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({
+      type: 'retrying',
+      attempt: 2,
+      rationale: 'still too small',
+    });
+    expect(h.events[3]).toMatchObject({ type: 'verify', verdict: 'pass' });
+
+    // The SECOND attempt received the augmented request: same id, rationale in
+    // the instruction, after-frame as the screenshot.
+    const retryReq = h.attemptReqs[1];
+    expect(retryReq.id).toBe('req-31');
+    expect(retryReq.instruction).toContain('make it pop');
+    expect(retryReq.instruction).toContain('still too small');
+    expect(retryReq.screenshotDataUrl).toBe('data:after-1');
+  });
+
+  it('(c) FAIL→FAIL persistent (maxRetries 1) → two attempts; exactly one retrying + one terminal verify:fail', async () => {
+    const h = harness({
+      after: 'data:after',
+      verdicts: [
+        { verdict: 'fail', rationale: 'nope' },
+        { verdict: 'fail', rationale: 'still nope' },
+      ],
+    });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(2);
+    expect(h.events.filter((e) => e.type === 'retrying')).toHaveLength(1);
+    const verifies = h.events.filter((e) => e.type === 'verify');
+    expect(verifies).toHaveLength(1);
+    expect(verifies[0]).toMatchObject({ verdict: 'fail', rationale: 'still nope' });
+  });
+
+  it('(d) wantVerify:false → one attempt, no verify/verifying/retrying', async () => {
+    const h = harness({ verdicts: [{ verdict: 'pass', rationale: 'x' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: false,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(h.events).toHaveLength(0);
+    expect(h.judgeCalls()).toBe(0);
+  });
+
+  it('(e) judge returns null → one attempt, one verifying, no verify, no retrying', async () => {
+    const h = harness({ verdicts: [null] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(types(h.events)).toEqual(['verifying']);
+  });
+
+  it('(f) signal.aborted before the retry → no retrying; terminal verify:fail (does not loop)', async () => {
+    const h = harness({ verdicts: [{ verdict: 'fail', rationale: 'bad' }] });
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: ctrl.signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+    expect(types(h.events)).toEqual(['verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'fail' });
+  });
+
+  it('stops when the attempt did not succeed (no verify on a failed edit)', async () => {
+    const h = harness({ succeeds: false, verdicts: [{ verdict: 'pass', rationale: 'x' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(h.events).toHaveLength(0);
+    expect(h.judgeCalls()).toBe(0);
   });
 });

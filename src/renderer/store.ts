@@ -40,6 +40,12 @@ import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
+import {
+  nextCorrelationOnRetrying,
+  selfHealPhaseOnRetrying,
+  selfHealPhaseOnVerifying,
+} from './lib/selfHealLoop';
+import type { SelfHealPhase } from './lib/selfHealTypes';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
 import {
@@ -196,6 +202,13 @@ export interface EaselState {
   activeRequestId: string | null;
   /** True while an edit is streaming; gates submit and drives spinner. */
   streaming: boolean;
+  /**
+   * Issue #31: the current self-heal lifecycle phase (verifying / bounded
+   * auto-retry), or null when idle. Set from the `verifying`/`retrying`
+   * AgentEvents and cleared on the terminal `verify`/`error`. Issue #32 renders
+   * this; #31 only wires the state + correlation re-arm.
+   */
+  selfHealPhase: SelfHealPhase | null;
   /** Live FileDiffs accumulated during the current (or most recent) edit. */
   liveDiffs: FileDiff[];
   /** Ordered checkpoint timeline for the open project, newest first. */
@@ -555,6 +568,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   chat: [],
   activeRequestId: null,
   streaming: false,
+  selfHealPhase: null,
   liveDiffs: [],
   checkpoints: [],
   currentCheckpointId: undefined,
@@ -700,6 +714,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       chat: [],
       activeRequestId: null,
       streaming: false,
+      selfHealPhase: null,
       liveDiffs: [],
       checkpoints: [],
       currentCheckpointId: undefined,
@@ -1374,6 +1389,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             chat: [...s.chat, errMsg],
             streaming: false,
             activeRequestId: null,
+            // Issue #31: an error ends any in-flight self-heal lifecycle too.
+            selfHealPhase: null,
             // Auth failures surface via the banner, not the error toast.
             lastError: isCancelled || isAuth ? null : e.message,
             needsAuth: isAuth ? true : s.needsAuth,
@@ -1428,8 +1445,31 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         };
         // Insert right after the turn it judged (located by requestId), not at
         // the tail — see placeVerifyMessage. Prevents a late verdict from
-        // landing inside a newer edit's stream.
-        set((s) => ({ chat: placeVerifyMessage(s.chat, verifyMsg) }));
+        // landing inside a newer edit's stream. The terminal `verify` ends the
+        // self-heal lifecycle, so clear the phase after placing the badge.
+        set((s) => ({ chat: placeVerifyMessage(s.chat, verifyMsg), selfHealPhase: null }));
+        break;
+      }
+
+      case 'verifying': {
+        // Issue #31: the vision judge is running for the attempt that just
+        // settled. UN-gated (it arrives after `done`, with activeRequestId
+        // already cleared). Record the phase for #32's UI; do NOT re-arm
+        // streaming — no further stream events correlate to this phase.
+        set({ selfHealPhase: selfHealPhaseOnVerifying(e.requestId) });
+        break;
+      }
+
+      case 'retrying': {
+        // Issue #31: a `verify:fail` triggered a bounded auto-retry that reuses
+        // the SAME requestId. The first attempt's `done` already cleared
+        // activeRequestId, so this event is UN-gated and RE-ARMS correlation —
+        // restoring activeRequestId + streaming so the retry attempt's
+        // thinking/message/checkpoint/done events are processed, not dropped.
+        set({
+          ...nextCorrelationOnRetrying(e.requestId),
+          selfHealPhase: selfHealPhaseOnRetrying(e.requestId, e.attempt, e.rationale),
+        });
         break;
       }
 

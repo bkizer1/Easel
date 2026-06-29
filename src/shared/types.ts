@@ -419,6 +419,34 @@ export type AgentEvent =
       rationale: string;
       /** Optional model-reported confidence in [0, 1]. */
       confidence?: number;
+    }
+  | {
+      /**
+       * Self-heal verify, in-progress (issue #31). Emitted just before the vision
+       * judge runs for an attempt, so the UI can show a transient "verifying…"
+       * state. Like {@link AgentEvent} `verify`, it arrives AFTER the terminal
+       * `done` has cleared the active request, so the renderer must NOT gate it on
+       * `activeRequestId`. Non-terminal and purely advisory.
+       */
+      type: 'verifying';
+      requestId: string;
+    }
+  | {
+      /**
+       * Self-heal bounded auto-retry (issue #31). Emitted when a `verify:fail`
+       * verdict triggers an automatic resubmission of the SAME request, just
+       * before the stream is re-run. Because the retry reuses the original
+       * `requestId` — which the renderer already cleared on the first attempt's
+       * `done` — the renderer must NOT gate this on `activeRequestId`; instead it
+       * RE-ARMS correlation (sets `activeRequestId` + `streaming`) so the retry's
+       * `thinking`/`message`/`checkpoint`/`done` events are not silently dropped.
+       */
+      type: 'retrying';
+      requestId: string;
+      /** The upcoming attempt number (e.g. `2` for the first retry). */
+      attempt: number;
+      /** The judge's fail rationale, carried so the UI can explain the retry. */
+      rationale: string;
     };
 
 /** Narrows {@link AgentEvent} to a specific `type`. */
@@ -692,6 +720,12 @@ export interface AppSettings {
   featureFlags: FeatureFlags;
   /** UI theme preference. */
   theme: 'system' | 'light' | 'dark';
+  /**
+   * Max self-heal auto-retries after a failed verify verdict. Default 1. Only
+   * consulted when `featureFlags.selfHealVerify` is on; 0 disables retry (verify
+   * becomes observe-only).
+   */
+  maxRetries: number;
   /**
    * Saved instruction macros, in display order. Persisted to disk alongside the
    * rest of {@link AppSettings} so they survive restarts.
