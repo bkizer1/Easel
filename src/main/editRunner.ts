@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import type {
   AgentEvent,
   AppSettings,
+  BoundingBox,
   Checkpoint,
   CheckpointProvenance,
   ConfidenceLevel,
@@ -410,6 +411,9 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
     if (shotCheckpointId !== undefined || wantVerify) {
       afterShot = await _captureAfterShot();
     }
+    // Issue #33 INVARIANT: persist the FULL-viewport before/after frames for the
+    // #7 checkpoint visual diff. The cropped frame below is a separate copy used
+    // only by the verify judge — the persisted shots are never cropped.
     await _persistCheckpointShots(shotCheckpointId, beforeShot, afterShot);
 
     // Issue #16: self-heal verify — only judge edits that completed successfully.
@@ -417,15 +421,39 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
     // pushed, so it can never alter the edit it follows. Decoupled from the
     // checkpoint, so it also fires for successful edits that made no checkpoint.
     if (wantVerify) {
-      await runVerifyStep({
-        request,
-        settings,
-        before: beforeShot,
-        after: afterShot,
-        verify: opts.verify,
-        emit: _pushEvent,
-        signal: controller.signal,
-      });
+      // Issue #33: focus the judge on the edited element when we have a usable
+      // target box. We capture a FRESH cropped "after" via capturePreview(box)
+      // and pass the judge { before: undefined, after: cropped } — cropping the
+      // pre-edit "before" is not feasible (no in-repo PNG cropper), and the judge
+      // tolerates an absent before. Any failure (degenerate box, no targets, or a
+      // capture error) falls back to the full-frame before/after path below.
+      const cropBox = request.targets[0]?.boundingBox;
+      let croppedAfter: string | undefined;
+      if (!isDegenerateCrop(cropBox)) {
+        croppedAfter = await _captureCroppedShot(cropBox!);
+      }
+
+      await runVerifyStep(
+        croppedAfter !== undefined
+          ? {
+              request,
+              settings,
+              before: undefined,
+              after: croppedAfter,
+              verify: opts.verify,
+              emit: _pushEvent,
+              signal: controller.signal,
+            }
+          : {
+              request,
+              settings,
+              before: beforeShot,
+              after: afterShot,
+              verify: opts.verify,
+              emit: _pushEvent,
+              signal: controller.signal,
+            },
+      );
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -454,8 +482,16 @@ function _pushEvent(event: AgentEvent): void {
 /*  Issue #7: checkpoint visual diff — before/after screenshots                */
 /* -------------------------------------------------------------------------- */
 
-/** Delay after a checkpoint before capturing "after" so HMR has re-rendered. */
-const SHOT_SETTLE_MS = 600;
+/**
+ * Issue #33: poll-until-stable settle. Instead of a single fixed delay (which
+ * sometimes snapshots the page mid-reload on a slow Vite/HMR cycle), capture
+ * repeatedly and stop as soon as two consecutive frames are byte-identical —
+ * identical PNG bytes from the same `capturePage` encode ⇒ HMR has settled.
+ */
+/** How long to wait between successive settle captures. */
+const SHOT_POLL_INTERVAL_MS = 150;
+/** Hard cap on total settle wall time; return the latest frame after this. */
+const SHOT_MAX_WAIT_MS = 2500;
 
 /** Capture the current preview as a PNG data URL (best-effort, never throws). */
 async function _captureShot(): Promise<string | undefined> {
@@ -470,10 +506,124 @@ async function _captureShot(): Promise<string | undefined> {
   }
 }
 
-/** Wait for HMR to settle, then capture the "after" preview frame (best-effort). */
+/** Resolve after `ms` milliseconds. Factored out so the poll loop is injectable. */
+function _sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Issue #33: the pure, Electron-free core of the poll-until-stable settle. It is
+ * exported and fully injectable (both `capture` and `sleep`) so it can be unit
+ * tested without a real window or timers.
+ *
+ * Behavior:
+ *  - Captures, sleeps `intervalMs`, captures again, and returns as soon as two
+ *    consecutive captures are byte-identical (same non-`undefined` data URL).
+ *  - Caps total wall time at ~`maxWaitMs` (counted as elapsed sleep time); once
+ *    reached it returns the most recent captured frame anyway.
+ *  - Treats an `undefined` capture as "not yet stable" and keeps polling. Two
+ *    consecutive `undefined`s are NOT considered stable — only equal, defined
+ *    frames count, so a transient capture failure never short-circuits the loop.
+ *  - Never throws: a `capture` rejection is swallowed and treated as `undefined`.
+ *    Falls back to returning whatever was last captured (or `undefined`).
+ */
+export async function pollUntilStable(opts: {
+  capture: () => Promise<string | undefined>;
+  sleep: (ms: number) => Promise<void>;
+  intervalMs: number;
+  maxWaitMs: number;
+}): Promise<string | undefined> {
+  const { capture, sleep, intervalMs, maxWaitMs } = opts;
+
+  const safeCapture = async (): Promise<string | undefined> => {
+    try {
+      return await capture();
+    } catch {
+      return undefined;
+    }
+  };
+
+  let last = await safeCapture();
+  let elapsed = 0;
+  // A non-negative interval guards against an infinite zero-progress loop.
+  const step = Math.max(1, intervalMs);
+
+  while (elapsed < maxWaitMs) {
+    await sleep(step);
+    elapsed += step;
+    const next = await safeCapture();
+    // Two consecutive equal, defined frames ⇒ pixels are stable ⇒ HMR settled.
+    if (next !== undefined && next === last) return next;
+    last = next;
+  }
+
+  return last;
+}
+
+/**
+ * Wait for HMR to settle via {@link pollUntilStable}, then return the "after"
+ * preview frame (best-effort). Wraps the pure loop with the real capture +
+ * sleep. Never throws — the poll loop swallows capture failures and falls back
+ * to the latest captured frame (or `undefined`). NOTE for issue #31 (retry):
+ * a retry that re-captures simply calls this again; the loop is idempotent and
+ * self-contained, so re-invocation is safe.
+ */
 async function _captureAfterShot(): Promise<string | undefined> {
-  await new Promise((resolve) => setTimeout(resolve, SHOT_SETTLE_MS));
-  return _captureShot();
+  return pollUntilStable({
+    capture: _captureShot,
+    sleep: _sleep,
+    intervalMs: SHOT_POLL_INTERVAL_MS,
+    maxWaitMs: SHOT_MAX_WAIT_MS,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #33: region-cropped verify frame                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Issue #33: decide whether a target {@link BoundingBox} is unusable for
+ * cropping the verify frame. Pure and exported for direct unit testing.
+ *
+ * A box is degenerate when:
+ *  - it is missing, or has a non-finite coordinate/extent, or
+ *  - its width or height is zero or negative, or
+ *  - (only when a `viewport` is supplied) it starts off-screen (negative x/y)
+ *    or extends beyond the viewport bounds.
+ *
+ * The bounding box is captured in PRE-EDIT viewport coordinates; the element may
+ * have moved or resized after the edit, so callers MUST treat a degenerate box
+ * (and the no-target case) as a signal to fall back to the full-viewport frame.
+ */
+export function isDegenerateCrop(box: BoundingBox | undefined, viewport?: BoundingBox): boolean {
+  if (!box) return true;
+  const { x, y, width, height } = box;
+  if (![x, y, width, height].every((n) => Number.isFinite(n))) return true;
+  if (width <= 0 || height <= 0) return true;
+  if (viewport) {
+    if (x < 0 || y < 0) return true;
+    if (x + width > viewport.width || y + height > viewport.height) return true;
+  }
+  return false;
+}
+
+/**
+ * Issue #33: capture a fresh "after" frame cropped to `box` (best-effort, never
+ * throws). Returns `undefined` on any failure so the caller falls back to the
+ * full frame. The crop is a SEPARATE capture from the persisted full-viewport
+ * shots — it is only ever handed to the verify judge, never persisted for the
+ * #7 checkpoint visual diff.
+ */
+async function _captureCroppedShot(box: BoundingBox): Promise<string | undefined> {
+  try {
+    const win = getMainWindow();
+    if (!win) return undefined;
+    const { capturePreview } = await import('@main/window');
+    if (typeof capturePreview !== 'function') return undefined;
+    return await capturePreview(box);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -481,6 +631,10 @@ async function _captureAfterShot(): Promise<string | undefined> {
  * best-effort: the visual diff is a non-essential aid, so any failure here must
  * never affect the edit. The `after` frame is captured by the caller (once, via
  * {@link _captureAfterShot}) so it can be shared with the verify step (#16).
+ *
+ * INVARIANT (issue #33): the frames persisted here MUST stay full-viewport. Any
+ * region-cropped frame is a separate copy handed only to the verify judge — it
+ * is never persisted here.
  */
 async function _persistCheckpointShots(
   checkpointId: string | undefined,

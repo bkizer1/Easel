@@ -12,6 +12,8 @@ import {
   buildProjectFs,
   buildProvenance,
   createWriteGate,
+  isDegenerateCrop,
+  pollUntilStable,
   respondPolicyConfirm,
   runVerifyStep,
   type WriteGate,
@@ -371,5 +373,150 @@ describe('runVerifyStep (issue #16 self-heal verify)', () => {
       emit,
     });
     expect(events).toHaveLength(0);
+  });
+});
+
+describe('pollUntilStable (issue #33 poll-until-stable settle)', () => {
+  /**
+   * A `capture` driven by a fixed sequence; once exhausted it keeps yielding the
+   * last value (so a never-stabilizing sequence still terminates by maxWait).
+   */
+  function sequenceCapture(seq: Array<string | undefined>): {
+    capture: () => Promise<string | undefined>;
+    calls: () => number;
+  } {
+    let i = 0;
+    return {
+      capture: async () => seq[Math.min(i++, seq.length - 1)],
+      calls: () => i,
+    };
+  }
+
+  /** A fake sleep that records how many times (and how long) it was called. */
+  function countingSleep(): { sleep: (ms: number) => Promise<void>; count: () => number; total: () => number } {
+    let count = 0;
+    let total = 0;
+    return {
+      sleep: async (ms) => {
+        count++;
+        total += ms;
+      },
+      count: () => count,
+      total: () => total,
+    };
+  }
+
+  it('returns early once two consecutive captures are byte-identical', async () => {
+    const cap = sequenceCapture(['a', 'b', 'b', 'c']);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 150,
+      maxWaitMs: 2500,
+    });
+    // 'a' (initial), sleep, 'b', sleep, 'b' === previous ⇒ stop and return 'b'.
+    expect(result).toBe('b');
+    // Two sleeps before stability; it did NOT run out the full budget.
+    expect(slp.count()).toBe(2);
+    expect(cap.calls()).toBe(3);
+  });
+
+  it('honors maxWaitMs when frames never stabilize', async () => {
+    // Every frame differs ⇒ never stable; loop must stop at the wall-time cap.
+    const cap = sequenceCapture(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 150,
+      maxWaitMs: 600,
+    });
+    // 600 / 150 = 4 sleeps, then elapsed reaches the cap and we return the last.
+    expect(slp.count()).toBe(4);
+    expect(slp.total()).toBe(600);
+    // Returns the most recent captured frame (initial + 4 captures = index 4 ⇒ 'e').
+    expect(result).toBe('e');
+  });
+
+  it('tolerates intermittent undefined captures and keeps polling', async () => {
+    // 'a', undefined (not stable), 'a' again — two undefineds in a row would NOT
+    // be treated as stable; only equal DEFINED frames count.
+    const cap = sequenceCapture(['a', undefined, 'a', 'a']);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 150,
+      maxWaitMs: 2500,
+    });
+    // 'a', undefined (reset), 'a', 'a' === previous ⇒ stop and return 'a'.
+    expect(result).toBe('a');
+    expect(slp.count()).toBe(3);
+  });
+
+  it('does not treat two consecutive undefined captures as stable', async () => {
+    // All undefined until the cap; never short-circuits, returns undefined.
+    const cap = sequenceCapture([undefined, undefined, undefined, undefined, undefined]);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 100,
+      maxWaitMs: 300,
+    });
+    expect(result).toBeUndefined();
+    expect(slp.count()).toBe(3); // 300 / 100
+  });
+
+  it('never throws when capture rejects — treats it as undefined and falls back', async () => {
+    let i = 0;
+    const capture = async (): Promise<string | undefined> => {
+      i++;
+      if (i === 2) throw new Error('capture exploded');
+      return 'a';
+    };
+    const slp = countingSleep();
+    // 'a', (throw ⇒ undefined, resets), 'a', 'a' === previous ⇒ returns 'a'.
+    const result = await pollUntilStable({
+      capture,
+      sleep: slp.sleep,
+      intervalMs: 100,
+      maxWaitMs: 2500,
+    });
+    expect(result).toBe('a');
+  });
+});
+
+describe('isDegenerateCrop (issue #33 region-cropped verify frame)', () => {
+  it('is true for a missing box', () => {
+    expect(isDegenerateCrop(undefined)).toBe(true);
+  });
+
+  it('is true for zero or negative dimensions', () => {
+    expect(isDegenerateCrop({ x: 10, y: 10, width: 0, height: 50 })).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 10, width: 50, height: 0 })).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 10, width: -5, height: 50 })).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 10, width: 50, height: -5 })).toBe(true);
+  });
+
+  it('is true for non-finite coordinates or extents', () => {
+    expect(isDegenerateCrop({ x: NaN, y: 0, width: 10, height: 10 })).toBe(true);
+    expect(isDegenerateCrop({ x: 0, y: 0, width: Infinity, height: 10 })).toBe(true);
+  });
+
+  it('is false for a sane in-bounds box', () => {
+    expect(isDegenerateCrop({ x: 10, y: 20, width: 100, height: 80 })).toBe(false);
+  });
+
+  it('respects a viewport: out-of-bounds or off-screen boxes are degenerate', () => {
+    const viewport = { x: 0, y: 0, width: 1000, height: 800 };
+    // Sane and fully inside the viewport.
+    expect(isDegenerateCrop({ x: 10, y: 20, width: 100, height: 80 }, viewport)).toBe(false);
+    // Extends past the right/bottom edge.
+    expect(isDegenerateCrop({ x: 950, y: 20, width: 100, height: 80 }, viewport)).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 760, width: 100, height: 80 }, viewport)).toBe(true);
+    // Starts off-screen.
+    expect(isDegenerateCrop({ x: -5, y: 20, width: 100, height: 80 }, viewport)).toBe(true);
   });
 });
