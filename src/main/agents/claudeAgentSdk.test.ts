@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { buildChildEnv, evaluateSdkWrite } from './claudeAgentSdk';
+import type { AgentBackendContext } from '@shared/agent';
+import {
+  buildChildEnv,
+  evaluateSdkWrite,
+  buildPuppeteerMcpServer,
+  PUPPETEER_TOOL_NAME,
+} from './claudeAgentSdk';
 
 /**
  * Regression tests for the "use the Claude Code subscription, not the metered
@@ -80,5 +86,103 @@ describe('evaluateSdkWrite (SDK guardrail hook decision)', () => {
   it('allows when no path or no gate is present', async () => {
     expect(await evaluateSdkWrite('Write', {}, root, denyGate)).toBeNull();
     expect(await evaluateSdkWrite('Write', { file_path: '/proj/.env' }, root, undefined)).toBeNull();
+  });
+});
+
+/**
+ * Live State Puppeteer (issue #17): `set_app_state` is surfaced to this backend
+ * through an in-process MCP server. These tests stand in fakes for the SDK's
+ * `tool`/`createSdkMcpServer` and Zod (resolved at runtime in production) and
+ * assert the registration shape + that the handler funnels raw args through the
+ * SHARED tool contract (parseToolInput → executeTool) and maps the result to the
+ * SDK MCP CallToolResult shape. The tool's own guards live in `_execSetAppState`
+ * (puppeteer is disabled by default, so the handler returns that guard error),
+ * which proves the end-to-end wiring without driving the real SDK.
+ */
+describe('buildPuppeteerMcpServer (issue #17 SDK MCP wiring)', () => {
+  /** Minimal Zod stand-in: each leaf is chainable and identity-returning. */
+  const leaf = () => {
+    const node = {
+      optional: () => node,
+      describe: () => node,
+    };
+    return node;
+  };
+  const fakeZod = {
+    string: leaf,
+    number: leaf,
+    boolean: leaf,
+    unknown: leaf,
+    array: leaf,
+    enum: leaf,
+  } as unknown as Parameters<typeof buildPuppeteerMcpServer>[1];
+
+  type ToolArgs = [string, string, Record<string, unknown>, (args: Record<string, unknown>, extra: unknown) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>];
+  type ServerArgs = { name: string; version?: string; tools: unknown[] };
+
+  function makeSdk() {
+    const calls: { tool?: ToolArgs; server?: ServerArgs } = {};
+    const sdk = {
+      query: () => (async function* () {})(),
+      tool: (...args: ToolArgs) => {
+        calls.tool = args;
+        return { __tool: args[0] };
+      },
+      createSdkMcpServer: (opts: ServerArgs) => {
+        calls.server = opts;
+        return { type: 'sdk', name: opts.name, instance: {} };
+      },
+    } as unknown as Parameters<typeof buildPuppeteerMcpServer>[0];
+    return { sdk, calls };
+  }
+
+  const ctx = {
+    projectRoot: '/proj',
+    fs: {} as AgentBackendContext['fs'],
+    imageProvider: {} as AgentBackendContext['imageProvider'],
+  } as AgentBackendContext;
+
+  it('registers a single set_app_state tool under the "easel" server', () => {
+    const { sdk, calls } = makeSdk();
+    buildPuppeteerMcpServer(sdk, fakeZod, ctx);
+
+    expect(calls.tool?.[0]).toBe('set_app_state');
+    expect(calls.server?.name).toBe('easel');
+    expect(calls.server?.tools).toHaveLength(1);
+    // The fully-qualified name the agent must be allow-listed for.
+    expect(PUPPETEER_TOOL_NAME).toBe('mcp__easel__set_app_state');
+  });
+
+  it('advertises the set_app_state input shape (action + both action field sets)', () => {
+    const { sdk, calls } = makeSdk();
+    buildPuppeteerMcpServer(sdk, fakeZod, ctx);
+    const shape = calls.tool?.[2] ?? {};
+    expect(Object.keys(shape)).toEqual(
+      expect.arrayContaining(['action', 'url_pattern', 'json_body', 'selector', 'path', 'value']),
+    );
+  });
+
+  it('handler returns an MCP error result when the input is unparseable', async () => {
+    const { sdk, calls } = makeSdk();
+    buildPuppeteerMcpServer(sdk, fakeZod, ctx);
+    const handler = calls.tool![3];
+
+    const res = await handler({ action: 'nonsense' }, undefined);
+    expect(res.isError).toBe(true);
+    expect(res.content[0]).toEqual({ type: 'text', text: 'Invalid set_app_state input.' });
+  });
+
+  it('handler funnels valid input through the shared contract (puppeteer-disabled guard)', async () => {
+    const { sdk, calls } = makeSdk();
+    buildPuppeteerMcpServer(sdk, fakeZod, ctx);
+    const handler = calls.tool![3];
+
+    // Puppeteer is off by default, so executeTool hits the isEnabled guard in
+    // _execSetAppState and returns ok:false — confirming the handler reached the
+    // real shared executor and mapped the failure onto the MCP result shape.
+    const res = await handler({ action: 'clear_mocks' }, undefined);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].type).toBe('text');
+    expect(res.content[0].text).toMatch(/not enabled/i);
   });
 });

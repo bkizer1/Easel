@@ -59,6 +59,7 @@ import {
   type StateDiffEntry,
   type StateEntry,
 } from '@shared/xray';
+import { EMPTY_PUPPETEER_STATE, type PuppeteerState } from '@shared/puppeteer';
 
 /* -------------------------------------------------------------------------- */
 /*  ID generation                                                             */
@@ -273,6 +274,15 @@ export interface EaselState {
   publishing: boolean;
   /** URL of the most recently opened PR, or null. */
   lastPrUrl: string | null;
+
+  // ── Issue #17: Live State Puppeteer ───────────────────────────────────────
+  /**
+   * Authoritative puppeteer state mirrored from main (enabled flag, active
+   * mocks, recorded state overrides, optional policy-blocked reason).
+   */
+  puppeteer: PuppeteerState;
+  /** Whether the Puppeteer panel is open in the cockpit dock. */
+  puppeteerOpen: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -537,6 +547,28 @@ export interface EaselActions {
   // ── Issue #10: Branch & open PR ───────────────────────────────────────────
   /** Squash this session's accepted checkpoints onto a fresh branch and open a PR. */
   openPr(): Promise<string | null>;
+
+  // ── Issue #17: Live State Puppeteer ───────────────────────────────────────
+  /** Open/close the Puppeteer cockpit panel. */
+  setPuppeteerOpen(open: boolean): void;
+  /** Load (or reload) the puppeteer state from main. */
+  loadPuppeteerState(): Promise<void>;
+  /**
+   * Opt in/out of puppeteer control. Sends the toggle to main, which installs or
+   * removes the guest fetch/XHR monkeypatch. When the requested enable is blocked
+   * by policy (detail present + still disabled after the call), surfaces the
+   * reason as lastError consistent with setNetworkCapture.
+   */
+  setPuppeteerEnabled(enabled: boolean): Promise<void>;
+  /** Remove a single active fetch mock by id. */
+  removePuppeteerMock(id: string): Promise<void>;
+  /** Clear all active mocks + recorded state overrides. */
+  clearPuppeteer(): Promise<void>;
+  /**
+   * Re-push the active enabled+mocks state into the guest after a reload/HMR
+   * cycle so interception stays sticky. Called from PreviewPane on inspector-ready.
+   */
+  resyncPuppeteer(): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -596,6 +628,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   scratch: null,
   publishing: false,
   lastPrUrl: null,
+  puppeteer: EMPTY_PUPPETEER_STATE,
+  puppeteerOpen: false,
 
   /* ---- Init / subscriptions ------------------------------------------------ */
 
@@ -645,6 +679,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       });
     });
 
+    // Live State Puppeteer: mirror authoritative state pushed by main on every
+    // toggle, mock add/remove, or clear. Each push is idempotent with the
+    // action return values that also update local state.
+    const unsubPuppeteer = easel.puppeteer.onChanged(({ state }) => {
+      set({ puppeteer: state });
+    });
+
     // Load initial data from main (fire-and-forget; errors set lastError).
     void (async () => {
       // Load settings first so the rest of the UI can render properly.
@@ -665,6 +706,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       if (dsResult.ok) set({ devServer: dsResult.value });
 
       await get().listCheckpoints();
+
+      // Hydrate puppeteer state from main so the panel renders the correct
+      // initial enabled/mocks/overrides without waiting for a push event.
+      await get().loadPuppeteerState();
     })();
 
     // Cleanup: unsubscribe all push listeners on unmount.
@@ -677,6 +722,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       unsubScaffold();
       unsubEdit();
       unsubNetwork();
+      unsubPuppeteer();
     };
   },
 
@@ -2187,5 +2233,60 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     const url = result.value.prUrl ?? null;
     set({ lastPrUrl: url });
     return url;
+  },
+
+  /* ---- Issue #17: Live State Puppeteer ------------------------------------- */
+
+  setPuppeteerOpen(open) {
+    set({ puppeteerOpen: open });
+  },
+
+  async loadPuppeteerState() {
+    const result = await easel.puppeteer.getState();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+  },
+
+  async setPuppeteerEnabled(enabled) {
+    const result = await easel.puppeteer.setEnabled({ enabled });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+    // Surface the policy/availability reason the same way setNetworkCapture
+    // surfaces its detail: set lastError when the requested enable was not
+    // honoured (detail present and the state is still disabled).
+    if (result.value.detail && enabled && !result.value.state.enabled) {
+      set({ lastError: result.value.detail });
+    }
+  },
+
+  async removePuppeteerMock(id) {
+    const result = await easel.puppeteer.removeMock({ id });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+  },
+
+  async clearPuppeteer() {
+    const result = await easel.puppeteer.clearAll();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+  },
+
+  async resyncPuppeteer() {
+    const result = await easel.puppeteer.resync();
+    if (!result.ok) {
+      set({ lastError: result.error });
+    }
   },
 }));

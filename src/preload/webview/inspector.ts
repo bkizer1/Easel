@@ -44,6 +44,7 @@ import type {
 } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { accumulateStyleEdit } from './styleDelta';
+import { enableMocking, disableMocking, setMocks } from './fetchMock';
 import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
 import {
   serializeValue,
@@ -1341,6 +1342,39 @@ ipcRenderer.on(
             if (el) discardStyleTweak(el);
           } catch (err) {
             console.error('[Easel:inspector] discard-style error:', err);
+          }
+          break;
+        }
+
+        // ── Issue #17: Live State Puppeteer (gated in main by policy + opt-in) ──
+        case 'puppeteer-enable': {
+          // Install / uninstall the fetch+XHR interception monkeypatch.
+          // disableMocking() also restores native fetch/XHR and clears specs.
+          if (cmd.enabled) enableMocking();
+          else disableMocking();
+          break;
+        }
+
+        case 'puppeteer-set-mocks': {
+          // Replace the full active mock set (main owns the authoritative list).
+          setMocks(cmd.mocks);
+          break;
+        }
+
+        case 'puppeteer-set-state': {
+          // One-shot structured state write, reusing the State X-Ray fiber tap.
+          let el: Element | null = null;
+          try {
+            el = document.querySelector(cmd.selector);
+          } catch {
+            el = null;
+          }
+          if (el) {
+            const wrote = applySetValue(el, cmd.path, cmd.value);
+            // Re-emit so the panel reflects the applied (possibly coerced) value.
+            if (wrote) {
+              send({ type: 'element-state', snapshot: buildElementStateSnapshot(el) });
+            }
           }
           break;
         }

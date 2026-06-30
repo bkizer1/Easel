@@ -21,6 +21,7 @@
 import path from 'node:path';
 import type { ProjectFs, GrepQuery } from '@shared/agent';
 import type { ImageProvider, FileDiff } from '@shared/types';
+import type { FetchMockSpec, JsonValue, StateOverride } from '@shared/puppeteer';
 
 /* -------------------------------------------------------------------------- */
 /*  Tool schema types                                                          */
@@ -87,6 +88,53 @@ export interface ReplaceImageInput {
   height?: number;
 }
 
+/**
+ * Input shape for the `set_app_state` tool.
+ *
+ * Discriminated by `action`:
+ *  - `'mock_fetch'`  — install a fetch/XHR interception rule (ephemeral until
+ *    the user clears it or the page reloads).
+ *  - `'set_state'`   — write a JSON value into a running component's framework
+ *    state at a specific path (one-shot; a reload restores reality).
+ *  - `'clear_mocks'` — remove all active fetch mocks.
+ */
+export type SetAppStateInput =
+  | {
+      action: 'mock_fetch';
+      /** URL pattern to intercept (matched per `match`). */
+      url_pattern: string;
+      /** HTTP method to match, case-insensitive. Omit to match any method. */
+      method?: string;
+      /** How to interpret `url_pattern`. Default: `'substring'`. */
+      match?: 'substring' | 'glob' | 'exact';
+      /** Response HTTP status code. Default: `200`. */
+      status?: number;
+      /** JSON response body (sets `content-type: application/json`). */
+      json_body?: JsonValue;
+      /** Raw text response body (used when `json_body` is absent). */
+      text_body?: string;
+      /** Artificial response delay in ms. */
+      delay_ms?: number;
+      /** Fire the mock once then auto-remove it. */
+      once?: boolean;
+      /** Human label shown in the Easel panel (e.g. `"50 products"`). */
+      label?: string;
+    }
+  | {
+      action: 'set_state';
+      /** Robust CSS selector for the target component element. */
+      selector: string;
+      /** Machine path into the component's serialised state, e.g. `["state","items"]`. */
+      path: string[];
+      /** The JSON value to write (any serialisable value). */
+      value: JsonValue;
+      /** Human label for the Easel panel (e.g. `"empty cart"`). */
+      label?: string;
+    }
+  | {
+      action: 'clear_mocks';
+    };
+
 /** Discriminated union of all tool inputs for safe dispatch. */
 export type ToolInput =
   | { tool: 'read_file'; input: ReadFileInput }
@@ -95,7 +143,8 @@ export type ToolInput =
   | { tool: 'list_dir'; input: ListDirInput }
   | { tool: 'glob'; input: GlobInput }
   | { tool: 'grep'; input: GrepInput }
-  | { tool: 'replace_image'; input: ReplaceImageInput };
+  | { tool: 'replace_image'; input: ReplaceImageInput }
+  | { tool: 'set_app_state'; input: SetAppStateInput };
 
 /** The structured result returned to the model after executing a tool. */
 export interface ToolResult {
@@ -267,11 +316,118 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       required: ['output_path', 'mode', 'prompt'],
     },
   },
+  {
+    name: 'set_app_state',
+    description: [
+      'Drive the RUNNING app into a hard-to-reach state WITHOUT editing source code.',
+      'All changes are EPHEMERAL — a full page reload restores reality.',
+      'Use this to explore "what would the empty-cart look like?" or "what if the API returned 50 items?" without touching any files.',
+      '',
+      'REQUIRES the user to have enabled the State Puppeteer toggle in Easel first.',
+      '',
+      'Three actions (discriminated by `action`):',
+      '  • "mock_fetch"  — intercept a fetch/XHR URL and return a canned response.',
+      '    Example: { action: "mock_fetch", url_pattern: "/api/products", json_body: [{id:1}] }',
+      '  • "set_state"   — write a JSON value into a running component\'s framework state.',
+      '    Example: { action: "set_state", selector: "#cart", path: ["state","items"], value: [] }',
+      '  • "clear_mocks" — remove all active fetch mocks (does not revert set_state overrides).',
+    ].join('\n'),
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['mock_fetch', 'set_state', 'clear_mocks'],
+          description: 'Which puppeteer operation to perform.',
+        },
+        // ── mock_fetch fields ──────────────────────────────────────────────────
+        url_pattern: {
+          type: 'string',
+          description:
+            '(mock_fetch) URL pattern to intercept, matched against the full request URL per `match`.',
+        },
+        method: {
+          type: 'string',
+          description:
+            '(mock_fetch) HTTP method to match, case-insensitive. Omit to match any method.',
+        },
+        match: {
+          type: 'string',
+          enum: ['substring', 'glob', 'exact'],
+          description: '(mock_fetch) How to interpret url_pattern. Default: "substring".',
+        },
+        status: {
+          type: 'number',
+          description: '(mock_fetch) HTTP response status code. Default: 200.',
+        },
+        json_body: {
+          description: '(mock_fetch) JSON response body. Sets content-type: application/json.',
+        },
+        text_body: {
+          type: 'string',
+          description: '(mock_fetch) Raw text response body (used when json_body is absent).',
+        },
+        delay_ms: {
+          type: 'number',
+          description: '(mock_fetch) Artificial response latency in milliseconds.',
+        },
+        once: {
+          type: 'boolean',
+          description: '(mock_fetch) Fire this mock once then auto-remove it.',
+        },
+        label: {
+          type: 'string',
+          description: 'Human-readable label shown in the Easel panel (e.g. "empty cart").',
+        },
+        // ── set_state fields ───────────────────────────────────────────────────
+        selector: {
+          type: 'string',
+          description:
+            '(set_state) Robust CSS selector for the target component element, e.g. "#cart" or ".product-list".',
+        },
+        path: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            '(set_state) Machine path into the component\'s serialised state, e.g. ["state","items"].',
+        },
+        value: {
+          description: '(set_state) The JSON value to write (any JSON-serialisable value).',
+        },
+      },
+      required: ['action'],
+    },
+  },
 ] as const;
 
 /* -------------------------------------------------------------------------- */
 /*  Executor context                                                           */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * Live State Puppeteer capability injected into {@link ToolExecutorContext}.
+ *
+ * Optional — absent when the puppeteer module is unavailable (e.g. during
+ * certain unit-test scenarios or the Claude Agent SDK backend).  The
+ * `set_app_state` executor checks for presence before proceeding.
+ */
+export interface PuppeteerCapability {
+  /** Whether the user has toggled puppeteer on for this session. */
+  isEnabled(): boolean;
+  /**
+   * Whether the loaded project policy permits puppeteer.  Called just before
+   * each mutation so a mid-session policy change takes immediate effect.
+   */
+  allowed(): { ok: boolean; reason?: string };
+  /** Install or replace a fetch/XHR mock. */
+  setMock(spec: FetchMockSpec): void;
+  /** Apply a one-shot structured state override to a running component. */
+  setStateOverride(override: StateOverride): void;
+  /** Remove all active fetch mocks (not state overrides). */
+  clearMocks(): void;
+  /** Generate a fresh stable id for a new mock or override record. */
+  genId(): string;
+}
 
 /** Dependencies injected into each tool executor. */
 export interface ToolExecutorContext {
@@ -279,6 +435,12 @@ export interface ToolExecutorContext {
   imageProvider: ImageProvider;
   /** A stable id for the image request (echoed back in ImageResult). */
   nextImageId: () => string;
+  /**
+   * Live State Puppeteer capability (issue #17).  Present only when the feature
+   * is wired up (anthropic-api and local-openai backends).  `set_app_state`
+   * returns a descriptive error when absent.
+   */
+  puppeteer?: PuppeteerCapability;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -311,6 +473,8 @@ export async function executeTool(
       return _execGrep(toolInput.input, ctx);
     case 'replace_image':
       return _execReplaceImage(toolInput.input, ctx);
+    case 'set_app_state':
+      return _execSetAppState(toolInput.input, ctx);
   }
 }
 
@@ -370,6 +534,49 @@ export function parseToolInput(toolName: string, rawInput: unknown): ToolInput |
           height: typeof input['height'] === 'number' ? input['height'] : undefined,
         },
       };
+    }
+    case 'set_app_state': {
+      const action = String(input['action'] ?? '');
+      if (action === 'mock_fetch') {
+        return {
+          tool: 'set_app_state',
+          input: {
+            action: 'mock_fetch',
+            url_pattern: String(input['url_pattern'] ?? ''),
+            method: typeof input['method'] === 'string' ? input['method'] : undefined,
+            match:
+              input['match'] === 'glob' || input['match'] === 'exact'
+                ? input['match']
+                : input['match'] === 'substring'
+                  ? 'substring'
+                  : undefined,
+            status: typeof input['status'] === 'number' ? input['status'] : undefined,
+            json_body: input['json_body'] !== undefined ? (input['json_body'] as JsonValue) : undefined,
+            text_body: typeof input['text_body'] === 'string' ? input['text_body'] : undefined,
+            delay_ms: typeof input['delay_ms'] === 'number' ? input['delay_ms'] : undefined,
+            once: typeof input['once'] === 'boolean' ? input['once'] : undefined,
+            label: typeof input['label'] === 'string' ? input['label'] : undefined,
+          },
+        };
+      }
+      if (action === 'set_state') {
+        return {
+          tool: 'set_app_state',
+          input: {
+            action: 'set_state',
+            selector: String(input['selector'] ?? ''),
+            path: Array.isArray(input['path'])
+              ? (input['path'] as string[]).map(String)
+              : [],
+            value: input['value'] !== undefined ? (input['value'] as JsonValue) : null,
+            label: typeof input['label'] === 'string' ? input['label'] : undefined,
+          },
+        };
+      }
+      if (action === 'clear_mocks') {
+        return { tool: 'set_app_state', input: { action: 'clear_mocks' } };
+      }
+      return null;
     }
     default:
       return null;
@@ -540,6 +747,106 @@ async function _execReplaceImage(
     };
   } catch (err) {
     return { ok: false, output: '', error: `replace_image failed: ${String(err)}` };
+  }
+}
+
+async function _execSetAppState(
+  input: SetAppStateInput,
+  ctx: ToolExecutorContext,
+): Promise<ToolResult> {
+  // Guard: feature must be wired up.
+  if (!ctx.puppeteer) {
+    return {
+      ok: false,
+      output: '',
+      error: 'State Puppeteer is unavailable in this context.',
+    };
+  }
+
+  // Guard: user must have toggled puppeteer on.
+  if (!ctx.puppeteer.isEnabled()) {
+    return {
+      ok: false,
+      output: '',
+      error:
+        'State Puppeteer is not enabled. Ask the user to turn on the ' +
+        'State Puppeteer toggle in the Easel panel, then try again.',
+    };
+  }
+
+  // Guard: policy must permit it.
+  const policyCheck = ctx.puppeteer.allowed();
+  if (!policyCheck.ok) {
+    return {
+      ok: false,
+      output: '',
+      error: policyCheck.reason ?? 'State Puppeteer is blocked by the project policy.',
+    };
+  }
+
+  // Perform the requested action.
+  switch (input.action) {
+    case 'mock_fetch': {
+      const spec: FetchMockSpec = {
+        id: ctx.puppeteer.genId(),
+        urlPattern: input.url_pattern,
+        ...(input.method ? { method: input.method } : {}),
+        ...(input.match ? { match: input.match } : {}),
+        ...(typeof input.status === 'number' ? { status: input.status } : {}),
+        ...(input.json_body !== undefined ? { jsonBody: input.json_body } : {}),
+        ...(input.text_body !== undefined ? { textBody: input.text_body } : {}),
+        ...(typeof input.delay_ms === 'number' ? { delayMs: input.delay_ms } : {}),
+        ...(typeof input.once === 'boolean' ? { once: input.once } : {}),
+        ...(input.label ? { label: input.label } : {}),
+      };
+      ctx.puppeteer.setMock(spec);
+
+      const methodDesc = input.method ? input.method.toUpperCase() : 'ANY';
+      const matchDesc = input.match ?? 'substring';
+      const bodyDesc =
+        input.json_body !== undefined
+          ? `JSON (${JSON.stringify(input.json_body).slice(0, 60)}${JSON.stringify(input.json_body).length > 60 ? '…' : ''})`
+          : input.text_body !== undefined
+            ? `text (${input.text_body.slice(0, 40)}${input.text_body.length > 40 ? '…' : ''})`
+            : 'empty body';
+      const statusDesc = input.status ?? 200;
+      const description =
+        input.label
+          ? `"${input.label}"`
+          : `${methodDesc} ${matchDesc}:${input.url_pattern} → ${statusDesc} ${bodyDesc}`;
+
+      return {
+        ok: true,
+        output: `Installed fetch mock: ${description}${input.once ? ' (fires once)' : ''}.`,
+      };
+    }
+
+    case 'set_state': {
+      const override: StateOverride = {
+        id: ctx.puppeteer.genId(),
+        selector: input.selector,
+        path: input.path,
+        value: input.value,
+        ...(input.label ? { label: input.label } : {}),
+      };
+      ctx.puppeteer.setStateOverride(override);
+
+      const pathDesc = input.path.join('.');
+      const valueDesc = JSON.stringify(input.value).slice(0, 60);
+      const description = input.label
+        ? `"${input.label}"`
+        : `${input.selector} → ${pathDesc} = ${valueDesc}`;
+
+      return {
+        ok: true,
+        output: `Applied state override: ${description}. Reload to restore reality.`,
+      };
+    }
+
+    case 'clear_mocks': {
+      ctx.puppeteer.clearMocks();
+      return { ok: true, output: 'All active fetch mocks cleared.' };
+    }
   }
 }
 

@@ -31,6 +31,8 @@ import type {
   XraySetNetworkCaptureRequest,
   XraySaveSnapshotRequest,
   XrayGetSnapshotRequest,
+  PuppeteerSetEnabledRequest,
+  PuppeteerRemoveMockRequest,
   TokensMatchRequest,
   PublishOpenPrRequest,
   ProjectCreateNewRequest,
@@ -83,6 +85,13 @@ import {
   getSnapshot,
   listSnapshots,
 } from '@main/stateSnapshots';
+import {
+  getState as getPuppeteerState,
+  setEnabled as setPuppeteerEnabled,
+  removeMock as removePuppeteerMock,
+  clearAll as clearPuppeteerAll,
+  resync as resyncPuppeteer,
+} from '@main/puppeteer';
 
 const log = createLogger('ipc');
 
@@ -402,6 +411,38 @@ export function registerIpcHandlers(): void {
 
   handle(IpcChannels.xrayListSnapshots, () => {
     return ok({ checkpointIds: listSnapshots() });
+  });
+
+  // ── puppeteer.* (Live State Puppeteer, issue #17) ────────────────────────────
+
+  handle(IpcChannels.puppeteerGetState, () => {
+    return ok({ state: getPuppeteerState() });
+  });
+
+  handle(IpcChannels.puppeteerSetEnabled, (req: PuppeteerSetEnabledRequest) => {
+    // Enabling is policy-gated; needs the open project to read .easel/policy.json.
+    const project = getCurrentProject();
+    if (!project) return fail('No project open', 'no-project');
+    const { state, detail } = setPuppeteerEnabled(req.enabled, project.root);
+    return ok(detail ? { state, detail } : { state });
+  });
+
+  handle(IpcChannels.puppeteerRemoveMock, (req: PuppeteerRemoveMockRequest) => {
+    if (!req.id) return fail('mock id is required', 'validation');
+    removePuppeteerMock(req.id);
+    return ok({ state: getPuppeteerState() });
+  });
+
+  handle(IpcChannels.puppeteerClearAll, () => {
+    clearPuppeteerAll();
+    return ok({ state: getPuppeteerState() });
+  });
+
+  handle(IpcChannels.puppeteerResync, () => {
+    // Re-push enabled + mocks into a freshly (re)loaded guest. Re-checks policy
+    // when a project is open so a mid-session policy change takes effect.
+    resyncPuppeteer(getCurrentProject()?.root);
+    return okVoid();
   });
 
   // ── tokens.* (Issue #8) ──────────────────────────────────────────────────────

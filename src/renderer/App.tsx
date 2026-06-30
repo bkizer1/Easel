@@ -28,6 +28,7 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { NewSiteWizard } from './components/NewSiteWizard';
 import { PolicyPrompt } from './components/PolicyPrompt';
 import { StateXRayPanel } from './components/StateXRayPanel';
+import { PuppeteerPanel } from './components/PuppeteerPanel';
 import { TweakPanel } from './components/TweakPanel';
 import { TokenPanel } from './components/TokenPanel';
 
@@ -145,6 +146,7 @@ export default function App(): JSX.Element {
   const settingsOpen = useEaselStore((s) => s.settingsOpen);
   const needsAuth = useEaselStore((s) => s.needsAuth);
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
+  const puppeteerOpen = useEaselStore((s) => s.puppeteerOpen);
   const newSiteOpen = useEaselStore((s) => s.newSiteOpen);
 
   // Apply theme whenever settings change.
@@ -227,6 +229,13 @@ export default function App(): JSX.Element {
         {xrayOpen && (
           <div className="shrink-0 hairline-t h-72 bg-ink-900/60">
             <StateXRayPanel />
+          </div>
+        )}
+
+        {/* Live State Puppeteer panel: dockable bottom panel (issue #17) */}
+        {puppeteerOpen && (
+          <div className="shrink-0 hairline-t h-72 bg-ink-900/60">
+            <PuppeteerPanel />
           </div>
         )}
 

@@ -32,6 +32,7 @@ import type {
 import type { GridConfig } from './grid';
 import type { ElementStateSnapshot, NetworkEntry, StateSnapshot } from './xray';
 import type { NewSiteBrief } from './siteBrief';
+import type { FetchMockSpec, JsonValue, PuppeteerState } from './puppeteer';
 
 /* -------------------------------------------------------------------------- */
 /*  Channel names                                                              */
@@ -146,6 +147,20 @@ export const IpcChannels = {
   xrayListSnapshots: 'xray.listSnapshots',
   /** Emitted by main as network requests are observed (CDP). */
   networkEvent: 'network.event',
+
+  // Live State Puppeteer (issue #17) ----------------------------------------
+  /** Read the authoritative puppeteer state (enabled + active mocks/overrides). */
+  puppeteerGetState: 'puppeteer.getState',
+  /** Opt in/out of puppeteer control (policy-gated). Installs/removes the guest hook. */
+  puppeteerSetEnabled: 'puppeteer.setEnabled',
+  /** Remove a single active fetch mock by id. */
+  puppeteerRemoveMock: 'puppeteer.removeMock',
+  /** Clear all active mocks + recorded state overrides (stays enabled). */
+  puppeteerClearAll: 'puppeteer.clearAll',
+  /** Re-push the active enabled+mocks state into a freshly (re)loaded guest. */
+  puppeteerResync: 'puppeteer.resync',
+  /** Emitted by main when puppeteer state changes (toggle, mock added/removed). */
+  puppeteerChanged: 'puppeteer.changed',
 
   // Tokens (Issue #8) -------------------------------------------------------
   /** Match a picked element's computed values against the project's design tokens. */
@@ -438,6 +453,31 @@ export interface NetworkEventPayload {
   entry: NetworkEntry;
 }
 
+// puppeteer.* (Live State Puppeteer, issue #17) -----------------------------
+
+export interface PuppeteerGetStateResponse {
+  state: PuppeteerState;
+}
+
+export interface PuppeteerSetEnabledRequest {
+  enabled: boolean;
+}
+export interface PuppeteerSetEnabledResponse {
+  /** Effective state after the request (enabled stays false if policy blocked). */
+  state: PuppeteerState;
+  /** Reason the requested enable could not be honoured (e.g. policy, no preview). */
+  detail?: string;
+}
+
+export interface PuppeteerRemoveMockRequest {
+  id: string;
+}
+
+/** Pushed on {@link IpcChannels.puppeteerChanged} when puppeteer state changes. */
+export interface PuppeteerChangedPayload {
+  state: PuppeteerState;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Event payloads (push channels, main -> renderer)                          */
 /* -------------------------------------------------------------------------- */
@@ -590,6 +630,22 @@ export interface EaselApi {
     onNetworkEvent(handler: (payload: NetworkEventPayload) => void): Unsubscribe;
   };
 
+  /** Live State Puppeteer (issue #17). Main owns the authoritative state. */
+  puppeteer: {
+    /** Read the current puppeteer state (enabled + active mocks/overrides). */
+    getState(): Promise<IpcResult<PuppeteerGetStateResponse>>;
+    /** Opt in/out of puppeteer control. Policy-gated; installs/removes the guest hook. */
+    setEnabled(req: PuppeteerSetEnabledRequest): Promise<IpcResult<PuppeteerSetEnabledResponse>>;
+    /** Remove a single active fetch mock by id. */
+    removeMock(req: PuppeteerRemoveMockRequest): Promise<IpcResult<PuppeteerGetStateResponse>>;
+    /** Clear all active mocks + recorded state overrides. */
+    clearAll(): Promise<IpcResult<PuppeteerGetStateResponse>>;
+    /** Re-push the active enabled+mocks state into a freshly (re)loaded guest. */
+    resync(): Promise<IpcResult<void>>;
+    /** Subscribe to authoritative puppeteer state changes. */
+    onChanged(handler: (payload: PuppeteerChangedPayload) => void): Unsubscribe;
+  };
+
   // ── Issue #8: Live token inspector ──────────────────────────────────────────
   tokens: {
     /** Match computed values against the open project's design tokens. */
@@ -664,6 +720,18 @@ export interface IpcInvokeMap {
   };
   [IpcChannels.xrayListSnapshots]: { request: void; response: IpcResult<XrayListSnapshotsResponse> };
 
+  [IpcChannels.puppeteerGetState]: { request: void; response: IpcResult<PuppeteerGetStateResponse> };
+  [IpcChannels.puppeteerSetEnabled]: {
+    request: PuppeteerSetEnabledRequest;
+    response: IpcResult<PuppeteerSetEnabledResponse>;
+  };
+  [IpcChannels.puppeteerRemoveMock]: {
+    request: PuppeteerRemoveMockRequest;
+    response: IpcResult<PuppeteerGetStateResponse>;
+  };
+  [IpcChannels.puppeteerClearAll]: { request: void; response: IpcResult<PuppeteerGetStateResponse> };
+  [IpcChannels.puppeteerResync]: { request: void; response: IpcResult<void> };
+
   [IpcChannels.tokensMatch]: { request: TokensMatchRequest; response: IpcResult<TokensMatchResponse> };
 
   [IpcChannels.publishOpenPr]: { request: PublishOpenPrRequest; response: IpcResult<PublishOpenPrResponse> };
@@ -683,6 +751,7 @@ export interface IpcEventMap {
   [IpcChannels.previewStatus]: PreviewStatusPayload;
   [IpcChannels.devServerEvent]: DevServerStatePayload;
   [IpcChannels.networkEvent]: NetworkEventPayload;
+  [IpcChannels.puppeteerChanged]: PuppeteerChangedPayload;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -858,4 +927,37 @@ export type InspectorCommand =
       /** Drop all inline tweaks on the element, restoring its source styling. */
       type: 'discard-style';
       selector: string;
+    }
+  // ── Issue #17: Live State Puppeteer (main → guest; policy + opt-in gated) ────
+  | {
+      /**
+       * Install (or uninstall) the guest fetch/XHR interception monkeypatch. On
+       * `enabled: false` the guest restores the native `fetch`/`XMLHttpRequest`
+       * and drops all active mocks. Sent by main when the user toggles puppeteer
+       * and re-sent on guest reload to keep interception sticky.
+       */
+      type: 'puppeteer-enable';
+      enabled: boolean;
+    }
+  | {
+      /**
+       * Replace the guest's full active mock set (first match wins). Main owns the
+       * authoritative list and pushes the whole list on every change + on resync,
+       * so the guest never drifts. No-op unless puppeteer is enabled.
+       */
+      type: 'puppeteer-set-mocks';
+      mocks: FetchMockSpec[];
+    }
+  | {
+      /**
+       * Write a structured JSON value into the framework state of the element
+       * matching `selector` at `path` (reuses the State X-Ray fiber tap). One-shot
+       * and ephemeral — a reload restores the app's real state. No-op unless
+       * puppeteer is enabled.
+       */
+      type: 'puppeteer-set-state';
+      selector: string;
+      /** Machine path from a {@link import('./xray').StateEntry}, e.g. `['state','items']`. */
+      path: string[];
+      value: JsonValue;
     };
