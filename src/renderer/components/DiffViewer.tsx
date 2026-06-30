@@ -14,6 +14,7 @@ import React, { useState } from 'react';
 import { ChevronDown, ChevronRight, Check, RotateCcw, FileText } from 'lucide-react';
 import type { FileDiff } from '@shared/types';
 import { useEaselStore } from '../store';
+import { resolveRollbackTarget } from '../lib/rollback';
 import { Tooltip } from './Tooltip';
 
 /* -------------------------------------------------------------------------- */
@@ -172,15 +173,11 @@ export function DiffViewer({ diffs, checkpointId, onDismiss }: Props): React.Rea
   if (diffs.length === 0) return null;
 
   async function handleReject(): Promise<void> {
-    if (!checkpointId) {
-      onDismiss();
-      return;
-    }
-    // Find the checkpoint immediately before this one (the "previous" state).
-    const idx = checkpoints.findIndex((c) => c.id === checkpointId);
-    const previous = idx >= 0 ? checkpoints[idx + 1] : undefined;
-    if (previous) {
-      await restoreCheckpoint(previous.id);
+    // Restore the checkpoint immediately before this edit (the "previous"
+    // state) — see resolveRollbackTarget, shared with the verify-fail rollback.
+    const previousId = resolveRollbackTarget(checkpoints, checkpointId);
+    if (previousId) {
+      await restoreCheckpoint(previousId);
     }
     onDismiss();
   }

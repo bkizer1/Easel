@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import type {
   AgentEvent,
   AppSettings,
+  BoundingBox,
   Checkpoint,
   CheckpointProvenance,
   ConfidenceLevel,
@@ -292,6 +293,12 @@ export interface RunEditStreamOptions {
    * edit's checkpoint settles. Omitted ⇒ the verify step is skipped entirely.
    */
   verify?: VerifyFn;
+  /**
+   * Issue #31: max bounded auto-retries after a failed verify verdict. Defaults
+   * to `settings.maxRetries` at the IPC layer; 0 disables retry (verify becomes
+   * observe-only). Hard-capped by {@link RETRY_CEILING} regardless.
+   */
+  maxRetries?: number;
 }
 
 /**
@@ -352,27 +359,24 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
   const logger = createLogger(`agent:${requestId.slice(0, 8)}`);
 
   // Track the latest confidence the backend reports so it can be recorded as
-  // checkpoint provenance when the backend requests a checkpoint.
+  // checkpoint provenance when the backend requests a checkpoint. Reset per
+  // attempt so a retry's checkpoint records its own confidence.
   let latestConfidence: ConfidenceLevel | undefined;
 
-  const ctx: AgentBackendContext = {
-    projectRoot,
-    settings,
-    secrets,
-    fs: fsInstance,
-    imageProvider: getActiveImageProvider(),
-    logger,
-    signal: controller.signal,
-    createCheckpoint: (message, rid) =>
-      createCheckpointFn(message, rid, buildProvenance(request, settings, latestConfidence)),
-    checkWrite: (relativePath) => gate.check(relativePath),
-  };
+  // Issue #16: whether the self-heal verify step can run AT ALL. Computed once
+  // (flag on + a judge injected); the per-attempt `succeeded` gate is applied
+  // inside the loop. When false, the loop short-circuits exactly like today's
+  // verify-off path (no settle, no verify/verifying/retrying).
+  const verifyEnabled = settings.featureFlags.selfHealVerify && opts.verify !== undefined;
+  const maxRetries = opts.maxRetries ?? 0;
 
-  // Issue #7: capture the pre-edit preview frame before the agent runs.
+  // Issue #7: capture the pre-edit preview frame ONCE before any attempt runs.
+  // Reused for every attempt's checkpoint visual diff and full-frame verify.
   const beforeShot = await _captureShot();
-  let shotCheckpointId: string | undefined;
 
   try {
+    // Resolve the backend ONCE outside the loop; every attempt re-runs its
+    // editStream with the same context (the AbortController + gate are shared).
     const { getBackendRegistry } = await import('@main/agents/index');
     const registry = getBackendRegistry();
     const backend = registry[settings.agentBackend](settings);
@@ -382,51 +386,117 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
       backend: backend.id,
       model: settings.model,
       policy: loadedPolicy.source,
+      maxRetries,
     });
 
-    let succeeded = false;
-    for await (const event of backend.editStream(request, ctx)) {
-      if (event.type === 'confidence') latestConfidence = event.level;
-      // Issue #7: remember the checkpoint to key before/after screenshots on.
-      if (event.type === 'checkpoint') shotCheckpointId = event.checkpoint.id;
-      _pushEvent(event);
-      // A terminal event ends the stream.
-      if (event.type === 'done' || event.type === 'error') {
-        succeeded = event.type === 'done';
-        break;
-      }
-    }
+    /**
+     * Run ONE edit attempt for `req`: stream the backend, push each event,
+     * track the checkpoint for the visual diff, capture the settled after-frame,
+     * and persist the FULL-viewport before/after shots. Returns whether the
+     * attempt ended on `done` plus the settled after-frame for the judge.
+     */
+    const runAttempt = async (
+      req: EditRequest,
+    ): Promise<{ succeeded: boolean; after: string | undefined }> => {
+      latestConfidence = undefined;
+      let shotCheckpointId: string | undefined;
 
-    // Whether the self-heal verify step (issue #16) will actually run. Computed
-    // up front so we only pay the HMR settle + capture when an "after" frame is
-    // genuinely needed (a checkpoint to illustrate, or verify enabled) — not on
-    // every successful no-checkpoint edit with verify off.
-    const wantVerify =
-      succeeded && settings.featureFlags.selfHealVerify && opts.verify !== undefined;
-
-    // Issue #7 + #16: capture the settled "after" frame ONCE and reuse it for
-    // both the checkpoint visual diff and the verify judge (no double settle).
-    let afterShot: string | undefined;
-    if (shotCheckpointId !== undefined || wantVerify) {
-      afterShot = await _captureAfterShot();
-    }
-    await _persistCheckpointShots(shotCheckpointId, beforeShot, afterShot);
-
-    // Issue #16: self-heal verify — only judge edits that completed successfully.
-    // Purely additive and fail-open: it runs after the terminal event was already
-    // pushed, so it can never alter the edit it follows. Decoupled from the
-    // checkpoint, so it also fires for successful edits that made no checkpoint.
-    if (wantVerify) {
-      await runVerifyStep({
-        request,
+      const ctx: AgentBackendContext = {
+        projectRoot,
         settings,
-        before: beforeShot,
-        after: afterShot,
-        verify: opts.verify,
-        emit: _pushEvent,
+        secrets,
+        fs: fsInstance,
+        imageProvider: getActiveImageProvider(),
+        logger,
         signal: controller.signal,
-      });
-    }
+        createCheckpoint: (message, rid) =>
+          createCheckpointFn(message, rid, buildProvenance(req, settings, latestConfidence)),
+        checkWrite: (relativePath) => gate.check(relativePath),
+      };
+
+      let succeeded = false;
+      for await (const event of backend.editStream(req, ctx)) {
+        if (event.type === 'confidence') latestConfidence = event.level;
+        // Issue #7: remember the checkpoint to key before/after screenshots on.
+        if (event.type === 'checkpoint') shotCheckpointId = event.checkpoint.id;
+        _pushEvent(event);
+        // A terminal event ends the stream.
+        if (event.type === 'done' || event.type === 'error') {
+          succeeded = event.type === 'done';
+          break;
+        }
+      }
+
+      // Issue #7 + #16: capture the settled "after" frame ONCE and reuse it for
+      // both the checkpoint visual diff and the verify judge (no double settle).
+      // Only pay the HMR settle + capture when an after-frame is genuinely needed
+      // (a checkpoint to illustrate, or verify enabled for a successful attempt).
+      let after: string | undefined;
+      if (shotCheckpointId !== undefined || (verifyEnabled && succeeded)) {
+        after = await _captureAfterShot();
+      }
+      // Issue #33 INVARIANT: persist the FULL-viewport before/after frames for the
+      // #7 checkpoint visual diff. The cropped frame in `judge` is a separate copy
+      // used only by the verify judge — the persisted shots are never cropped.
+      await _persistCheckpointShots(shotCheckpointId, beforeShot, after);
+
+      return { succeeded, after };
+    };
+
+    /**
+     * Return the judge's verdict for an attempt WITHOUT emitting. Applies the
+     * #33 crop logic (a fresh region-cropped after-frame focuses the judge on the
+     * edited element; falls back to the full before/after frames otherwise) and
+     * calls the injected judge. Fail-open: never throws, returns `null` on any
+     * failure / flag-off / no-judge so the loop stops cleanly.
+     */
+    const judge = async (after: string | undefined): Promise<VisionVerdict | null> => {
+      try {
+        if (!verifyEnabled || !opts.verify) return null;
+        if (controller.signal.aborted) return null;
+
+        // Issue #33: focus the judge on the edited element when we have a usable
+        // target box. We capture a FRESH cropped "after" via capturePreview(box)
+        // and pass { before: undefined, after: cropped } — cropping the pre-edit
+        // "before" is not feasible (no in-repo PNG cropper), and the judge
+        // tolerates an absent before. Any failure (degenerate box, no targets, or
+        // a capture error) falls back to the full-frame before/after path.
+        const cropBox = request.targets[0]?.boundingBox;
+        let croppedAfter: string | undefined;
+        if (!isDegenerateCrop(cropBox)) {
+          croppedAfter = await _captureCroppedShot(cropBox!);
+        }
+
+        if (croppedAfter !== undefined) {
+          return await opts.verify({
+            instruction: request.instruction,
+            before: undefined,
+            after: croppedAfter,
+            signal: controller.signal,
+          });
+        }
+        if (!after) return null;
+        return await opts.verify({
+          instruction: request.instruction,
+          before: beforeShot,
+          after,
+          signal: controller.signal,
+        });
+      } catch {
+        // Fail-open: a verify failure must never disrupt the edit it follows.
+        return null;
+      }
+    };
+
+    await runSelfHealLoop({
+      request,
+      maxRetries,
+      wantVerify: verifyEnabled,
+      runAttempt,
+      judge,
+      emit: _pushEvent,
+      signal: controller.signal,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error('Edit stream error', { requestId, err: msg });
@@ -442,6 +512,128 @@ export async function runEditStream(opts: RunEditStreamOptions): Promise<void> {
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Issue #31: bounded one-shot self-heal auto-retry                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Hard ceiling on auto-retries regardless of the configured `maxRetries`, so a
+ * misconfigured setting can never spin the edit loop unboundedly. Total attempts
+ * are bounded by `1 + min(maxRetries, RETRY_CEILING)`.
+ */
+export const RETRY_CEILING = 5;
+
+/**
+ * Issue #31: build the retry {@link EditRequest} for a failed verify verdict.
+ * Pure and exported for direct unit testing. The retry:
+ *  - reuses the SAME `id` (the renderer re-arms correlation on the `retrying`
+ *    event so the reused id's events are not dropped),
+ *  - augments the instruction with a clearly-delimited self-heal block embedding
+ *    the judge's rationale, and
+ *  - passes the current visual state (`afterFrame`) as the screenshot context so
+ *    the agent sees what it produced last time.
+ * All other fields (annotations/targets/projectRoot/devServerUrl) are copied
+ * from the original request unchanged.
+ */
+export function buildRetryRequest(
+  original: EditRequest,
+  rationale: string,
+  afterFrame: string | undefined,
+): EditRequest {
+  return {
+    id: original.id,
+    instruction:
+      original.instruction +
+      `\n\n[Self-heal retry] The previous attempt did not satisfy the request. ` +
+      `Reviewer feedback: ${rationale}\nPlease correct the issue.`,
+    annotations: original.annotations,
+    targets: original.targets,
+    screenshotDataUrl: afterFrame,
+    projectRoot: original.projectRoot,
+    devServerUrl: original.devServerUrl,
+  };
+}
+
+/**
+ * Issue #31: the testable, Electron-free core of the bounded self-heal loop. It
+ * runs edit attempts and, on a failed verify verdict, resubmits the edit ONCE
+ * per allowed retry (converge-or-stop). Every effect is injected (`runAttempt`,
+ * `judge`, `emit`) so it can be unit tested without a real backend or GUI.
+ *
+ * Loop semantics (attempt counter starts at 1):
+ *  1. Run the current request via `runAttempt`.
+ *  2. If verify is off or the attempt did not succeed → STOP (matches today's
+ *     behavior for failed/observe-off edits; no verify/verifying/retrying).
+ *  3. Emit `verifying`, then call `judge` (no emit).
+ *  4. `null` verdict (fail-open: flag off / no judge / threw / unparseable) →
+ *     STOP, emit nothing more.
+ *  5. `pass` OR out of retries OR aborted → emit the TERMINAL `verify` event and
+ *     STOP.
+ *  6. Otherwise (fail AND retries left AND not aborted) → emit `retrying`
+ *     (instead of an intermediate `verify`), rebuild the request, and loop.
+ *
+ * INVARIANTS: the `verify` event is emitted EXACTLY ONCE per turn (the terminal
+ * verdict). The loop is HARD-bounded by `1 + min(maxRetries, RETRY_CEILING)`.
+ * It never throws (the judge is fail-open at the call site).
+ */
+export async function runSelfHealLoop(opts: {
+  request: EditRequest;
+  maxRetries: number;
+  wantVerify: boolean;
+  runAttempt: (req: EditRequest) => Promise<{ succeeded: boolean; after: string | undefined }>;
+  judge: (after: string | undefined) => Promise<VisionVerdict | null>;
+  emit: (e: AgentEvent) => void;
+  signal: AbortSignal;
+}): Promise<void> {
+  const { request, wantVerify, runAttempt, judge, emit, signal } = opts;
+  const requestId = request.id;
+  const retryBudget = Math.max(0, Math.min(opts.maxRetries, RETRY_CEILING));
+
+  let currentRequest = request;
+  let attempt = 1;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { succeeded, after } = await runAttempt(currentRequest);
+
+    // No verify (flag off / no judge) or the attempt failed: stop exactly like
+    // today's behavior — no verify/verifying/retrying for failed/observe-off edits.
+    if (!wantVerify || !succeeded) return;
+
+    emit({ type: 'verifying', requestId });
+
+    const verdict = await judge(after);
+    // Fail-open: no verdict (no key / judge threw / unparseable / aborted). Emit
+    // `verify-skipped` to TEAR DOWN the `verifying` phase the UI just showed —
+    // otherwise the transient affordance would stick forever — then stop. No
+    // verify badge (there is no verdict to report).
+    if (verdict == null) {
+      emit({ type: 'verify-skipped', requestId });
+      return;
+    }
+
+    const outOfRetries = attempt > retryBudget;
+    if (verdict.verdict === 'pass' || outOfRetries || signal.aborted) {
+      // Terminal verdict: emit the single `verify` event exactly as runVerifyStep
+      // does, then stop.
+      emit({
+        type: 'verify',
+        requestId,
+        verdict: verdict.verdict,
+        rationale: verdict.rationale,
+        ...(verdict.confidence !== undefined ? { confidence: verdict.confidence } : {}),
+      });
+      return;
+    }
+
+    // Fail AND a retry is allowed AND not aborted: re-arm the renderer and loop.
+    // Emit `retrying` INSTEAD of an intermediate `verify`.
+    emit({ type: 'retrying', requestId, attempt: attempt + 1, rationale: verdict.rationale });
+    currentRequest = buildRetryRequest(request, verdict.rationale, after);
+    attempt++;
+  }
+}
+
 /** Push a single AgentEvent to the renderer. */
 function _pushEvent(event: AgentEvent): void {
   const win = getMainWindow();
@@ -454,8 +646,16 @@ function _pushEvent(event: AgentEvent): void {
 /*  Issue #7: checkpoint visual diff — before/after screenshots                */
 /* -------------------------------------------------------------------------- */
 
-/** Delay after a checkpoint before capturing "after" so HMR has re-rendered. */
-const SHOT_SETTLE_MS = 600;
+/**
+ * Issue #33: poll-until-stable settle. Instead of a single fixed delay (which
+ * sometimes snapshots the page mid-reload on a slow Vite/HMR cycle), capture
+ * repeatedly and stop as soon as two consecutive frames are byte-identical —
+ * identical PNG bytes from the same `capturePage` encode ⇒ HMR has settled.
+ */
+/** How long to wait between successive settle captures. */
+const SHOT_POLL_INTERVAL_MS = 150;
+/** Hard cap on total settle wall time; return the latest frame after this. */
+const SHOT_MAX_WAIT_MS = 2500;
 
 /** Capture the current preview as a PNG data URL (best-effort, never throws). */
 async function _captureShot(): Promise<string | undefined> {
@@ -470,10 +670,124 @@ async function _captureShot(): Promise<string | undefined> {
   }
 }
 
-/** Wait for HMR to settle, then capture the "after" preview frame (best-effort). */
+/** Resolve after `ms` milliseconds. Factored out so the poll loop is injectable. */
+function _sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Issue #33: the pure, Electron-free core of the poll-until-stable settle. It is
+ * exported and fully injectable (both `capture` and `sleep`) so it can be unit
+ * tested without a real window or timers.
+ *
+ * Behavior:
+ *  - Captures, sleeps `intervalMs`, captures again, and returns as soon as two
+ *    consecutive captures are byte-identical (same non-`undefined` data URL).
+ *  - Caps total wall time at ~`maxWaitMs` (counted as elapsed sleep time); once
+ *    reached it returns the most recent captured frame anyway.
+ *  - Treats an `undefined` capture as "not yet stable" and keeps polling. Two
+ *    consecutive `undefined`s are NOT considered stable — only equal, defined
+ *    frames count, so a transient capture failure never short-circuits the loop.
+ *  - Never throws: a `capture` rejection is swallowed and treated as `undefined`.
+ *    Falls back to returning whatever was last captured (or `undefined`).
+ */
+export async function pollUntilStable(opts: {
+  capture: () => Promise<string | undefined>;
+  sleep: (ms: number) => Promise<void>;
+  intervalMs: number;
+  maxWaitMs: number;
+}): Promise<string | undefined> {
+  const { capture, sleep, intervalMs, maxWaitMs } = opts;
+
+  const safeCapture = async (): Promise<string | undefined> => {
+    try {
+      return await capture();
+    } catch {
+      return undefined;
+    }
+  };
+
+  let last = await safeCapture();
+  let elapsed = 0;
+  // A non-negative interval guards against an infinite zero-progress loop.
+  const step = Math.max(1, intervalMs);
+
+  while (elapsed < maxWaitMs) {
+    await sleep(step);
+    elapsed += step;
+    const next = await safeCapture();
+    // Two consecutive equal, defined frames ⇒ pixels are stable ⇒ HMR settled.
+    if (next !== undefined && next === last) return next;
+    last = next;
+  }
+
+  return last;
+}
+
+/**
+ * Wait for HMR to settle via {@link pollUntilStable}, then return the "after"
+ * preview frame (best-effort). Wraps the pure loop with the real capture +
+ * sleep. Never throws — the poll loop swallows capture failures and falls back
+ * to the latest captured frame (or `undefined`). NOTE for issue #31 (retry):
+ * a retry that re-captures simply calls this again; the loop is idempotent and
+ * self-contained, so re-invocation is safe.
+ */
 async function _captureAfterShot(): Promise<string | undefined> {
-  await new Promise((resolve) => setTimeout(resolve, SHOT_SETTLE_MS));
-  return _captureShot();
+  return pollUntilStable({
+    capture: _captureShot,
+    sleep: _sleep,
+    intervalMs: SHOT_POLL_INTERVAL_MS,
+    maxWaitMs: SHOT_MAX_WAIT_MS,
+  });
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #33: region-cropped verify frame                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Issue #33: decide whether a target {@link BoundingBox} is unusable for
+ * cropping the verify frame. Pure and exported for direct unit testing.
+ *
+ * A box is degenerate when:
+ *  - it is missing, or has a non-finite coordinate/extent, or
+ *  - its width or height is zero or negative, or
+ *  - (only when a `viewport` is supplied) it starts off-screen (negative x/y)
+ *    or extends beyond the viewport bounds.
+ *
+ * The bounding box is captured in PRE-EDIT viewport coordinates; the element may
+ * have moved or resized after the edit, so callers MUST treat a degenerate box
+ * (and the no-target case) as a signal to fall back to the full-viewport frame.
+ */
+export function isDegenerateCrop(box: BoundingBox | undefined, viewport?: BoundingBox): boolean {
+  if (!box) return true;
+  const { x, y, width, height } = box;
+  if (![x, y, width, height].every((n) => Number.isFinite(n))) return true;
+  if (width <= 0 || height <= 0) return true;
+  if (viewport) {
+    if (x < 0 || y < 0) return true;
+    if (x + width > viewport.width || y + height > viewport.height) return true;
+  }
+  return false;
+}
+
+/**
+ * Issue #33: capture a fresh "after" frame cropped to `box` (best-effort, never
+ * throws). Returns `undefined` on any failure so the caller falls back to the
+ * full frame. The crop is a SEPARATE capture from the persisted full-viewport
+ * shots — it is only ever handed to the verify judge, never persisted for the
+ * #7 checkpoint visual diff.
+ */
+async function _captureCroppedShot(box: BoundingBox): Promise<string | undefined> {
+  try {
+    const win = getMainWindow();
+    if (!win) return undefined;
+    const { capturePreview } = await import('@main/window');
+    if (typeof capturePreview !== 'function') return undefined;
+    return await capturePreview(box);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -481,6 +795,10 @@ async function _captureAfterShot(): Promise<string | undefined> {
  * best-effort: the visual diff is a non-essential aid, so any failure here must
  * never affect the edit. The `after` frame is captured by the caller (once, via
  * {@link _captureAfterShot}) so it can be shared with the verify step (#16).
+ *
+ * INVARIANT (issue #33): the frames persisted here MUST stay full-viewport. Any
+ * region-cropped frame is a separate copy handed only to the verify judge — it
+ * is never persisted here.
  */
 async function _persistCheckpointShots(
   checkpointId: string | undefined,

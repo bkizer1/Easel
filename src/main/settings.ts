@@ -82,6 +82,7 @@ function defaultSettings(): AppSettings {
       selfHealVerify: false,
     },
     theme: 'system',
+    maxRetries: 1,
     macros: [],
   };
 }

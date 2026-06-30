@@ -40,6 +40,14 @@ import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
+import { mergeFileDiffs } from './lib/mergeFileDiffs';
+import {
+  isStaleSelfHeal,
+  nextCorrelationOnRetrying,
+  selfHealPhaseOnRetrying,
+  selfHealPhaseOnVerifying,
+} from './lib/selfHealLoop';
+import type { SelfHealPhase } from './lib/selfHealTypes';
 import { DEFAULT_GRID, type GridConfig } from '@shared/grid';
 import { resolveMacroInstruction } from '@shared/macros';
 import {
@@ -196,6 +204,13 @@ export interface EaselState {
   activeRequestId: string | null;
   /** True while an edit is streaming; gates submit and drives spinner. */
   streaming: boolean;
+  /**
+   * Issue #31: the current self-heal lifecycle phase (verifying / bounded
+   * auto-retry), or null when idle. Set from the `verifying`/`retrying`
+   * AgentEvents and cleared on the terminal `verify`/`error`. Issue #32 renders
+   * this; #31 only wires the state + correlation re-arm.
+   */
+  selfHealPhase: SelfHealPhase | null;
   /** Live FileDiffs accumulated during the current (or most recent) edit. */
   liveDiffs: FileDiff[];
   /** Ordered checkpoint timeline for the open project, newest first. */
@@ -555,6 +570,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   chat: [],
   activeRequestId: null,
   streaming: false,
+  selfHealPhase: null,
   liveDiffs: [],
   checkpoints: [],
   currentCheckpointId: undefined,
@@ -700,6 +716,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       chat: [],
       activeRequestId: null,
       streaming: false,
+      selfHealPhase: null,
       liveDiffs: [],
       checkpoints: [],
       currentCheckpointId: undefined,
@@ -1005,6 +1022,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       streaming: true,
       liveDiffs: [],
       lastError: null,
+      // Issue #31: a new turn always starts from a clean self-heal phase, so a
+      // prior turn's phase (e.g. a fail-open verify) can never bleed into it.
+      selfHealPhase: null,
     }));
 
     // Intentionally keep the draft selection (annotations + targets) on screen
@@ -1282,6 +1302,16 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'done': {
         if (e.requestId !== activeRequestId) return;
 
+        // Issue #32 fix B: when this `done` finalizes a self-heal RETRY attempt,
+        // the backend reports ONLY the retry invocation's diffs. Replacing the
+        // bubble/live diffs with those would drop files attempt 1 edited but the
+        // retry didn't re-touch. UNION the incoming diffs over the already-
+        // accumulated `liveDiffs` (keyed by filePath, incoming wins). A brand-new
+        // turn's first `done` has `selfHealPhase === null` and still REPLACES.
+        const sh = get().selfHealPhase;
+        const isRetryDone = sh?.phase === 'retrying' && sh.requestId === e.requestId;
+        const finalDiffs = isRetryDone ? mergeFileDiffs(get().liveDiffs, e.diffs) : e.diffs;
+
         // Terminal success: finalize the last assistant turn with the summary
         // and complete diff set, then clear streaming state.
         set((s) => {
@@ -1292,11 +1322,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
               // Prefer the streaming content if it's been built up; fall
               // through to the summary if the backend sent it only at done.
               content: last.content || e.summary,
-              diffs: e.diffs.length > 0 ? e.diffs : undefined,
+              diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
             };
             return {
               chat: [...s.chat.slice(0, -1), updated],
-              liveDiffs: e.diffs,
+              liveDiffs: finalDiffs,
               streaming: false,
               activeRequestId: null,
               pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
@@ -1311,11 +1341,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             content: e.summary,
             createdAt: Date.now(),
             requestId: e.requestId,
-            diffs: e.diffs.length > 0 ? e.diffs : undefined,
+            diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
           };
           return {
             chat: [...s.chat, doneMsg],
-            liveDiffs: e.diffs,
+            liveDiffs: finalDiffs,
             streaming: false,
             activeRequestId: null,
             pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
@@ -1374,6 +1404,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             chat: [...s.chat, errMsg],
             streaming: false,
             activeRequestId: null,
+            // Issue #31: an error ends any in-flight self-heal lifecycle too.
+            selfHealPhase: null,
             // Auth failures surface via the banner, not the error toast.
             lastError: isCancelled || isAuth ? null : e.message,
             needsAuth: isAuth ? true : s.needsAuth,
@@ -1428,8 +1460,79 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         };
         // Insert right after the turn it judged (located by requestId), not at
         // the tail — see placeVerifyMessage. Prevents a late verdict from
-        // landing inside a newer edit's stream.
-        set((s) => ({ chat: placeVerifyMessage(s.chat, verifyMsg) }));
+        // landing inside a newer edit's stream. The terminal `verify` ends the
+        // self-heal lifecycle, so clear the phase after placing the badge — but
+        // ONLY when the phase still belongs to this turn (a newer turn may have
+        // taken over `selfHealPhase` while this judge was running; don't wipe it).
+        set((s) => ({
+          chat: placeVerifyMessage(s.chat, verifyMsg),
+          selfHealPhase: s.selfHealPhase?.requestId === e.requestId ? null : s.selfHealPhase,
+        }));
+        break;
+      }
+
+      case 'verifying': {
+        // Issue #31: the vision judge is running for the attempt that just
+        // settled. UN-gated (it arrives after `done`, with activeRequestId
+        // already cleared). Record the phase for #32's UI; do NOT re-arm
+        // streaming — no further stream events correlate to this phase.
+        //
+        // Drop it when a NEWER turn already owns the foreground, so a slow judge
+        // from an older turn can't flash a stale "verifying…" over the new edit.
+        if (isStaleSelfHeal(activeRequestId, e.requestId)) break;
+        set({ selfHealPhase: selfHealPhaseOnVerifying(e.requestId) });
+        break;
+      }
+
+      case 'retrying': {
+        // Issue #31: a `verify:fail` triggered a bounded auto-retry that reuses
+        // the SAME requestId. The first attempt's `done` already cleared
+        // activeRequestId, so this event is UN-gated and RE-ARMS correlation —
+        // restoring activeRequestId + streaming so the retry attempt's
+        // thinking/message/checkpoint/done events are processed, not dropped.
+        //
+        // BUT only when no NEWER turn owns the foreground: if the user submitted
+        // a fresh edit while this turn's judge was running, re-arming here would
+        // HIJACK activeRequestId/streaming and silently drop the new edit's whole
+        // stream. Drop the stale retry instead (its writes still land main-side
+        // and its terminal `verify` badge is still placed by requestId).
+        if (isStaleSelfHeal(activeRequestId, e.requestId)) break;
+        //
+        // Issue #32 fix C: start a FRESH empty assistant bubble for the retry
+        // attempt (same requestId). Without it, attempt 2's thinking/message
+        // would append to attempt 1's already-finalized bubble, and the retry's
+        // `done` (`content: last.content || e.summary`) would DROP attempt 2's
+        // summary because attempt-1 content is non-empty. A new bubble keeps each
+        // attempt's narration + summary distinct.
+        set((s) => {
+          const retryBubble: ChatMessage = {
+            id: genId(),
+            role: 'assistant',
+            content: '',
+            createdAt: Date.now(),
+            requestId: e.requestId,
+            // Mark the start of a retry attempt so the UI can render a subtle
+            // "Retried" divider above it.
+            retryAttempt: e.attempt,
+          };
+          return {
+            ...nextCorrelationOnRetrying(e.requestId),
+            chat: [...s.chat, retryBubble],
+            selfHealPhase: selfHealPhaseOnRetrying(e.requestId, e.attempt, e.rationale),
+          };
+        });
+        break;
+      }
+
+      case 'verify-skipped': {
+        // Issue #31: the judge could not produce a verdict (fail-open). UN-gated;
+        // it carries no verdict, so it appends NO badge — it exists only to clear
+        // the transient `verifying` phase so the affordance never sticks. Clear
+        // ONLY when the phase still belongs to this turn (don't wipe a newer
+        // turn's phase if this fail-open arrives late).
+        set((s) => ({
+          selfHealPhase: s.selfHealPhase?.requestId === e.requestId ? null : s.selfHealPhase,
+        }));
         break;
       }
 
@@ -1881,6 +1984,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       streaming: true,
       liveDiffs: [],
       lastError: null,
+      // Issue #31/#32: a new turn always starts from a clean self-heal phase, so
+      // a prior turn's phase can't bleed in (mirrors submitEdit).
+      selfHealPhase: null,
     }));
 
     const result = await easel.edit.submit({ request });

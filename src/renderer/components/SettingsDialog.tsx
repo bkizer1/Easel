@@ -488,6 +488,7 @@ export function SettingsDialog(): React.ReactElement | null {
       backends: next.backends,
       featureFlags: next.featureFlags,
       theme: next.theme,
+      maxRetries: next.maxRetries,
     });
   }
 
@@ -503,6 +504,7 @@ export function SettingsDialog(): React.ReactElement | null {
       backends: next.backends,
       featureFlags: next.featureFlags,
       theme: next.theme,
+      maxRetries: next.maxRetries,
     });
   }
 
@@ -651,6 +653,33 @@ export function SettingsDialog(): React.ReactElement | null {
                     />
                   </label>
                 ))}
+
+                {/* Self-heal auto-retry budget (issue #31). Shown only when the
+                    verify flag is on; clamped to 0–5. 0 = observe-only. */}
+                {draft.featureFlags.selfHealVerify && (
+                  <label className="flex items-start justify-between gap-3">
+                    <span className="text-sm text-gray-300">
+                      Self-heal auto-retries
+                      <span className="mt-0.5 block text-xs text-gray-500">
+                        After a failed verify, auto-resubmit the edit this many times with the
+                        reviewer&rsquo;s feedback. 0 = verify only (no retry).
+                      </span>
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={1}
+                      value={draft.maxRetries}
+                      onChange={(e) => {
+                        const n = Number.parseInt(e.target.value, 10);
+                        const clamped = Number.isFinite(n) ? Math.max(0, Math.min(5, n)) : 0;
+                        setField('maxRetries', clamped);
+                      }}
+                      className="mt-0.5 w-16 flex-shrink-0 rounded-lg bg-white/[0.05] px-2 py-1 text-sm text-gray-200 outline-none ring-1 ring-white/10 focus:ring-brand-500"
+                    />
+                  </label>
+                )}
               </div>
             </section>
 

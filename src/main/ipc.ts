@@ -193,6 +193,7 @@ export function registerIpcHandlers(): void {
       projectRoot: project.root,
       createCheckpointFn: (msg, rid, provenance) => createCheckpoint(msg, rid, provenance),
       verify: _makeVerifyFn(settings),
+      maxRetries: settings.maxRetries,
     });
 
     return ok({ requestId });

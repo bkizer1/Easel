@@ -8,11 +8,17 @@ import type { LoadedPolicy } from './policy';
 // editRunner pulls in the main window for event push; stub it for Node tests.
 vi.mock('@main/window', () => ({ getMainWindow: () => null }));
 
+import type { VisionVerdict } from '@shared/types';
 import {
   buildProjectFs,
   buildProvenance,
+  buildRetryRequest,
   createWriteGate,
+  isDegenerateCrop,
+  pollUntilStable,
   respondPolicyConfirm,
+  RETRY_CEILING,
+  runSelfHealLoop,
   runVerifyStep,
   type WriteGate,
   type VerifyFn,
@@ -371,5 +377,456 @@ describe('runVerifyStep (issue #16 self-heal verify)', () => {
       emit,
     });
     expect(events).toHaveLength(0);
+  });
+});
+
+describe('pollUntilStable (issue #33 poll-until-stable settle)', () => {
+  /**
+   * A `capture` driven by a fixed sequence; once exhausted it keeps yielding the
+   * last value (so a never-stabilizing sequence still terminates by maxWait).
+   */
+  function sequenceCapture(seq: Array<string | undefined>): {
+    capture: () => Promise<string | undefined>;
+    calls: () => number;
+  } {
+    let i = 0;
+    return {
+      capture: async () => seq[Math.min(i++, seq.length - 1)],
+      calls: () => i,
+    };
+  }
+
+  /** A fake sleep that records how many times (and how long) it was called. */
+  function countingSleep(): { sleep: (ms: number) => Promise<void>; count: () => number; total: () => number } {
+    let count = 0;
+    let total = 0;
+    return {
+      sleep: async (ms) => {
+        count++;
+        total += ms;
+      },
+      count: () => count,
+      total: () => total,
+    };
+  }
+
+  it('returns early once two consecutive captures are byte-identical', async () => {
+    const cap = sequenceCapture(['a', 'b', 'b', 'c']);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 150,
+      maxWaitMs: 2500,
+    });
+    // 'a' (initial), sleep, 'b', sleep, 'b' === previous ⇒ stop and return 'b'.
+    expect(result).toBe('b');
+    // Two sleeps before stability; it did NOT run out the full budget.
+    expect(slp.count()).toBe(2);
+    expect(cap.calls()).toBe(3);
+  });
+
+  it('honors maxWaitMs when frames never stabilize', async () => {
+    // Every frame differs ⇒ never stable; loop must stop at the wall-time cap.
+    const cap = sequenceCapture(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l']);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 150,
+      maxWaitMs: 600,
+    });
+    // 600 / 150 = 4 sleeps, then elapsed reaches the cap and we return the last.
+    expect(slp.count()).toBe(4);
+    expect(slp.total()).toBe(600);
+    // Returns the most recent captured frame (initial + 4 captures = index 4 ⇒ 'e').
+    expect(result).toBe('e');
+  });
+
+  it('tolerates intermittent undefined captures and keeps polling', async () => {
+    // 'a', undefined (not stable), 'a' again — two undefineds in a row would NOT
+    // be treated as stable; only equal DEFINED frames count.
+    const cap = sequenceCapture(['a', undefined, 'a', 'a']);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 150,
+      maxWaitMs: 2500,
+    });
+    // 'a', undefined (reset), 'a', 'a' === previous ⇒ stop and return 'a'.
+    expect(result).toBe('a');
+    expect(slp.count()).toBe(3);
+  });
+
+  it('does not treat two consecutive undefined captures as stable', async () => {
+    // All undefined until the cap; never short-circuits, returns undefined.
+    const cap = sequenceCapture([undefined, undefined, undefined, undefined, undefined]);
+    const slp = countingSleep();
+    const result = await pollUntilStable({
+      capture: cap.capture,
+      sleep: slp.sleep,
+      intervalMs: 100,
+      maxWaitMs: 300,
+    });
+    expect(result).toBeUndefined();
+    expect(slp.count()).toBe(3); // 300 / 100
+  });
+
+  it('never throws when capture rejects — treats it as undefined and falls back', async () => {
+    let i = 0;
+    const capture = async (): Promise<string | undefined> => {
+      i++;
+      if (i === 2) throw new Error('capture exploded');
+      return 'a';
+    };
+    const slp = countingSleep();
+    // 'a', (throw ⇒ undefined, resets), 'a', 'a' === previous ⇒ returns 'a'.
+    const result = await pollUntilStable({
+      capture,
+      sleep: slp.sleep,
+      intervalMs: 100,
+      maxWaitMs: 2500,
+    });
+    expect(result).toBe('a');
+  });
+});
+
+describe('isDegenerateCrop (issue #33 region-cropped verify frame)', () => {
+  it('is true for a missing box', () => {
+    expect(isDegenerateCrop(undefined)).toBe(true);
+  });
+
+  it('is true for zero or negative dimensions', () => {
+    expect(isDegenerateCrop({ x: 10, y: 10, width: 0, height: 50 })).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 10, width: 50, height: 0 })).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 10, width: -5, height: 50 })).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 10, width: 50, height: -5 })).toBe(true);
+  });
+
+  it('is true for non-finite coordinates or extents', () => {
+    expect(isDegenerateCrop({ x: NaN, y: 0, width: 10, height: 10 })).toBe(true);
+    expect(isDegenerateCrop({ x: 0, y: 0, width: Infinity, height: 10 })).toBe(true);
+  });
+
+  it('is false for a sane in-bounds box', () => {
+    expect(isDegenerateCrop({ x: 10, y: 20, width: 100, height: 80 })).toBe(false);
+  });
+
+  it('respects a viewport: out-of-bounds or off-screen boxes are degenerate', () => {
+    const viewport = { x: 0, y: 0, width: 1000, height: 800 };
+    // Sane and fully inside the viewport.
+    expect(isDegenerateCrop({ x: 10, y: 20, width: 100, height: 80 }, viewport)).toBe(false);
+    // Extends past the right/bottom edge.
+    expect(isDegenerateCrop({ x: 950, y: 20, width: 100, height: 80 }, viewport)).toBe(true);
+    expect(isDegenerateCrop({ x: 10, y: 760, width: 100, height: 80 }, viewport)).toBe(true);
+    // Starts off-screen.
+    expect(isDegenerateCrop({ x: -5, y: 20, width: 100, height: 80 }, viewport)).toBe(true);
+  });
+});
+
+describe('buildRetryRequest (issue #31)', () => {
+  function baseRequest(): EditRequest {
+    return {
+      id: 'req-31',
+      instruction: 'Make the hero bigger',
+      annotations: [{ id: 'a1' } as unknown as EditRequest['annotations'][number]],
+      targets: [{ id: 't1', selector: 'h1.hero' } as unknown as ElementTarget],
+      screenshotDataUrl: 'data:original',
+      projectRoot: '/proj',
+      devServerUrl: 'http://localhost:3000',
+    };
+  }
+
+  it('reuses the same id and preserves targets/annotations/roots', () => {
+    const original = baseRequest();
+    const retry = buildRetryRequest(original, 'too small', 'data:after');
+    expect(retry.id).toBe('req-31');
+    expect(retry.targets).toEqual(original.targets);
+    expect(retry.annotations).toEqual(original.annotations);
+    expect(retry.projectRoot).toBe('/proj');
+    expect(retry.devServerUrl).toBe('http://localhost:3000');
+  });
+
+  it('augments the instruction with the original text AND the rationale', () => {
+    const retry = buildRetryRequest(baseRequest(), 'the heading is unchanged', 'data:after');
+    expect(retry.instruction).toContain('Make the hero bigger');
+    expect(retry.instruction).toContain('the heading is unchanged');
+    expect(retry.instruction).toContain('[Self-heal retry]');
+  });
+
+  it('uses the after-frame as the screenshot context (current visual state)', () => {
+    const retry = buildRetryRequest(baseRequest(), 'fix', 'data:after-frame');
+    expect(retry.screenshotDataUrl).toBe('data:after-frame');
+    // undefined after-frame ⇒ undefined screenshot (no stale original carried).
+    expect(buildRetryRequest(baseRequest(), 'fix', undefined).screenshotDataUrl).toBeUndefined();
+  });
+});
+
+describe('runSelfHealLoop (issue #31 bounded one-shot auto-retry)', () => {
+  function req(): EditRequest {
+    return {
+      id: 'req-31',
+      instruction: 'make it pop',
+      annotations: [],
+      targets: [],
+      projectRoot: '/proj',
+      devServerUrl: 'http://localhost:3000',
+    };
+  }
+
+  /** Collect emitted events + count attempts and the requests they received. */
+  function harness(opts: {
+    succeeds?: boolean;
+    verdicts: Array<VisionVerdict | null>;
+    after?: string;
+    /** Per-attempt after-frames (overrides `after`); index by attempt - 1. */
+    afters?: Array<string | undefined>;
+  }) {
+    const events: AgentEvent[] = [];
+    const attemptReqs: EditRequest[] = [];
+    let judgeCalls = 0;
+    const succeeds = opts.succeeds ?? true;
+
+    const runAttempt = async (
+      r: EditRequest,
+    ): Promise<{ succeeded: boolean; after: string | undefined }> => {
+      const after = opts.afters ? opts.afters[attemptReqs.length] : opts.after;
+      attemptReqs.push(r);
+      return { succeeded: succeeds, after };
+    };
+
+    const judge = async (): Promise<VisionVerdict | null> => {
+      const v = opts.verdicts[Math.min(judgeCalls, opts.verdicts.length - 1)];
+      judgeCalls++;
+      return v;
+    };
+
+    return {
+      events,
+      attemptReqs,
+      runAttempt,
+      judge,
+      judgeCalls: () => judgeCalls,
+      emit: (e: AgentEvent) => events.push(e),
+    };
+  }
+
+  const types = (events: AgentEvent[]): string[] => events.map((e) => e.type);
+
+  it('(a) PASS first try → one attempt, one verifying + terminal verify:pass, NO retrying', async () => {
+    const h = harness({ verdicts: [{ verdict: 'pass', rationale: 'great' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(types(h.events)).toEqual(['verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'pass', rationale: 'great' });
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+  });
+
+  it('(b) FAIL→PASS (maxRetries 1) → two attempts; retrying then verify:pass; retry req is augmented', async () => {
+    const h = harness({
+      after: 'data:after-1',
+      verdicts: [
+        { verdict: 'fail', rationale: 'still too small' },
+        { verdict: 'pass', rationale: 'now good' },
+      ],
+    });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(2);
+    expect(types(h.events)).toEqual(['verifying', 'retrying', 'verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({
+      type: 'retrying',
+      attempt: 2,
+      rationale: 'still too small',
+    });
+    expect(h.events[3]).toMatchObject({ type: 'verify', verdict: 'pass' });
+
+    // The SECOND attempt received the augmented request: same id, rationale in
+    // the instruction, after-frame as the screenshot.
+    const retryReq = h.attemptReqs[1];
+    expect(retryReq.id).toBe('req-31');
+    expect(retryReq.instruction).toContain('make it pop');
+    expect(retryReq.instruction).toContain('still too small');
+    expect(retryReq.screenshotDataUrl).toBe('data:after-1');
+  });
+
+  it('(c) FAIL→FAIL persistent (maxRetries 1) → two attempts; exactly one retrying + one terminal verify:fail', async () => {
+    const h = harness({
+      after: 'data:after',
+      verdicts: [
+        { verdict: 'fail', rationale: 'nope' },
+        { verdict: 'fail', rationale: 'still nope' },
+      ],
+    });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(2);
+    expect(h.events.filter((e) => e.type === 'retrying')).toHaveLength(1);
+    const verifies = h.events.filter((e) => e.type === 'verify');
+    expect(verifies).toHaveLength(1);
+    expect(verifies[0]).toMatchObject({ verdict: 'fail', rationale: 'still nope' });
+  });
+
+  it('(d) wantVerify:false → one attempt, no verify/verifying/retrying', async () => {
+    const h = harness({ verdicts: [{ verdict: 'pass', rationale: 'x' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: false,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(h.events).toHaveLength(0);
+    expect(h.judgeCalls()).toBe(0);
+  });
+
+  it('(e) judge returns null (fail-open) → one attempt; verifying then verify-skipped tears down the phase; no verify/retrying', async () => {
+    const h = harness({ verdicts: [null] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    // verify-skipped MUST follow verifying so the renderer can clear the phase —
+    // otherwise the transient "verifying…" affordance would stick forever.
+    expect(types(h.events)).toEqual(['verifying', 'verify-skipped']);
+    expect(h.events.some((e) => e.type === 'verify')).toBe(false);
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+  });
+
+  it('(f) signal.aborted before the retry → no retrying; terminal verify:fail (does not loop)', async () => {
+    const h = harness({ verdicts: [{ verdict: 'fail', rationale: 'bad' }] });
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: ctrl.signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+    expect(types(h.events)).toEqual(['verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'fail' });
+  });
+
+  it('(g) maxRetries:0 (observe-only) + fail → one attempt, NO retrying, terminal verify:fail', async () => {
+    const h = harness({ after: 'data:a', verdicts: [{ verdict: 'fail', rationale: 'nope' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 0,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(types(h.events)).toEqual(['verifying', 'verify']);
+    expect(h.events[1]).toMatchObject({ type: 'verify', verdict: 'fail' });
+    expect(h.events.some((e) => e.type === 'retrying')).toBe(false);
+  });
+
+  it('(h) clamps a misconfigured maxRetries to RETRY_CEILING (never spins unbounded)', async () => {
+    // Always-fail verdicts; with maxRetries far above the ceiling the loop must
+    // still stop at 1 + RETRY_CEILING attempts and emit exactly RETRY_CEILING retrying events.
+    const h = harness({ after: 'data:a', verdicts: [{ verdict: 'fail', rationale: 'no' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 99,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1 + RETRY_CEILING);
+    expect(h.events.filter((e) => e.type === 'retrying')).toHaveLength(RETRY_CEILING);
+    expect(h.events.filter((e) => e.type === 'verify')).toHaveLength(1);
+  });
+
+  it('(i) multi-retry (maxRetries:2, fail→fail→pass) → two retrying events; each retry augmented from the ORIGINAL once, with that attempt’s after-frame', async () => {
+    const h = harness({
+      afters: ['data:after-1', 'data:after-2', 'data:after-3'],
+      verdicts: [
+        { verdict: 'fail', rationale: 'r1' },
+        { verdict: 'fail', rationale: 'r2' },
+        { verdict: 'pass', rationale: 'ok' },
+      ],
+    });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 2,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(3);
+    const retryings = h.events.filter((e) => e.type === 'retrying');
+    expect(retryings).toHaveLength(2);
+    expect(retryings[0]).toMatchObject({ attempt: 2, rationale: 'r1' });
+    expect(retryings[1]).toMatchObject({ attempt: 3, rationale: 'r2' });
+
+    // Retry 1 carries r1 + attempt-1's after-frame; retry 2 carries r2 + attempt-2's.
+    expect(h.attemptReqs[1].screenshotDataUrl).toBe('data:after-1');
+    expect(h.attemptReqs[2].screenshotDataUrl).toBe('data:after-2');
+    // Each retry is built from the ORIGINAL request, so the instruction is
+    // augmented exactly once (no compounding "[Self-heal retry]" blocks).
+    const blocks = (h.attemptReqs[2].instruction.match(/\[Self-heal retry\]/g) ?? []).length;
+    expect(blocks).toBe(1);
+    expect(h.attemptReqs[2].instruction).toContain('make it pop');
+    expect(h.attemptReqs[2].instruction).toContain('r2');
+  });
+
+  it('stops when the attempt did not succeed (no verify on a failed edit)', async () => {
+    const h = harness({ succeeds: false, verdicts: [{ verdict: 'pass', rationale: 'x' }] });
+    await runSelfHealLoop({
+      request: req(),
+      maxRetries: 1,
+      wantVerify: true,
+      runAttempt: h.runAttempt,
+      judge: h.judge,
+      emit: h.emit,
+      signal: new AbortController().signal,
+    });
+    expect(h.attemptReqs).toHaveLength(1);
+    expect(h.events).toHaveLength(0);
+    expect(h.judgeCalls()).toBe(0);
   });
 });
