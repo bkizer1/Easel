@@ -35,6 +35,7 @@ import type {
 } from '@shared/xray';
 import type { SourceLocation } from '@shared/types';
 import { Tooltip } from './Tooltip';
+import { StateDiffList } from './StateDiffList';
 
 /* -------------------------------------------------------------------------- */
 /*  Small shared bits                                                          */
@@ -387,12 +388,6 @@ function NetworkTab(): React.ReactElement {
 /*  Time-travel tab                                                            */
 /* -------------------------------------------------------------------------- */
 
-const DIFF_KIND_STYLE: Record<StateDiffEntry['kind'], string> = {
-  added: 'bg-emerald-500/15 text-emerald-400',
-  removed: 'bg-rose-500/15 text-rose-400',
-  changed: 'bg-amber-500/15 text-amber-400',
-};
-
 function TimeTravelTab(): React.ReactElement {
   const checkpoints = useEaselStore((s) => s.checkpoints);
   const compareSnapshots = useEaselStore((s) => s.compareSnapshots);
@@ -460,45 +455,12 @@ function TimeTravelTab(): React.ReactElement {
         </Tooltip>
       </div>
 
-      {diff === null ? (
-        <div className="px-3.5 py-6 text-center text-[12px] leading-relaxed text-gray-500">
-          Pick two checkpoints and Compare to see how the inspected state changed between them.
-        </div>
-      ) : diff === 'none' ? (
-        <div className="px-3.5 py-6 text-center text-[12px] leading-relaxed text-gray-500">
-          No state snapshot stored for one of these checkpoints (snapshots are captured when an
-          element is being inspected at checkpoint time).
-        </div>
-      ) : diff.length === 0 ? (
-        <div className="px-3.5 py-6 text-center text-[12px] leading-relaxed text-gray-500">
-          No state changes between these checkpoints.
-        </div>
-      ) : (
-        <ul>
-          {diff.map((d, i) => (
-            <li
-              key={`${d.path}-${i}`}
-              className="flex items-start gap-2 px-3.5 py-1.5 hairline-b last:border-0"
-            >
-              <span
-                className={`mt-0.5 flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${DIFF_KIND_STYLE[d.kind]}`}
-              >
-                {d.kind}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-[11.5px] text-gray-300" title={d.path}>
-                  {d.path}
-                </span>
-                <span className="mt-0.5 block font-mono text-[11px] text-gray-500">
-                  {d.kind !== 'added' && <span className="text-rose-400/80">{d.before}</span>}
-                  {d.kind === 'changed' && <span className="text-gray-600"> → </span>}
-                  {d.kind !== 'removed' && <span className="text-emerald-400/80">{d.after}</span>}
-                </span>
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
+      <StateDiffList
+        diff={diff}
+        emptyPrompt="Pick two checkpoints and Compare to see how the inspected state changed between them."
+        missingPrompt="No state snapshot stored for one of these checkpoints."
+        noChangesPrompt="No state changes between these checkpoints."
+      />
     </div>
   );
 }

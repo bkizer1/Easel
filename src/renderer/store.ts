@@ -55,7 +55,6 @@ import {
   formatSerializedValue,
   type ElementStateSnapshot,
   type NetworkEntry,
-  type SerializedValue,
   type StateDiffEntry,
   type StateEntry,
 } from '@shared/xray';
@@ -1272,30 +1271,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
           };
         });
 
-        // Time-travel (State X-Ray): persist the live inspected state alongside
-        // the checkpoint so any two points can be deep-diffed later. Best-effort:
-        // only when an element is currently inspected. The snapshot lives in
-        // userData (main), never in the user's tree.
-        {
-          const cur = get().currentElementState;
-          if (cur) {
-            // Build a SerializedValue tree directly from the inspected entries so
-            // the persisted snapshot diffs cleanly against another checkpoint's.
-            const data: SerializedValue = {
-              kind: 'object',
-              entries: cur.entries.map((entry) => ({ key: entry.label, value: entry.value })),
-              truncated: false,
-            };
-            void easel.xray.saveSnapshot({
-              snapshot: {
-                checkpointId: e.checkpoint.id,
-                capturedAt: Date.now(),
-                label: e.checkpoint.message,
-                data,
-              },
-            });
-          }
-        }
+        // Time-travel (State X-Ray): the per-checkpoint state snapshot is now
+        // captured + persisted in MAIN, BEFORE the checkpoint commit, keyed by
+        // the resulting checkpoint id, UNCONDITIONALLY (see
+        // `_checkpointWithSnapshot` in src/main/ipc.ts + `stateCapture.ts`). The
+        // old reactive renderer-side capture (gated on an actively-inspected
+        // element) is intentionally gone: it lost snapshots for ordinary edits
+        // and would now double-write over the main-captured one.
         break;
       }
 

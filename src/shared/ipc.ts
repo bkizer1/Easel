@@ -30,7 +30,7 @@ import type {
   TokenMatch,
 } from './types';
 import type { GridConfig } from './grid';
-import type { ElementStateSnapshot, NetworkEntry, StateSnapshot } from './xray';
+import type { ElementStateSnapshot, NetworkEntry, StateSnapshot, SerializedValue } from './xray';
 import type { NewSiteBrief } from './siteBrief';
 
 /* -------------------------------------------------------------------------- */
@@ -775,6 +775,23 @@ export type InspectorMessage =
       type: 'element-state';
       snapshot: ElementStateSnapshot;
     }
+  | {
+      /**
+       * Time-travel (State X-Ray): the guest's reply to a `snapshot-state`
+       * command. Carries a bounded {@link SerializedValue} tree of detectable app
+       * state — captured UNCONDITIONALLY (no element need be picked) so every
+       * checkpoint created during normal editing gets a usable snapshot. The
+       * MAIN process drives this before {@link createCheckpoint} and persists the
+       * reply keyed by the new checkpoint id. `requestId` correlates the reply to
+       * the originating command. Distinct from `element-state`, which is the live
+       * state of one specifically-picked element.
+       */
+      type: 'state-snapshot';
+      /** Echoes the {@link InspectorCommand} `snapshot-state` `requestId`. */
+      requestId: string;
+      /** The bounded, cycle-safe serialized state tree (never live objects). */
+      data: SerializedValue;
+    }
   // ── Issue #6: Live DOM/CSS tweak ────────────────────────────────────────────
   | {
       /** Accumulated inline-style delta for the tweaked element. */
@@ -831,6 +848,18 @@ export type InspectorCommand =
       selector: string;
       /** Entry labels from the host's last snapshot, for render-cause diffing. */
       previousKeys?: string[];
+    }
+  | {
+      /**
+       * Time-travel (State X-Ray): capture a bounded snapshot of detectable app
+       * state UNCONDITIONALLY (no element need be picked) and reply with a
+       * `state-snapshot` message echoing `requestId`. Driven by MAIN before a
+       * checkpoint is created; the reply is persisted keyed by the new checkpoint
+       * id so any two checkpoints can be deep-diffed in the History/cockpit view.
+       */
+      type: 'snapshot-state';
+      /** Correlates the eventual `state-snapshot` reply. */
+      requestId: string;
     }
   | {
       /**
