@@ -30,6 +30,8 @@ import {
   ScanLine,
   Wand2,
   ScanEye,
+  Download,
+  FolderInput,
 } from 'lucide-react';
 import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
@@ -298,6 +300,7 @@ export function Toolbar(): React.ReactElement {
   const viewportWidth = useEaselStore((s) => s.viewportWidth);
   const pageLogs = useEaselStore((s) => s.pageLogs);
   const historyOpen = useEaselStore((s) => s.historyOpen);
+  const exporting = useEaselStore((s) => s.exporting);
 
   const openProject = useEaselStore((s) => s.openProject);
   const closeProject = useEaselStore((s) => s.closeProject);
@@ -309,6 +312,8 @@ export function Toolbar(): React.ReactElement {
   const toggleDevTools = useEaselStore((s) => s.toggleDevTools);
   const setViewportWidth = useEaselStore((s) => s.setViewportWidth);
   const setHistoryOpen = useEaselStore((s) => s.setHistoryOpen);
+  const exportSession = useEaselStore((s) => s.exportSession);
+  const importSession = useEaselStore((s) => s.importSession);
 
   const gridVisible = useEaselStore((s) => s.gridVisible);
   const offGridElements = useEaselStore((s) => s.offGridElements);
@@ -431,6 +436,25 @@ export function Toolbar(): React.ReactElement {
           </IconButton>
           {historyOpen && <HistoryPanel />}
         </div>
+      </Seg>
+
+      {/* Session export / import cluster (Issue #18) */}
+      <Seg>
+        <IconButton
+          onClick={() => void exportSession()}
+          tooltip="Export session as .easel bundle"
+          disabled={!project || checkpoints.length === 0 || exporting}
+          aria-label="Export session"
+        >
+          <Download className="w-[17px] h-[17px]" />
+        </IconButton>
+        <IconButton
+          onClick={() => void importSession()}
+          tooltip="Import .easel bundle for replay"
+          aria-label="Import session"
+        >
+          <FolderInput className="w-[17px] h-[17px]" />
+        </IconButton>
       </Seg>
 
       {/* View-tools cluster */}

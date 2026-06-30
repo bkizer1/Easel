@@ -163,10 +163,22 @@ interface Props {
   /** Id of the checkpoint that should be reverted on Reject. */
   checkpointId?: string;
   /** Called when the user accepts or rejects so the parent can dismiss. */
-  onDismiss(): void;
+  onDismiss?(): void;
+  /**
+   * Render the diffs without the Accept/Reject controls. Used by the session
+   * scrubber (Issue #18), which reviews diffs from an imported bundle whose
+   * checkpoints are NOT on the live timeline — accept/reject would be meaningless
+   * (and rejecting would call `restoreCheckpoint` with a foreign id).
+   */
+  readOnly?: boolean;
 }
 
-export function DiffViewer({ diffs, checkpointId, onDismiss }: Props): React.ReactElement | null {
+export function DiffViewer({
+  diffs,
+  checkpointId,
+  onDismiss,
+  readOnly = false,
+}: Props): React.ReactElement | null {
   const checkpoints = useEaselStore((s) => s.checkpoints);
   const restoreCheckpoint = useEaselStore((s) => s.restoreCheckpoint);
 
@@ -179,7 +191,7 @@ export function DiffViewer({ diffs, checkpointId, onDismiss }: Props): React.Rea
     if (previousId) {
       await restoreCheckpoint(previousId);
     }
-    onDismiss();
+    onDismiss?.();
   }
 
   return (
@@ -188,28 +200,30 @@ export function DiffViewer({ diffs, checkpointId, onDismiss }: Props): React.Rea
         <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">
           {diffs.length} {diffs.length === 1 ? 'file' : 'files'} changed
         </span>
-        <div className="flex gap-2">
-          <Tooltip label="Accept changes (keep)" side="bottom">
-            <button
-              aria-label="Accept changes"
-              onClick={onDismiss}
-              className="flex items-center gap-1.5 rounded-md bg-emerald-900/40 px-2.5 py-1 text-xs font-medium text-emerald-300 transition-all duration-150 ease-spring hover:bg-emerald-800/60 active:scale-[0.97]"
-            >
-              <Check className="h-3 w-3" />
-              Accept
-            </button>
-          </Tooltip>
-          <Tooltip label="Reject changes (restore previous checkpoint)" side="bottom">
-            <button
-              aria-label="Reject changes"
-              onClick={() => void handleReject()}
-              className="flex items-center gap-1.5 rounded-md bg-red-950/40 px-2.5 py-1 text-xs font-medium text-red-400 transition-all duration-150 ease-spring hover:bg-red-900/60 active:scale-[0.97]"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Reject
-            </button>
-          </Tooltip>
-        </div>
+        {!readOnly && (
+          <div className="flex gap-2">
+            <Tooltip label="Accept changes (keep)" side="bottom">
+              <button
+                aria-label="Accept changes"
+                onClick={onDismiss}
+                className="flex items-center gap-1.5 rounded-md bg-emerald-900/40 px-2.5 py-1 text-xs font-medium text-emerald-300 transition-all duration-150 ease-spring hover:bg-emerald-800/60 active:scale-[0.97]"
+              >
+                <Check className="h-3 w-3" />
+                Accept
+              </button>
+            </Tooltip>
+            <Tooltip label="Reject changes (restore previous checkpoint)" side="bottom">
+              <button
+                aria-label="Reject changes"
+                onClick={() => void handleReject()}
+                className="flex items-center gap-1.5 rounded-md bg-red-950/40 px-2.5 py-1 text-xs font-medium text-red-400 transition-all duration-150 ease-spring hover:bg-red-900/60 active:scale-[0.97]"
+              >
+                <RotateCcw className="h-3 w-3" />
+                Reject
+              </button>
+            </Tooltip>
+          </div>
+        )}
       </div>
 
       <div className="flex max-h-96 flex-col gap-2 overflow-y-auto">

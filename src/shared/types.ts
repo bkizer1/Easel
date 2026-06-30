@@ -880,3 +880,64 @@ export interface ScratchInfo {
   /** The checkpoint id the scratch was forked from. */
   baseCheckpointId?: string;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #18: Session replay — the runnable `.easel` artifact                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Schema version stamped into every `.easel` bundle's manifest. Bumped on any
+ * breaking change to {@link EaselBundleManifest}; the importer rejects a bundle
+ * whose `schemaVersion` it does not understand.
+ */
+export const BUNDLE_SCHEMA_VERSION = 1;
+
+/**
+ * The manifest at the root of a `.easel` bundle (a ZIP). It captures the design
+ * session as a replayable program: the full chat transcript (with annotations,
+ * diffs, and the `checkpointId` each turn produced), the checkpoint timeline,
+ * and a pointer to the `git bundle` of the internal checkpoint ref that ships
+ * alongside it. Per-checkpoint before/after preview PNGs travel under
+ * `shots/<checkpointId>/` so a colleague can scrub frame-by-frame offline.
+ */
+export interface EaselBundleManifest {
+  /** Must equal {@link BUNDLE_SCHEMA_VERSION} for the importer to accept it. */
+  schemaVersion: number;
+  /** Easel app version that produced the bundle (from `package.json`). */
+  easelVersion: string;
+  /** Epoch milliseconds when the bundle was exported. */
+  exportedAt: number;
+  /** Minimal project context, so the scrubber can label the session. */
+  session: {
+    /** Display name of the source project. */
+    projectName: string;
+    /** Detected framework of the source project. */
+    framework: ProjectFramework;
+    /** Dev-server URL the session ran against. */
+    devServerUrl: string;
+  };
+  /** The full chat transcript (user + assistant + system turns), in order. */
+  chat: ChatMessage[];
+  /** The checkpoint timeline (oldest first), mirroring the source project. */
+  checkpoints: Checkpoint[];
+  /** Id of the checkpoint the working tree matched at export time. */
+  currentCheckpointId?: string;
+  /** The git ref the accompanying `checkpoints.bundle` carries, e.g. `refs/easel/checkpoint`. */
+  checkpointRef: string;
+  /** Checkpoint ids that have before/after PNGs under `shots/` in the bundle. */
+  shots: string[];
+}
+
+/**
+ * An imported `.easel` session, held live in the main process so the scrubber
+ * can replay individual steps. The git objects from the bundle are fetched into
+ * a namespaced ref (`refs/easel/imported/<sessionId>`) that never clobbers the
+ * importing project's own checkpoint ref; the manifest lets the renderer drive
+ * the read-only scrubber UI.
+ */
+export interface ImportedSession {
+  /** Stable id assigned at import time (also the imported ref's `<id>` segment). */
+  sessionId: string;
+  /** The bundle manifest, parsed and validated. */
+  manifest: EaselBundleManifest;
+}
