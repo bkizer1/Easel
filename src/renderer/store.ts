@@ -29,6 +29,8 @@ import type {
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
+  RefactorExtractSpec,
+  RefactorSummary,
   ScratchInfo,
   SourceLocation,
   StyleEdit,
@@ -41,6 +43,7 @@ import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { mergeFileDiffs } from './lib/mergeFileDiffs';
+import { detectClusters } from './lib/refactorClusters';
 import {
   isStaleSelfHeal,
   nextCorrelationOnRetrying,
@@ -211,6 +214,15 @@ export interface EaselState {
    * this; #31 only wires the state + correlation re-arm.
    */
   selfHealPhase: SelfHealPhase | null;
+  /**
+   * Lasso refactor (issue #15): the {@link RefactorSummary} for the in-flight
+   * edit when it was initiated via {@link submitRefactor}, or null for ordinary
+   * edits. Set by {@link submitEdit} at the moment the request is armed and
+   * copied onto the terminal assistant {@link ChatMessage} by the `done` handler
+   * so the ChatPanel can render the grouped diff presentation. Cleared on both
+   * `done` and `error` so it never leaks into subsequent turns.
+   */
+  activeRefactor: RefactorSummary | null;
   /** Live FileDiffs accumulated during the current (or most recent) edit. */
   liveDiffs: FileDiff[];
   /** Ordered checkpoint timeline for the open project, newest first. */
@@ -358,8 +370,26 @@ export interface EaselActions {
    * Assemble an EditRequest from the current annotations + targets + a
    * screenshot of their union bounding box, push a user ChatMessage, submit
    * the request, and clear the annotation/target draft.
+   *
+   * `opts.refactor` is forwarded verbatim onto the {@link EditRequest} so the
+   * agent backend receives the full refactor spec. `opts.refactorSummary` is
+   * stored as {@link EaselState.activeRefactor} and later stamped onto the
+   * terminal assistant {@link ChatMessage} for the ChatPanel's grouped diff view.
+   * Both are optional; omitting them keeps the existing behavior for ordinary edits.
    */
-  submitEdit(instruction: string): Promise<void>;
+  submitEdit(
+    instruction: string,
+    opts?: { refactor?: RefactorExtractSpec; refactorSummary?: RefactorSummary },
+  ): Promise<void>;
+
+  /**
+   * Lasso refactor (issue #15): turn a detected similarity cluster (from the
+   * current region targets) into an "extract a reusable component" refactor —
+   * sets the cluster members as the targets and submits a refactor-shaped
+   * EditRequest through {@link submitEdit}. `suggestedName` overrides the
+   * cluster's auto-derived name. No-op (sets lastError) if the cluster id is unknown.
+   */
+  submitRefactor(clusterId: string, suggestedName?: string): Promise<void>;
 
   /** Cancel the currently in-flight edit (no-op if idle). */
   cancelEdit(): Promise<void>;
@@ -571,6 +601,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   activeRequestId: null,
   streaming: false,
   selfHealPhase: null,
+  activeRefactor: null,
   liveDiffs: [],
   checkpoints: [],
   currentCheckpointId: undefined,
@@ -717,6 +748,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       activeRequestId: null,
       streaming: false,
       selfHealPhase: null,
+      activeRefactor: null,
       liveDiffs: [],
       checkpoints: [],
       currentCheckpointId: undefined,
@@ -974,7 +1006,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   /* ---- Submit edit --------------------------------------------------------- */
 
-  async submitEdit(instruction) {
+  async submitEdit(instruction, opts) {
     const { project, annotations, targets, previewUrl } = get();
 
     if (!project) {
@@ -1025,6 +1057,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       // Issue #31: a new turn always starts from a clean self-heal phase, so a
       // prior turn's phase (e.g. a fail-open verify) can never bleed into it.
       selfHealPhase: null,
+      // Issue #15: stamp the in-flight refactor summary (null for ordinary edits).
+      activeRefactor: opts?.refactorSummary ?? null,
     }));
 
     // Intentionally keep the draft selection (annotations + targets) on screen
@@ -1042,6 +1076,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         screenshotDataUrl,
         projectRoot: project.root,
         devServerUrl: previewUrl ?? project.devServerUrl,
+        refactor: opts?.refactor,
       },
     });
 
@@ -1058,10 +1093,43 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         chat: [...s.chat, errMsg],
         lastError: result.error,
         streaming: false,
+        // Clear any refactor tag so a failed submit can't leak it onto a later turn.
+        activeRefactor: null,
         activeRequestId: null,
       }));
     }
     // On IPC success, streaming events drive the rest via applyAgentEvent.
+  },
+
+  /* ---- Lasso refactor (issue #15) ----------------------------------------- */
+
+  async submitRefactor(clusterId, suggestedName) {
+    const { targets } = get();
+    const cluster = detectClusters(targets).find((c) => c.id === clusterId);
+    if (!cluster) {
+      set({ lastError: 'Refactor target no longer available.' });
+      return;
+    }
+    const name = (suggestedName?.trim() || cluster.suggestedName);
+    const tag = cluster.members[0]?.tagName ?? 'element';
+    const refactor = {
+      kind: 'extract-component',
+      memberTargetIds: cluster.members.map((m) => m.id),
+      files: cluster.files,
+      suggestedName: name,
+    } satisfies RefactorExtractSpec;
+    const refactorSummary = {
+      componentName: name,
+      memberCount: cluster.members.length,
+      fileCount: cluster.files.length,
+    } satisfies RefactorSummary;
+    const instruction =
+      `Extract the ${cluster.members.length} similar <${tag}> elements (across ${cluster.files.length} files) ` +
+      `into a single reusable ${name} component, and update every call site to use it.`;
+    // Narrow the draft selection to exactly the cluster members so the
+    // EditRequest carries them as the call sites to rewrite.
+    set({ targets: cluster.members });
+    await get().submitEdit(instruction, { refactor, refactorSummary });
   },
 
   /* ---- Cancel edit --------------------------------------------------------- */
@@ -1312,6 +1380,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         const isRetryDone = sh?.phase === 'retrying' && sh.requestId === e.requestId;
         const finalDiffs = isRetryDone ? mergeFileDiffs(get().liveDiffs, e.diffs) : e.diffs;
 
+        // Issue #15: capture before the updater so we read current (not post-set) state.
+        const doneRefactor = get().activeRefactor ?? undefined;
+
         // Terminal success: finalize the last assistant turn with the summary
         // and complete diff set, then clear streaming state.
         set((s) => {
@@ -1323,12 +1394,20 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
               // through to the summary if the backend sent it only at done.
               content: last.content || e.summary,
               diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
+              // Issue #15: tag the assistant turn with the refactor summary so
+              // the ChatPanel can render the grouped diff presentation.
+              refactor: doneRefactor,
             };
             return {
               chat: [...s.chat.slice(0, -1), updated],
               liveDiffs: finalDiffs,
               streaming: false,
               activeRequestId: null,
+              // Issue #15: intentionally DO NOT clear `activeRefactor` here. A
+              // self-heal retry emits a second `done` for the same turn (with its
+              // own bubble); keeping the tag lets the retried diff stay grouped.
+              // The next `submitEdit` always overwrites it (null for plain edits),
+              // and `error` clears it, so it can't leak into an unrelated turn.
               pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
                 (p) => p.requestId !== e.requestId,
               ),
@@ -1342,12 +1421,17 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             createdAt: Date.now(),
             requestId: e.requestId,
             diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
+            // Issue #15: tag the fallback message with the refactor summary.
+            refactor: doneRefactor,
           };
           return {
             chat: [...s.chat, doneMsg],
             liveDiffs: finalDiffs,
             streaming: false,
             activeRequestId: null,
+            // Issue #15: see above — `activeRefactor` is left in place so a
+            // self-heal retry's `done` keeps the grouped diff presentation;
+            // the next submit overwrites it and `error` clears it.
             pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
               (p) => p.requestId !== e.requestId,
             ),
@@ -1406,6 +1490,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             activeRequestId: null,
             // Issue #31: an error ends any in-flight self-heal lifecycle too.
             selfHealPhase: null,
+            // Issue #15: a failed/cancelled refactor must not leave a dangling tag.
+            activeRefactor: null,
             // Auth failures surface via the banner, not the error toast.
             lastError: isCancelled || isAuth ? null : e.message,
             needsAuth: isAuth ? true : s.needsAuth,
@@ -1987,6 +2073,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       // Issue #31/#32: a new turn always starts from a clean self-heal phase, so
       // a prior turn's phase can't bleed in (mirrors submitEdit).
       selfHealPhase: null,
+      // Issue #15: submitDirectEdit is not a refactor path; always start clean.
+      activeRefactor: null,
     }));
 
     const result = await easel.edit.submit({ request });
@@ -2002,6 +2090,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         chat: [...s.chat, errMsg],
         lastError: result.error,
         streaming: false,
+        // Clear any refactor tag so a failed submit can't leak it onto a later turn.
+        activeRefactor: null,
         activeRequestId: null,
       }));
     }

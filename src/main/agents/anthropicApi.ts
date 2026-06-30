@@ -37,14 +37,36 @@ const CAPABILITIES: AgentCapabilities = {
 
 const MAX_TURNS = 24;
 
-function systemPrompt(request: EditRequest): string {
-  return [
+export function systemPrompt(request: EditRequest): string {
+  const lines = [
     'You are Easel, an agentic web-development assistant editing source files in a live project.',
     `Project root: ${request.projectRoot}`,
     'Use the provided tools to read and edit files. Make the minimal change that satisfies the user.',
     'Only edit files inside the project root. Do not touch package.json, lock files, or git history.',
     'When done, briefly explain what you changed.',
-  ].join('\n');
+  ];
+
+  if (request.refactor?.kind === 'extract-component') {
+    const { files, suggestedName } = request.refactor;
+    const name = suggestedName ?? 'a clear PascalCase name of your choosing';
+    lines.push(
+      '',
+      'REFACTOR — EXTRACT A REUSABLE COMPONENT:',
+      `Treat the selected elements as N call sites of the SAME repeated UI pattern across these files:`,
+      ...files.map((f) => `  - ${f}`),
+      `Create ONE new reusable component named ${name} in an appropriate location next to its siblings,`,
+      `matching the project's framework and conventions (infer from file extensions: .tsx/.jsx → React, .vue → Vue, .svelte → Svelte).`,
+      `Parameterize via props exactly the parts that DIFFER between instances (text, images, hrefs, counts);`,
+      `keep shared markup and styling inside the component.`,
+      `Rewrite EVERY call site to import and use the new component,`,
+      `removing the now-duplicated inline markup and adding the required import statements.`,
+      `Preserve the rendered output and behavior EXACTLY — this is a pure refactor with no visual change.`,
+      `Keep all edits within the project root; do not touch package.json, lock files, or git history.`,
+      `This is ONE atomic change spanning multiple files.`,
+    );
+  }
+
+  return lines.join('\n');
 }
 
 function userPrompt(request: EditRequest): string {

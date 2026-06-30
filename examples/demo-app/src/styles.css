@@ -163,6 +163,50 @@ body {
   color: var(--muted);
 }
 
+/* Pricing — three duplicated cards across separate files (issue #15 demo) */
+.pricing {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  padding-bottom: 80px;
+}
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+}
+.plan-name {
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.plan-price {
+  font-size: 32px;
+  font-weight: 800;
+}
+.plan-price span {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--muted);
+}
+.plan-features {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.plan-card .btn {
+  margin-top: auto;
+}
+
 /* Footer */
 .footer {
   display: flex;

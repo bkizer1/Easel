@@ -237,6 +237,39 @@ export interface AnnotationBatch {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Lasso refactor — extract a reusable component (issue #15)                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Describes an "extract a reusable component" refactor, derived when a freeform
+ * (lasso) region resolves to several structurally-similar {@link ElementTarget}s
+ * that span more than one source file. Present on an {@link EditRequest} only
+ * when the user invoked the "Extract a reusable component" affordance.
+ *
+ * When set, the agent's brief changes from "make a freeform edit" to a precise
+ * multi-file refactor: read each member target's source, factor the shared
+ * markup into ONE new component (parameterizing the parts that differ between
+ * instances via props), and rewrite every call site to use it — keeping the
+ * rendered output identical. The whole thing lands as one atomic checkpoint.
+ */
+export interface RefactorExtractSpec {
+  /** Discriminator; `extract-component` is currently the only refactor kind. */
+  kind: 'extract-component';
+  /**
+   * The {@link ElementTarget.id}s of the structurally-similar members that
+   * motivated the extraction. These correspond 1:1 to {@link EditRequest.targets}.
+   */
+  memberTargetIds: string[];
+  /**
+   * Distinct source files (project-relative paths) the members span, lifted
+   * from each member's {@link ElementTarget.dataEaselSource}. Always length >= 2.
+   */
+  files: string[];
+  /** A PascalCase name suggestion for the new component (user-editable). */
+  suggestedName?: string;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Edit request (renderer -> main -> agent)                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -263,6 +296,13 @@ export interface EditRequest {
   projectRoot: string;
   /** The dev-server URL currently loaded in the preview, e.g. `http://localhost:3000`. */
   devServerUrl: string;
+  /**
+   * Lasso refactor (issue #15): when present, this edit is an "extract a
+   * reusable component" refactor rather than a freeform instruction. The
+   * backend appends a refactor-specific brief; {@link targets} are the call
+   * sites to rewrite. Absent for ordinary edits.
+   */
+  refactor?: RefactorExtractSpec;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -526,6 +566,21 @@ export interface CheckpointProvenance {
 export type ChatRole = 'user' | 'assistant' | 'system';
 
 /**
+ * Lasso refactor (issue #15): a compact descriptor attached to the assistant
+ * turn that produced an "extract a reusable component" refactor, so the
+ * ChatPanel can render the DiffViewer in its grouped "new component vs. updated
+ * call sites" presentation. Absent for ordinary edits.
+ */
+export interface RefactorSummary {
+  /** The component name the refactor set out to create, when known. */
+  componentName?: string;
+  /** How many call sites (member targets) the refactor set out to rewrite. */
+  memberCount: number;
+  /** How many distinct source files the members spanned. */
+  fileCount: number;
+}
+
+/**
  * One entry in the conversation transcript rendered by the ChatPanel. User
  * entries may carry the annotations/targets that accompanied the instruction.
  */
@@ -553,6 +608,13 @@ export interface ChatMessage {
    * first attempt's. Lets the UI render a subtle "Retried" divider above it.
    */
   retryAttempt?: number;
+  /**
+   * Lasso refactor (issue #15): set on the assistant turn when this edit was an
+   * "extract a reusable component" refactor, so the DiffViewer renders the
+   * grouped "new component vs. updated call sites" presentation. Absent for
+   * ordinary edits.
+   */
+  refactor?: RefactorSummary;
 }
 
 /* -------------------------------------------------------------------------- */

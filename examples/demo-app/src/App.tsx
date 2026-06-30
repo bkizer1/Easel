@@ -6,9 +6,15 @@
  *   • the hero image         → "replace this with a photo of a golden doodle"
  *   • the "Get started" button → "make this button green and bigger"
  *   • a feature card          → "move this card to the front and add a border"
+ *   • the three pricing cards → switch to freeform mode, lasso all three, and
+ *       choose "Extract a reusable component" (issue #15). Each card is the same
+ *       markup duplicated across StarterPlan/ProPlan/TeamPlan in separate files.
  */
 
 import React, { useRef, useState } from 'react';
+import { StarterPlan } from './sections/StarterPlan';
+import { ProPlan } from './sections/ProPlan';
+import { TeamPlan } from './sections/TeamPlan';
 
 const features = [
   { title: 'Lightning fast', body: 'Ship in milliseconds with our edge-native runtime and zero cold starts.' },
@@ -108,6 +114,12 @@ export default function App(): React.ReactElement {
             <p>{f.body}</p>
           </article>
         ))}
+      </section>
+
+      <section className="pricing">
+        <StarterPlan />
+        <ProPlan />
+        <TeamPlan />
       </section>
 
       <footer className="footer">
