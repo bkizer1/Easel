@@ -30,6 +30,7 @@ import {
   ScanLine,
   Wand2,
   ScanEye,
+  GitPullRequestArrow,
 } from 'lucide-react';
 import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
@@ -317,6 +318,10 @@ export function Toolbar(): React.ReactElement {
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
   const setXrayOpen = useEaselStore((s) => s.setXrayOpen);
 
+  const settings = useEaselStore((s) => s.settings);
+  const updateSettings = useEaselStore((s) => s.updateSettings);
+  const reviewMode = settings?.featureFlags.reviewMode ?? false;
+
   const [menu, setMenu] = useState<'viewport' | 'console' | 'grid' | null>(null);
 
   // Timeline is oldest-first; the cursor is the checkpoint the tree matches.
@@ -513,6 +518,20 @@ export function Toolbar(): React.ReactElement {
           aria-label="State X-Ray"
         >
           <ScanEye className="w-[17px] h-[17px]" />
+        </IconButton>
+        <IconButton
+          onClick={() => {
+            if (!settings) return;
+            void updateSettings({
+              featureFlags: { ...settings.featureFlags, reviewMode: !reviewMode },
+            });
+          }}
+          tooltip="Review mode — stage edits for per-change approval instead of writing them live"
+          active={reviewMode}
+          disabled={!settings}
+          aria-label="Review mode"
+        >
+          <GitPullRequestArrow className="w-[17px] h-[17px]" />
         </IconButton>
         <IconButton
           onClick={() => {

@@ -703,6 +703,15 @@ export interface FeatureFlags {
    * call per edit and requires an Anthropic API key.
    */
   selfHealVerify: boolean;
+  /**
+   * Review mode (issue #19): "propose-don't-write". When on, an edit is STAGED
+   * in a shadow git worktree rather than written to the live project — the
+   * preview never flickers with changes you have not approved. Diffs stream and
+   * highlight the on-page element each affects; only on per-change approval do
+   * the approved files copy into the project + create a checkpoint. Off by
+   * default (the live make-a-change loop stays the default experience).
+   */
+  reviewMode: boolean;
 }
 
 /**
@@ -879,4 +888,54 @@ export interface ScratchInfo {
   name?: string;
   /** The checkpoint id the scratch was forked from. */
   baseCheckpointId?: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #19: Review mode — propose-don't-write, on-page approvals            */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The user's per-change approval decision in review mode. A staged change is
+ * `pending` until acted on; `approved` changes are written to the live project
+ * on apply, `rejected` changes are dropped.
+ */
+export type ReviewDecision = 'pending' | 'approved' | 'rejected';
+
+/**
+ * One pending edit staged in the shadow worktree during review mode, as the
+ * renderer tracks it. Assembled renderer-side from the streamed `file-edit`
+ * events: `diff` is the change computed against the session's base tree;
+ * `source` anchors it to a live on-page element (resolved from the diff's
+ * pre-edit hunk line, or the originating {@link ElementTarget.dataEaselSource})
+ * so the PreviewPane can highlight what each change affects; `decision` is the
+ * user's approval state.
+ */
+export interface StagedChange {
+  /** The staged file diff (`filePath` relative to the project root). */
+  diff: FileDiff;
+  /**
+   * Source location to highlight on the live (still pre-edit) page, when one is
+   * resolvable. Absent for created files or diffs with no mappable element.
+   */
+  source?: SourceLocation;
+  /** The user's approval decision for this change. */
+  decision: ReviewDecision;
+}
+
+/**
+ * A review-mode session (issue #19). While active, the agent's edits are staged
+ * in a shadow git worktree committed to a `refs/easel/staging/<requestId>` ref
+ * instead of being written to the live project, so the preview never flickers
+ * with unapproved changes. The renderer holds one of these per in-flight review
+ * edit; only on apply do the approved files copy into the project and create a
+ * real checkpoint, while discard tears the worktree down with the project
+ * untouched.
+ */
+export interface ReviewSession {
+  /** The {@link EditRequest.id} whose stream populated this session. */
+  requestId: string;
+  /** The checkpoint id the session forked from (its base tree), when known. */
+  baseCheckpointId?: string;
+  /** All staged changes, in stream order. */
+  changes: StagedChange[];
 }

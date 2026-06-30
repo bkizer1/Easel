@@ -29,6 +29,8 @@ import type {
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
+  ReviewDecision,
+  ReviewSession,
   ScratchInfo,
   SourceLocation,
   StyleEdit,
@@ -41,6 +43,12 @@ import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { mergeFileDiffs } from './lib/mergeFileDiffs';
+import {
+  approvedPaths,
+  replaceStagedChanges,
+  setStagedDecision,
+  upsertStagedChange,
+} from './lib/reviewSession';
 import {
   isStaleSelfHeal,
   nextCorrelationOnRetrying,
@@ -213,6 +221,13 @@ export interface EaselState {
   selfHealPhase: SelfHealPhase | null;
   /** Live FileDiffs accumulated during the current (or most recent) edit. */
   liveDiffs: FileDiff[];
+  /**
+   * Issue #19 (review mode): the active "propose-don't-write" session, or null
+   * when not reviewing. While set, the agent's edits are STAGED in a shadow
+   * worktree; streamed diffs accumulate into {@link ReviewSession.changes} as
+   * per-change approval items rather than being applied to the live timeline.
+   */
+  reviewSession: ReviewSession | null;
   /** Ordered checkpoint timeline for the open project, newest first. */
   checkpoints: Checkpoint[];
   /** Id of the checkpoint the working tree currently matches. */
@@ -370,6 +385,27 @@ export interface EaselActions {
    * entry either way.
    */
   respondPolicyConfirm(requestId: string, path: string, allow: boolean): Promise<void>;
+
+  /* ---- Issue #19: Review mode (propose-don't-write) ---------------------- */
+
+  /** Set one staged change's approval decision (by project-relative filePath). */
+  setReviewDecision(filePath: string, decision: ReviewDecision): void;
+  /**
+   * Highlight (or clear) the live on-page element a staged change affects.
+   * Passing a `filePath` whose change has a resolvable `source` dispatches a
+   * `highlight-source` InspectorCommand for that source; passing `null` clears
+   * the highlight. No-op for a change with no resolvable source.
+   */
+  focusReviewChange(filePath: string | null): void;
+  /**
+   * Apply the APPROVED subset of the active review session: copy those files
+   * from the shadow worktree into the live project and create a real checkpoint
+   * (via IPC). Clears the session + highlight on success; the incoming
+   * `checkpoint.changed` push refreshes the timeline.
+   */
+  applyReview(): Promise<void>;
+  /** Discard the active review session entirely (tear down the shadow worktree). */
+  discardReview(): Promise<void>;
 
   /**
    * Reducer for incoming AgentEvents (called from the edit.onEvent subscription).
@@ -572,6 +608,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   streaming: false,
   selfHealPhase: null,
   liveDiffs: [],
+  reviewSession: null,
   checkpoints: [],
   currentCheckpointId: undefined,
   settingsOpen: false,
@@ -718,6 +755,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       streaming: false,
       selfHealPhase: null,
       liveDiffs: [],
+      reviewSession: null,
       checkpoints: [],
       currentCheckpointId: undefined,
       mode: 'idle',
@@ -1003,6 +1041,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     const requestId = genId();
     const now = Date.now();
 
+    // Issue #19: read the review-mode flag once at submit time. When on, the
+    // edit is STAGED in a shadow worktree and streamed diffs route into a review
+    // session instead of the live timeline.
+    const reviewMode = get().settings?.featureFlags.reviewMode ?? false;
+
     // Snapshot annotations before clearing so the user message carries them.
     const snapshotAnnotations = annotations.length > 0 ? [...annotations] : undefined;
 
@@ -1021,6 +1064,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       activeRequestId: requestId,
       streaming: true,
       liveDiffs: [],
+      // Issue #19: initialize a fresh review session for a review request, or
+      // clear any stale one for a normal (live) request.
+      reviewSession: reviewMode
+        ? { requestId, baseCheckpointId: get().currentCheckpointId, changes: [] }
+        : null,
       lastError: null,
       // Issue #31: a new turn always starts from a clean self-heal phase, so a
       // prior turn's phase (e.g. a fail-open verify) can never bleed into it.
@@ -1043,6 +1091,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         projectRoot: project.root,
         devServerUrl: previewUrl ?? project.devServerUrl,
       },
+      reviewMode,
     });
 
     if (!result.ok) {
@@ -1059,6 +1108,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         lastError: result.error,
         streaming: false,
         activeRequestId: null,
+        // Tear down the review session we optimistically opened.
+        reviewSession: null,
       }));
     }
     // On IPC success, streaming events drive the rest via applyAgentEvent.
@@ -1095,10 +1146,78 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     if (!result.ok) set({ lastError: result.error });
   },
 
+  /* ---- Issue #19: Review mode (propose-don't-write) ----------------------- */
+
+  setReviewDecision(filePath, decision) {
+    set((s) => {
+      if (!s.reviewSession) return {};
+      return {
+        reviewSession: {
+          ...s.reviewSession,
+          changes: setStagedDecision(s.reviewSession.changes, filePath, decision),
+        },
+      };
+    });
+  },
+
+  focusReviewChange(filePath) {
+    if (filePath === null) {
+      // Clear the on-page highlight.
+      get().sendInspectorCommand({ type: 'highlight-source', sources: null });
+      return;
+    }
+    const change = get().reviewSession?.changes.find((c) => c.diff.filePath === filePath);
+    if (!change?.source) {
+      // Nothing resolvable to highlight (e.g. created file); clear instead.
+      get().sendInspectorCommand({ type: 'highlight-source', sources: null });
+      return;
+    }
+    get().sendInspectorCommand({ type: 'highlight-source', sources: [change.source] });
+  },
+
+  async applyReview() {
+    const session = get().reviewSession;
+    if (!session) return;
+    const paths = approvedPaths(session.changes);
+
+    const result = await easel.review.apply({
+      requestId: session.requestId,
+      approvedPaths: paths,
+    });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    // Clear the session + highlight. Main creates the real checkpoint and pushes
+    // checkpoint.changed, which refreshes the timeline via the init subscription.
+    get().sendInspectorCommand({ type: 'highlight-source', sources: null });
+    set({ reviewSession: null, streaming: false, lastError: null });
+  },
+
+  async discardReview() {
+    const session = get().reviewSession;
+    if (!session) return;
+
+    const result = await easel.review.discard({ requestId: session.requestId });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    get().sendInspectorCommand({ type: 'highlight-source', sources: null });
+    set({ reviewSession: null, streaming: false, lastError: null });
+  },
+
   /* ---- AgentEvent reducer -------------------------------------------------- */
 
   applyAgentEvent(e) {
-    const { activeRequestId } = get();
+    const { activeRequestId, reviewSession } = get();
+
+    // Issue #19: when the streaming request is a REVIEW request, the diff /
+    // checkpoint / done / error events must NOT touch the live timeline — they
+    // accumulate into the review session instead. `thinking`/`message`/etc. are
+    // shared (the chat transcript narrates a review edit the same way).
+    const isReviewRequest =
+      reviewSession !== null && reviewSession.requestId === e.requestId;
 
     switch (e.type) {
       case 'thinking': {
@@ -1227,6 +1346,22 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'file-edit': {
         if (e.requestId !== activeRequestId) return;
 
+        // Issue #19: a review request stages each edit into the review session
+        // (upsert by filePath, source-anchored, default pending). It never
+        // touches liveDiffs / the live timeline.
+        if (isReviewRequest) {
+          set((s) => {
+            if (!s.reviewSession) return {};
+            return {
+              reviewSession: {
+                ...s.reviewSession,
+                changes: upsertStagedChange(s.reviewSession.changes, e.diff, get().targets),
+              },
+            };
+          });
+          break;
+        }
+
         // Accumulate / update live diffs. Replace an existing entry for the
         // same file so we always show the latest diff for that file.
         set((s) => {
@@ -1244,6 +1379,21 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'diff': {
         if (e.requestId !== activeRequestId) return;
 
+        // Issue #19: replace the staged change set from the full snapshot,
+        // preserving per-file decisions, without touching liveDiffs.
+        if (isReviewRequest) {
+          set((s) => {
+            if (!s.reviewSession) return {};
+            return {
+              reviewSession: {
+                ...s.reviewSession,
+                changes: replaceStagedChanges(s.reviewSession.changes, e.diffs, get().targets),
+              },
+            };
+          });
+          break;
+        }
+
         // Full snapshot of all accumulated diffs for this request.
         set({ liveDiffs: e.diffs });
         break;
@@ -1251,6 +1401,14 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
       case 'checkpoint': {
         if (e.requestId !== activeRequestId) return;
+
+        // Issue #19: in review mode this is a STAGING checkpoint on the shadow
+        // worktree — NOT a real timeline checkpoint. Ignore it entirely for
+        // timeline purposes: do NOT add it to `checkpoints`, advance
+        // `currentCheckpointId`, annotate the chat for per-message undo, or
+        // overwrite the session's fork-point `baseCheckpointId`. The real
+        // checkpoint is created only on applyReview().
+        if (isReviewRequest) break;
 
         // Prepend the new checkpoint and advance the cursor.
         set((s) => ({
@@ -1301,6 +1459,37 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
       case 'done': {
         if (e.requestId !== activeRequestId) return;
+
+        // Issue #19: a review request finalizes the stream (streaming off,
+        // activeRequestId cleared) but KEEPS the review session open so the user
+        // can approve/reject. Nothing is marked applied: no liveDiffs, no chat
+        // bubble diffs (the ReviewPanel renders the staged set). The assistant
+        // bubble still gets its summary text.
+        if (isReviewRequest) {
+          set((s) => {
+            const last = s.chat[s.chat.length - 1];
+            const clear = {
+              streaming: false,
+              activeRequestId: null,
+              pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
+                (p) => p.requestId !== e.requestId,
+              ),
+            };
+            if (last?.role === 'assistant' && last.requestId === e.requestId) {
+              const updated: ChatMessage = { ...last, content: last.content || e.summary };
+              return { ...clear, chat: [...s.chat.slice(0, -1), updated] };
+            }
+            const doneMsg: ChatMessage = {
+              id: genId(),
+              role: 'assistant',
+              content: e.summary,
+              createdAt: Date.now(),
+              requestId: e.requestId,
+            };
+            return { ...clear, chat: [...s.chat, doneMsg] };
+          });
+          break;
+        }
 
         // Issue #32 fix B: when this `done` finalizes a self-heal RETRY attempt,
         // the backend reports ONLY the retry invocation's diffs. Replacing the

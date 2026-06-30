@@ -255,6 +255,16 @@ const api: EaselApi = {
       return ipcRenderer.invoke(IpcChannels.publishOpenPr, req);
     },
   },
+
+  // ── review.* (Issue #19: propose-don't-write) ─────────────────────────────────
+  review: {
+    apply(req) {
+      return ipcRenderer.invoke(IpcChannels.reviewApply, req);
+    },
+    discard(req) {
+      return ipcRenderer.invoke(IpcChannels.reviewDiscard, req);
+    },
+  },
 };
 
 /* -------------------------------------------------------------------------- */
