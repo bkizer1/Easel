@@ -5,7 +5,9 @@
  *  - State:       live state/props/hooks/computed-style of the picked element,
  *                 each row source-anchored with a one-click "Change this" edit.
  *  - Network:     the page's network requests (via the CDP tap), each failing
- *                 row offering "Add states" to bridge into a source edit.
+ *                 row offering "Add states" to bridge into a source edit. With
+ *                 Intercept on (CDP Fetch), requests pause for Continue / Mock /
+ *                 Block — a Burp-style request interceptor.
  *  - Time-travel: deep-diff of two checkpoints' persisted state snapshots.
  *
  * Every observed fact bridges into the existing EditRequest pipeline through the
@@ -23,6 +25,10 @@ import {
   GitCompare,
   Loader2,
   MousePointer2,
+  Hand,
+  Play,
+  Ban,
+  Send,
 } from 'lucide-react';
 import { useEaselStore } from '../store';
 import { formatSerializedValue } from '@shared/xray';
@@ -287,6 +293,102 @@ function statusColor(entry: NetworkEntry): string {
   return 'text-emerald-400';
 }
 
+/**
+ * Per-row interception controls, shown only while a request is paused at the CDP
+ * Fetch interceptor. Continue and Block are one-click; Mock reveals a compact
+ * inline editor (status + body) that fulfills the request with a synthetic
+ * response. Bridges into the store's continue/fulfill/fail actions by interceptId.
+ */
+function PausedControls({ entry }: { entry: NetworkEntry }): React.ReactElement | null {
+  const continueReq = useEaselStore((s) => s.continueRequest);
+  const fulfillReq = useEaselStore((s) => s.fulfillRequest);
+  const failReq = useEaselStore((s) => s.failRequest);
+  const [mocking, setMocking] = React.useState(false);
+  const [status, setStatus] = React.useState('200');
+  const [body, setBody] = React.useState('');
+
+  const interceptId = entry.interceptId;
+  if (!interceptId) return null;
+
+  const btn =
+    'flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10.5px] font-medium transition-all duration-150 ease-spring active:scale-[0.97]';
+
+  return (
+    <div className="flex w-full flex-col gap-1.5">
+      <div className="flex items-center gap-1.5">
+        <span className="mr-auto flex items-center gap-1 text-[10.5px] font-medium text-amber-300">
+          <Hand className="h-3 w-3" /> Paused{entry.pausedStage ? ` (${entry.pausedStage})` : ''}
+        </span>
+        <Tooltip label="Let the request through unchanged" side="top">
+          <button
+            onClick={() => void continueReq(interceptId)}
+            aria-label="Continue request"
+            className={`${btn} border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20`}
+          >
+            <Play className="h-3 w-3" /> Continue
+          </button>
+        </Tooltip>
+        <Tooltip label="Reply with a synthetic (mock) response" side="top">
+          <button
+            onClick={() => setMocking((m) => !m)}
+            aria-label="Mock response"
+            aria-expanded={mocking}
+            className={`${btn} border border-iris-500/40 bg-iris-500/10 text-iris-300 hover:bg-iris-500/20`}
+          >
+            <Wand2 className="h-3 w-3" /> Mock
+          </button>
+        </Tooltip>
+        <Tooltip label="Block (fail) this request" side="top">
+          <button
+            onClick={() => void failReq(interceptId)}
+            aria-label="Block request"
+            className={`${btn} border border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20`}
+          >
+            <Ban className="h-3 w-3" /> Block
+          </button>
+        </Tooltip>
+      </div>
+
+      {mocking && (
+        <div className="flex items-center gap-1.5 rounded-md bg-black/20 p-1.5">
+          <label className="flex items-center gap-1 text-[10.5px] text-gray-400">
+            Status
+            <input
+              type="number"
+              value={status}
+              onChange={(e) => setStatus(e.target.value)}
+              aria-label="Mock response status code"
+              className="w-14 rounded border border-white/10 bg-white/[0.04] px-1 py-0.5 font-mono text-[11px] text-gray-200"
+            />
+          </label>
+          <input
+            type="text"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            placeholder="Response body (text/JSON)"
+            aria-label="Mock response body"
+            className="min-w-0 flex-1 rounded border border-white/10 bg-white/[0.04] px-1.5 py-0.5 font-mono text-[11px] text-gray-200"
+          />
+          <button
+            onClick={() => {
+              const code = Number.parseInt(status, 10);
+              void fulfillReq(interceptId, {
+                responseCode: Number.isFinite(code) ? code : 200,
+                ...(body ? { body } : {}),
+              });
+              setMocking(false);
+            }}
+            aria-label="Send mock response"
+            className={`${btn} border border-iris-500/40 bg-iris-500/15 text-iris-200 hover:bg-iris-500/25`}
+          >
+            <Send className="h-3 w-3" /> Send
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NetworkRow({ entry }: { entry: NetworkEntry }): React.ReactElement {
   const bridge = useEaselStore((s) => s.bridgeNetworkToEdit);
   const streaming = useEaselStore((s) => s.streaming);
@@ -294,33 +396,41 @@ function NetworkRow({ entry }: { entry: NetworkEntry }): React.ReactElement {
 
   return (
     <li
-      className={`flex items-center gap-2 px-3.5 py-1.5 hairline-b last:border-0 ${
-        isFailing ? 'bg-rose-500/[0.06]' : ''
+      className={`flex flex-col gap-1.5 px-3.5 py-1.5 hairline-b last:border-0 ${
+        entry.paused ? 'bg-amber-500/[0.07]' : isFailing ? 'bg-rose-500/[0.06]' : ''
       }`}
     >
-      <span className="w-12 flex-shrink-0 font-mono text-[11px] uppercase text-gray-400">
-        {entry.method}
-      </span>
-      <span className={`w-10 flex-shrink-0 font-mono text-[11px] ${statusColor(entry)}`}>
-        {entry.failed ? 'ERR' : (entry.status ?? '—')}
-      </span>
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-gray-300" title={entry.url}>
-        {entry.url}
-      </span>
-      {entry.durationMs !== undefined && (
-        <span className="flex-shrink-0 text-[10.5px] text-gray-500">{Math.round(entry.durationMs)}ms</span>
-      )}
-      {entry.initiator && <SourceChip src={entry.initiator} />}
-      <Tooltip label={streaming ? 'An edit is already running' : 'Add loading/error states for this request'} side="top">
-        <button
-          onClick={() => void bridge(entry.id)}
-          disabled={streaming}
-          aria-label="Add loading/error states for this request"
-          className="flex flex-shrink-0 items-center gap-1 rounded-md border border-iris-500/40 bg-iris-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-iris-300 transition-all duration-150 ease-spring hover:bg-iris-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <Wand2 className="h-3 w-3" /> Add states
-        </button>
-      </Tooltip>
+      <div className="flex items-center gap-2">
+        <span className="w-12 flex-shrink-0 font-mono text-[11px] uppercase text-gray-400">
+          {entry.method}
+        </span>
+        <span className={`w-10 flex-shrink-0 font-mono text-[11px] ${statusColor(entry)}`}>
+          {entry.failed ? 'ERR' : (entry.status ?? '—')}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-gray-300" title={entry.url}>
+          {entry.url}
+        </span>
+        {entry.interceptSummary && (
+          <span className="flex-shrink-0 rounded bg-iris-500/15 px-1 py-0.5 text-[10px] font-medium text-iris-300">
+            {entry.interceptSummary}
+          </span>
+        )}
+        {entry.durationMs !== undefined && (
+          <span className="flex-shrink-0 text-[10.5px] text-gray-500">{Math.round(entry.durationMs)}ms</span>
+        )}
+        {entry.initiator && <SourceChip src={entry.initiator} />}
+        <Tooltip label={streaming ? 'An edit is already running' : 'Add loading/error states for this request'} side="top">
+          <button
+            onClick={() => void bridge(entry.id)}
+            disabled={streaming}
+            aria-label="Add loading/error states for this request"
+            className="flex flex-shrink-0 items-center gap-1 rounded-md border border-iris-500/40 bg-iris-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-iris-300 transition-all duration-150 ease-spring hover:bg-iris-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Wand2 className="h-3 w-3" /> Add states
+          </button>
+        </Tooltip>
+      </div>
+      {entry.paused && <PausedControls entry={entry} />}
     </li>
   );
 }
@@ -328,11 +438,14 @@ function NetworkRow({ entry }: { entry: NetworkEntry }): React.ReactElement {
 function NetworkTab(): React.ReactElement {
   const entries = useEaselStore((s) => s.networkEntries);
   const capturing = useEaselStore((s) => s.networkCapturing);
+  const intercepting = useEaselStore((s) => s.networkIntercepting);
   const setCapture = useEaselStore((s) => s.setNetworkCapture);
+  const setIntercept = useEaselStore((s) => s.setNetworkIntercept);
   const clearLog = useEaselStore((s) => s.clearNetworkLog);
 
   // Newest first.
   const items = [...entries].reverse();
+  const pausedCount = entries.filter((e) => e.paused).length;
 
   return (
     <div>
@@ -351,6 +464,28 @@ function NetworkTab(): React.ReactElement {
             {capturing ? 'Capturing' : 'Capture'}
           </button>
         </Tooltip>
+        <Tooltip
+          label={
+            intercepting
+              ? 'Stop intercepting — let requests flow'
+              : 'Pause requests for Continue / Mock / Block (Burp-style)'
+          }
+          side="bottom"
+        >
+          <button
+            onClick={() => void setIntercept(!intercepting)}
+            aria-label={intercepting ? 'Stop intercepting requests' : 'Intercept requests'}
+            aria-pressed={intercepting}
+            className={`flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-all duration-150 ease-spring active:scale-[0.97] ${
+              intercepting
+                ? 'bg-amber-500/15 text-amber-300'
+                : 'text-gray-400 hover:bg-white/[0.06] hover:text-gray-200'
+            }`}
+          >
+            <Hand className="h-3 w-3" />
+            {intercepting ? 'Intercepting' : 'Intercept'}
+          </button>
+        </Tooltip>
         {items.length > 0 && (
           <Tooltip label="Clear network log" side="bottom">
             <button
@@ -363,6 +498,9 @@ function NetworkTab(): React.ReactElement {
           </Tooltip>
         )}
         <span className="ml-auto text-[11px] text-gray-500">
+          {pausedCount > 0 && (
+            <span className="mr-2 font-medium text-amber-300">{pausedCount} paused</span>
+          )}
           {items.length} request{items.length === 1 ? '' : 's'}
         </span>
       </div>

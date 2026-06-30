@@ -34,7 +34,14 @@ import type {
   StyleEdit,
   TokenMatch,
 } from '@shared/types';
-import type { DevServerStatePayload, InspectorCommand, PreviewStatusPayload, ScaffoldEventPayload } from '@shared/ipc';
+import type {
+  DevServerStatePayload,
+  InspectorCommand,
+  NetworkRequestRewrite,
+  NetworkResponseMock,
+  PreviewStatusPayload,
+  ScaffoldEventPayload,
+} from '@shared/ipc';
 import { buildSitePrompt, type NewSiteBrief } from '@shared/siteBrief';
 import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
@@ -248,6 +255,8 @@ export interface EaselState {
   networkEntries: NetworkEntry[];
   /** Whether the CDP network tap is attached + capturing. */
   networkCapturing: boolean;
+  /** Whether OPT-IN request interception ("Burp" mode) is active. */
+  networkIntercepting: boolean;
   /** A one-shot InspectorCommand for the guest, drained by PreviewPane. */
   pendingInspectorCommand: InspectorCommand | null;
   /** Bumped whenever {@link pendingInspectorCommand} is set, to trigger send. */
@@ -478,6 +487,14 @@ export interface EaselActions {
   bridgeNetworkToEdit(entryId: string): Promise<void>;
   /** Enable/disable the CDP network tap on the guest webview. */
   setNetworkCapture(enabled: boolean): Promise<void>;
+  /** Enable/disable OPT-IN request interception ("Burp" mode). */
+  setNetworkIntercept(enabled: boolean): Promise<void>;
+  /** Resume a paused (intercepted) request, optionally rewriting it. */
+  continueRequest(interceptId: string, rewrite?: NetworkRequestRewrite): Promise<void>;
+  /** Fulfill (mock) a paused request with a synthetic response. */
+  fulfillRequest(interceptId: string, mock: NetworkResponseMock): Promise<void>;
+  /** Block (fail) a paused request at the interceptor. */
+  failRequest(interceptId: string, reason?: string): Promise<void>;
   /** Refresh the buffered network log + capture state from main. */
   loadNetworkLog(): Promise<void>;
   /** Clear the buffered network log. */
@@ -587,6 +604,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   currentElementState: null,
   networkEntries: [],
   networkCapturing: false,
+  networkIntercepting: false,
   pendingInspectorCommand: null,
   inspectorCommandNonce: 0,
   styleTweak: null,
@@ -644,6 +662,17 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       });
     });
 
+    // State X-Ray: reconcile capture/intercept flags when main reports an
+    // out-of-band change (e.g. a guest reload silently detached the debugger, or
+    // the tap re-attached after navigation) — keeps the cockpit honest instead
+    // of falsely showing "Capturing"/"Intercept" after a detach.
+    const unsubNetworkStatus = easel.xray.onNetworkStatus((payload) => {
+      set({
+        networkCapturing: payload.capturing,
+        networkIntercepting: payload.intercepting,
+      });
+    });
+
     // Load initial data from main (fire-and-forget; errors set lastError).
     void (async () => {
       // Load settings first so the rest of the UI can render properly.
@@ -676,6 +705,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       unsubScaffold();
       unsubEdit();
       unsubNetwork();
+      unsubNetworkStatus();
     };
   },
 
@@ -728,6 +758,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       xrayOpen: false,
       currentElementState: null,
       networkEntries: [],
+      networkCapturing: false,
+      networkIntercepting: false,
       // Issues #6-#11: clear feature state so it never leaks into the next project.
       styleTweak: null,
       tokenMatches: null,
@@ -1902,6 +1934,50 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     if (result.value.detail && enabled && !result.value.capturing) {
       set({ lastError: result.value.detail });
     }
+  },
+
+  async setNetworkIntercept(enabled) {
+    const result = await easel.xray.setNetworkIntercept({ enabled });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    // Interception requires (and turns on) capture; reflect both.
+    set({
+      networkIntercepting: result.value.intercepting,
+      networkCapturing: result.value.capturing,
+    });
+    if (result.value.detail && enabled && !result.value.intercepting) {
+      set({ lastError: result.value.detail });
+    }
+  },
+
+  async continueRequest(interceptId, rewrite?: NetworkRequestRewrite) {
+    const result = await easel.xray.continueRequest({ interceptId, ...(rewrite ? { rewrite } : {}) });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    // The resolved entry (paused → false) streams back over network.event.
+    if (!result.value.applied && result.value.detail) set({ lastError: result.value.detail });
+  },
+
+  async fulfillRequest(interceptId, mock: NetworkResponseMock) {
+    const result = await easel.xray.fulfillRequest({ interceptId, mock });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    if (!result.value.applied && result.value.detail) set({ lastError: result.value.detail });
+  },
+
+  async failRequest(interceptId, reason?: string) {
+    const result = await easel.xray.failRequest({ interceptId, ...(reason ? { reason } : {}) });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    if (!result.value.applied && result.value.detail) set({ lastError: result.value.detail });
   },
 
   async loadNetworkLog() {

@@ -464,6 +464,32 @@ export interface NetworkEntry {
   initiator?: SourceLocation;
   /** Raw initiator URL (script that issued the request), for display. */
   initiatorUrl?: string;
+
+  /* ── Interception lifecycle (the "Burp" part — Workstream 2) ────────────────
+   * All optional + backward-compatible: a passively-logged request has none of
+   * these set. They are only populated when the Fetch interception mode is on.
+   */
+  /**
+   * CDP `Fetch.requestPaused` id, present only while this request is HELD by the
+   * interceptor awaiting a Continue/Fulfill/Block decision. Cleared (the field
+   * removed) once an action resolves it. This is the handle the
+   * continue/fulfill/fail IPC operations take.
+   */
+  interceptId?: string;
+  /** True while the request is paused at the interceptor awaiting a decision. */
+  paused?: boolean;
+  /** Which interception stage paused it: `'request'` or `'response'`. */
+  pausedStage?: 'request' | 'response';
+  /** Set once the user fulfilled (mocked) the response for this request. */
+  mocked?: boolean;
+  /** Set once the user blocked (failed) this request at the interceptor. */
+  blocked?: boolean;
+  /**
+   * Short human summary of an applied rewrite/override (e.g. `→ 503` for a mock,
+   * `method PUT` for a request rewrite, or `BlockedByClient` for a block), shown
+   * inline in the cockpit so the user can see what they did to the request.
+   */
+  interceptSummary?: string;
 }
 
 /* -------------------------------------------------------------------------- */

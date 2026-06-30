@@ -29,6 +29,10 @@ import type {
   PreviewRequestImageRequest,
   PreviewOpenExternalRequest,
   XraySetNetworkCaptureRequest,
+  XraySetNetworkInterceptRequest,
+  XrayContinueRequestRequest,
+  XrayFulfillRequestRequest,
+  XrayFailRequestRequest,
   XraySaveSnapshotRequest,
   XrayGetSnapshotRequest,
   TokensMatchRequest,
@@ -75,6 +79,10 @@ import { buildJudgePrompt, runVisionJudge } from '@main/agents/visionJudge';
 import { createAnthropicClient } from '@main/agents/anthropicClient';
 import {
   setNetworkCapture,
+  setNetworkIntercept,
+  continueRequest,
+  fulfillRequest,
+  failRequest,
   getNetworkLog,
   clearNetworkLog,
 } from '@main/networkTap';
@@ -392,6 +400,28 @@ export function registerIpcHandlers(): void {
 
   handle(IpcChannels.xraySetNetworkCapture, (req: XraySetNetworkCaptureRequest) => {
     return ok(setNetworkCapture(req.enabled));
+  });
+
+  handle(IpcChannels.xraySetNetworkIntercept, (req: XraySetNetworkInterceptRequest) => {
+    return ok(setNetworkIntercept(req.enabled));
+  });
+
+  handle(IpcChannels.xrayContinueRequest, (req: XrayContinueRequestRequest) => {
+    if (!req.interceptId) return fail('interceptId is required', 'validation');
+    return ok(continueRequest(req.interceptId, req.rewrite));
+  });
+
+  handle(IpcChannels.xrayFulfillRequest, (req: XrayFulfillRequestRequest) => {
+    if (!req.interceptId) return fail('interceptId is required', 'validation');
+    if (!req.mock || typeof req.mock.responseCode !== 'number') {
+      return fail('a mock with a numeric responseCode is required', 'validation');
+    }
+    return ok(fulfillRequest(req.interceptId, req.mock));
+  });
+
+  handle(IpcChannels.xrayFailRequest, (req: XrayFailRequestRequest) => {
+    if (!req.interceptId) return fail('interceptId is required', 'validation');
+    return ok(failRequest(req.interceptId, req.reason));
   });
 
   handle(IpcChannels.xraySaveSnapshot, (req: XraySaveSnapshotRequest) => {
