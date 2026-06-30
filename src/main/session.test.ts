@@ -41,6 +41,20 @@ function gitIn(dir: string, ...args: string[]): string {
 }
 
 /**
+ * Initialise a throwaway git repo with a test identity and LF line endings
+ * pinned. Disabling `core.autocrlf` is essential on Windows, where git would
+ * otherwise rewrite LF -> CRLF on apply/checkout and break the byte-exact
+ * content assertions below (the replay itself is faithful; the env must not lie).
+ */
+function initRepo(dir: string): void {
+  gitIn(dir, 'init', '-q');
+  gitIn(dir, 'config', 'user.email', 'test@easel.dev');
+  gitIn(dir, 'config', 'user.name', 'Easel Test');
+  gitIn(dir, 'config', 'core.autocrlf', 'false');
+  gitIn(dir, 'config', 'core.eol', 'lf');
+}
+
+/**
  * Build a source repo whose `refs/easel/checkpoint` carries two checkpoints:
  *   - `orig`  — creates `app.tsx` = "v0\n" (first commit, no parent)
  *   - `edit1` — modifies `app.tsx` to "v1\n" AND adds `feature.tsx` = "new\n"
@@ -48,9 +62,7 @@ function gitIn(dir: string, ...args: string[]): string {
  */
 function makeSourceRepo(): { root: string; origSha: string; edit1Sha: string } {
   const root = tmp('easel-src-');
-  gitIn(root, 'init', '-q');
-  gitIn(root, 'config', 'user.email', 'test@easel.dev');
-  gitIn(root, 'config', 'user.name', 'Easel Test');
+  initRepo(root);
 
   writeFileSync(join(root, 'app.tsx'), 'v0\n');
   gitIn(root, 'add', '--all');
@@ -162,9 +174,7 @@ describe('importBundleInto', () => {
 
     // A fresh, unrelated target git repo.
     const target = tmp('easel-tgt-');
-    gitIn(target, 'init', '-q');
-    gitIn(target, 'config', 'user.email', 'test@easel.dev');
-    gitIn(target, 'config', 'user.name', 'Easel Test');
+    initRepo(target);
     writeFileSync(join(target, 'app.tsx'), 'v0\n');
     gitIn(target, 'add', '--all');
     gitIn(target, 'commit', '-q', '-m', 'target init');
@@ -205,9 +215,7 @@ describe('replayCheckpoint', () => {
   }> {
     const { bytes } = await packFromSource();
     const target = tmp('easel-replay-');
-    gitIn(target, 'init', '-q');
-    gitIn(target, 'config', 'user.email', 'test@easel.dev');
-    gitIn(target, 'config', 'user.name', 'Easel Test');
+    initRepo(target);
     writeFileSync(join(target, 'app.tsx'), initialAppTsx);
     gitIn(target, 'add', '--all');
     gitIn(target, 'commit', '-q', '-m', 'target init');
@@ -272,9 +280,7 @@ describe('replayCheckpoint', () => {
     // A target that does NOT have app.tsx, so creating it applies cleanly.
     const { bytes } = await packFromSource();
     const target = tmp('easel-root-');
-    gitIn(target, 'init', '-q');
-    gitIn(target, 'config', 'user.email', 'test@easel.dev');
-    gitIn(target, 'config', 'user.name', 'Easel Test');
+    initRepo(target);
     writeFileSync(join(target, 'readme.md'), 'hi\n');
     gitIn(target, 'add', '--all');
     gitIn(target, 'commit', '-q', '-m', 'target init');
