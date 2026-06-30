@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { buildChildEnv, evaluateSdkWrite } from './claudeAgentSdk';
+import { buildChildEnv, buildResponsiveMatrixContext, evaluateSdkWrite } from './claudeAgentSdk';
 
 /**
  * Regression tests for the "use the Claude Code subscription, not the metered
@@ -80,5 +80,56 @@ describe('evaluateSdkWrite (SDK guardrail hook decision)', () => {
   it('allows when no path or no gate is present', async () => {
     expect(await evaluateSdkWrite('Write', {}, root, denyGate)).toBeNull();
     expect(await evaluateSdkWrite('Write', { file_path: '/proj/.env' }, root, undefined)).toBeNull();
+  });
+});
+
+/**
+ * Issue #14 (Responsive Matrix edit): the prompt block that tells the model
+ * about the staged breakpoint frames. Pure string assembly — no filesystem/SDK.
+ */
+describe('buildResponsiveMatrixContext', () => {
+  it('returns an empty string when there are no frames', () => {
+    expect(buildResponsiveMatrixContext([])).toBe('');
+  });
+
+  it('lists every frame with its label, width, active marker, and filePath', () => {
+    const frames = [
+      {
+        label: 'Desktop',
+        width: 1280,
+        active: false,
+        filePath: '/tmp/easel-vision/selection-req-1-frame-desktop.png',
+      },
+      {
+        label: 'Tablet',
+        width: 768,
+        active: true,
+        filePath: '/tmp/easel-vision/selection-req-1-frame-tablet.png',
+      },
+      {
+        label: 'Mobile',
+        width: 375,
+        active: false,
+        filePath: '/tmp/easel-vision/selection-req-1-frame-mobile.png',
+      },
+    ];
+    const out = buildResponsiveMatrixContext(frames);
+
+    // Every label, width, and filePath is present.
+    for (const f of frames) {
+      expect(out).toContain(f.label);
+      expect(out).toContain(`${f.width}px`);
+      expect(out).toContain(f.filePath);
+    }
+
+    // The active frame (Tablet) is marked; the inactive ones are not.
+    const tabletLine = out.split('\n').find((l) => l.includes('Tablet · '));
+    expect(tabletLine).toMatch(/ACTIVE/);
+    const desktopLine = out.split('\n').find((l) => l.includes('Desktop · '));
+    expect(desktopLine).not.toMatch(/ACTIVE/);
+
+    // It frames the task as fixing responsive CSS and tells the model to Read.
+    expect(out).toMatch(/responsive/i);
+    expect(out).toMatch(/Read/);
   });
 });

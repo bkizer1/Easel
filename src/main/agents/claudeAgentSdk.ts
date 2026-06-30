@@ -208,19 +208,67 @@ async function toolUseToDiffs(
   return [];
 }
 
-/** Decode a data-URL screenshot to a temp file the agent can Read (for vision). */
+/**
+ * Decode a data-URL screenshot to a temp file the agent can Read (for vision).
+ *
+ * `suffix` discriminates the filename when several images are staged under the
+ * same `requestId` (e.g. responsive-matrix frames) so they don't collide.
+ * Omitting it yields the historical `selection-${requestId}.${ext}` filename.
+ */
 async function prepareScreenshot(
   dataUrl: string,
   requestId: string,
+  suffix?: string,
 ): Promise<{ filePath: string; dir: string } | null> {
   const m = /^data:image\/([a-zA-Z]+);base64,(.+)$/s.exec(dataUrl);
   if (!m) return null;
   const ext = m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
   const dir = path.join(os.tmpdir(), 'easel-vision');
   await mkdir(dir, { recursive: true });
-  const filePath = path.join(dir, `selection-${requestId}.${ext}`);
+  const filePath = path.join(dir, `selection-${requestId}${suffix ? `-${suffix}` : ''}.${ext}`);
   await writeFile(filePath, Buffer.from(m[2], 'base64'));
   return { filePath, dir };
+}
+
+/** Slugify a frame label into a filename-safe discriminator (e.g. "Tablet (md)" → "tablet-md"). */
+function slugifyLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
+ * Assemble the "RESPONSIVE MATRIX CONTEXT" prompt block from already-staged
+ * frames. Pure: takes the staged frame metadata (label/width/active/filePath)
+ * and returns prompt text — no filesystem or SDK access — so it's unit-testable
+ * in isolation. Returns '' when there are no frames.
+ */
+export function buildResponsiveMatrixContext(
+  frames: Array<{ label: string; width: number; active: boolean; filePath: string }>,
+): string {
+  if (frames.length === 0) return '';
+
+  const lines = [
+    '',
+    '',
+    'RESPONSIVE MATRIX CONTEXT: the user is editing responsive CSS. The following',
+    'full-page screenshots show how the SAME page renders at different breakpoint',
+    'widths. The marked region you were given belongs to the active frame below.',
+  ];
+  for (const f of frames) {
+    const active = f.active ? '  [ACTIVE — the marked/reported breakpoint]' : '';
+    lines.push(`  - ${f.label} · ${f.width}px wide${active}`);
+    lines.push(`    ${f.filePath}`);
+  }
+  lines.push(
+    'Use the Read tool on each frame to see how the element renders at every',
+    'breakpoint. Fix the reported breakpoint WITHOUT regressing the others: mind',
+    'the difference between shared base styles and media-query overrides — a change',
+    'to a base rule affects every width, while a media-query override only applies',
+    'within its range.',
+  );
+  return lines.join('\n');
 }
 
 const CAPABILITIES: AgentCapabilities = {
@@ -452,6 +500,42 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
           `Use the Read tool to view it — it shows what they're pointing at and the surrounding layout. Let it guide your edit.`;
       }
 
+      // Responsive-matrix frames (issue #14): full-page screenshots of the same
+      // page at different breakpoint widths. Stage each to its own temp file —
+      // keyed by a label slug so multiple frames under one requestId don't
+      // collide — then describe them to the model so it fixes one breakpoint
+      // without regressing the others.
+      const stagedFrames: Array<{
+        label: string;
+        width: number;
+        active: boolean;
+        filePath: string;
+        dir: string;
+      }> = [];
+      if (request.frames?.length) {
+        for (const [i, frame] of request.frames.entries()) {
+          const suffix = `frame-${slugifyLabel(frame.label) || String(i)}`;
+          try {
+            const staged = await prepareScreenshot(frame.screenshotDataUrl, request.id, suffix);
+            if (staged) {
+              stagedFrames.push({
+                label: frame.label,
+                width: frame.width,
+                active: frame.active,
+                filePath: staged.filePath,
+                dir: staged.dir,
+              });
+            }
+          } catch (err) {
+            ctx.logger.warn('Could not stage responsive frame for vision', {
+              label: frame.label,
+              err: String(err),
+            });
+          }
+        }
+      }
+      prompt += buildResponsiveMatrixContext(stagedFrames);
+
       // Surface which ambient auth vars we removed, so it's verifiable from the
       // logs that `inherit` is using the subscription login (not a proxy/key).
       const scrubbedAmbientAuth = CLAUDE_AUTH_ENV_KEYS.filter(
@@ -489,11 +573,19 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
       if (signal.aborted) abortController.abort();
       else signal.addEventListener('abort', () => abortController.abort(), { once: true });
 
+      // Sandbox the SDK Read tool to the project plus any vision temp dirs. The
+      // single-screenshot dir and every staged frame dir are deduped via a Set
+      // (they typically share os.tmpdir()/easel-vision, but a Set keeps this
+      // robust regardless).
+      const visionDirs = new Set<string>();
+      if (screenshot) visionDirs.add(screenshot.dir);
+      for (const f of stagedFrames) visionDirs.add(f.dir);
+
       const sdkOptions: Record<string, unknown> = {
         model: settings.model,
         maxTurns: 20,
         cwd: request.projectRoot,
-        additionalDirectories: screenshot ? [request.projectRoot, screenshot.dir] : [request.projectRoot],
+        additionalDirectories: [request.projectRoot, ...visionDirs],
         // Auto-apply file edits (no interactive permission prompt is possible
         // here) and restrict to safe file tools so the agent can't hang on a
         // Bash permission request.
@@ -626,6 +718,9 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
 
       if (screenshot) {
         await rm(screenshot.filePath, { force: true }).catch(() => undefined);
+      }
+      for (const f of stagedFrames) {
+        await rm(f.filePath, { force: true }).catch(() => undefined);
       }
 
       if (signal.aborted) {

@@ -334,7 +334,8 @@ export function registerIpcHandlers(): void {
 
   handle(IpcChannels.previewCapture, async (req: PreviewCaptureRequest | void) => {
     const box = (req as PreviewCaptureRequest | undefined)?.box;
-    const screenshotDataUrl = await capturePreview(box);
+    const webContentsId = (req as PreviewCaptureRequest | undefined)?.webContentsId;
+    const screenshotDataUrl = await capturePreview(box, webContentsId);
     return ok({ screenshotDataUrl });
   });
 
