@@ -29,6 +29,12 @@ import {
   Play,
   Ban,
   Send,
+  AlertCircle,
+  AlertTriangle,
+  Wrench,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { useEaselStore } from '../store';
 import { formatSerializedValue } from '@shared/xray';
@@ -40,6 +46,7 @@ import type {
   StateGroup,
 } from '@shared/xray';
 import type { SourceLocation } from '@shared/types';
+import type { PageLog } from '../store';
 import { Tooltip } from './Tooltip';
 import { StateDiffList } from './StateDiffList';
 
@@ -60,9 +67,10 @@ function SourceChip({ src }: { src: SourceLocation }): React.ReactElement {
   );
 }
 
-const TAB_LABELS: Record<'state' | 'network' | 'time-travel', string> = {
+const TAB_LABELS: Record<'state' | 'network' | 'error' | 'time-travel', string> = {
   state: 'State',
   network: 'Network',
+  error: 'Errors',
   'time-travel': 'Time-travel',
 };
 
@@ -198,7 +206,14 @@ function StateBody({
   snapshot: ElementStateSnapshot;
   onRefresh: () => void;
 }): React.ReactElement {
-  const changedKeys = snapshot.renderCause?.changedKeys ?? [];
+  const renderCause = snapshot.renderCause;
+  const changedKeys = renderCause?.changedKeys ?? [];
+  // Honest label: a 'commit' diff is a TRUE last-commit cause; otherwise it's
+  // only "since you last inspected this element" (the fallback). Legacy
+  // snapshots without `source` are treated as the latter.
+  const changedLabel =
+    renderCause?.source === 'commit' ? 'Changed last commit' : 'Changed since last inspect';
+  const renderNote = renderCause?.note;
   const computedStyleEntries = Object.entries(snapshot.computedStyle);
 
   // Group entries (preserving GROUP_ORDER) but skip computed-style here — it has
@@ -234,10 +249,18 @@ function StateBody({
         <div className="px-3.5 py-2 text-[11.5px] text-amber-400">{snapshot.error}</div>
       )}
 
-      {changedKeys.length > 0 && (
-        <div className="px-3.5 py-1.5 text-[11px] text-gray-500">
-          Changed since last render:{' '}
-          <span className="font-mono text-gray-400">{changedKeys.join(', ')}</span>
+      {(changedKeys.length > 0 || renderNote) && (
+        <div className="space-y-0.5 px-3.5 py-1.5 text-[11px] text-gray-500">
+          {changedKeys.length > 0 && (
+            <div>
+              {changedLabel}: <span className="font-mono text-gray-400">{changedKeys.join(', ')}</span>
+            </div>
+          )}
+          {renderNote && (
+            <div>
+              Render gate: <span className="font-mono text-gray-400">{renderNote}</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -523,6 +546,161 @@ function NetworkTab(): React.ReactElement {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Error tab                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Compact resolution badge shown after a "Fix" edit finishes: a green check when
+ * no equivalent error re-fired, or an amber note when it did. Mirrors
+ * ConsolePanel's FixStatus so the unified tab reads identically.
+ */
+function FixStatus({
+  state,
+}: {
+  state: NonNullable<PageLog['error']>['fixState'];
+}): React.ReactElement | null {
+  if (state === 'resolved') {
+    return (
+      <span className="flex items-center gap-1 text-[10.5px] font-medium text-emerald-400">
+        <CheckCircle2 className="h-3 w-3" /> Resolved
+      </span>
+    );
+  }
+  if (state === 'still-erroring') {
+    return (
+      <span className="flex items-center gap-1 text-[10.5px] font-medium text-amber-400">
+        <AlertTriangle className="h-3 w-3" /> Still erroring
+      </span>
+    );
+  }
+  return null;
+}
+
+/**
+ * One captured page log (warning / error). Uncaught runtime errors carry
+ * structured `error.sources` (sourcemapped stack frames) — each is rendered as a
+ * source-anchored {@link SourceChip}, and the error gets a one-click "Fix"
+ * bridge into the same {@link fixPageError} pipeline ConsolePanel uses.
+ */
+function ErrorRow({ log }: { log: PageLog }): React.ReactElement {
+  const fixPageError = useEaselStore((s) => s.fixPageError);
+  const streaming = useEaselStore((s) => s.streaming);
+  const hasProject = useEaselStore((s) => s.project !== null);
+
+  const sources = log.error?.sources ?? [];
+
+  return (
+    <li className="flex items-start gap-2.5 px-3.5 py-2 hairline-b last:border-0">
+      <span className={`mt-0.5 flex-shrink-0 ${log.level === 'error' ? 'text-rose-400' : 'text-amber-400'}`}>
+        {log.level === 'error' ? (
+          <AlertCircle className="h-3.5 w-3.5" />
+        ) : (
+          <AlertTriangle className="h-3.5 w-3.5" />
+        )}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-gray-300">
+          {log.message}
+        </span>
+        {log.source && (
+          <span className="mt-0.5 block truncate text-[10.5px] text-gray-600">{log.source}</span>
+        )}
+
+        {/* Source anchors: each parsed top stack frame becomes a chip, like the
+            other taps' rows. */}
+        {sources.length > 0 && (
+          <span className="mt-1 flex flex-wrap items-center gap-1">
+            {sources.map((src, i) => (
+              <SourceChip key={`${src.filePath}:${src.line}:${src.column}:${i}`} src={src} />
+            ))}
+          </span>
+        )}
+
+        {/* Uncaught runtime errors → one-click AI fix targeting the throwing file. */}
+        {log.error && (
+          <span className="mt-1.5 flex items-center gap-2">
+            {log.error.fixState === 'fixing' ? (
+              <span className="flex items-center gap-1 text-[10.5px] font-medium text-brand-400">
+                <Loader2 className="h-3 w-3 animate-spin" /> Fixing…
+              </span>
+            ) : log.error.fixState === 'resolved' || log.error.fixState === 'still-erroring' ? (
+              <FixStatus state={log.error.fixState} />
+            ) : (
+              <Tooltip
+                label={
+                  !hasProject
+                    ? 'Open a project folder so Claude can edit its source'
+                    : streaming
+                      ? 'An edit is already running'
+                      : 'Let Claude fix this error'
+                }
+                side="top"
+              >
+                <button
+                  aria-label="Fix this error"
+                  onClick={() => void fixPageError(log.id)}
+                  disabled={streaming || !hasProject}
+                  className="flex items-center gap-1 rounded-md border border-iris-500/40 bg-iris-500/10 px-1.5 py-0.5 text-[10.5px] font-medium text-iris-300 transition-all duration-150 ease-spring hover:bg-iris-500/20 active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <Wrench className="h-3 w-3" /> Fix
+                </button>
+              </Tooltip>
+            )}
+          </span>
+        )}
+      </span>
+    </li>
+  );
+}
+
+function ErrorTab(): React.ReactElement {
+  const pageLogs = useEaselStore((s) => s.pageLogs);
+  const clearPageLogs = useEaselStore((s) => s.clearPageLogs);
+
+  // Newest first.
+  const items = [...pageLogs].reverse();
+  const errorCount = pageLogs.filter((l) => l.level === 'error').length;
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 px-3.5 py-2 hairline-b">
+        <span className="flex items-center gap-1.5 text-[11px] text-gray-500">
+          Symbolicated runtime &amp; console errors from the previewed page.
+        </span>
+        {items.length > 0 && (
+          <Tooltip label="Clear page console" side="bottom">
+            <button
+              onClick={() => clearPageLogs()}
+              aria-label="Clear page console"
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-[0.97]"
+            >
+              <Trash2 className="h-3 w-3" /> Clear
+            </button>
+          </Tooltip>
+        )}
+        <span className="ml-auto text-[11px] text-gray-500">
+          {errorCount > 0 && <span className="mr-2 font-medium text-rose-300">{errorCount} error{errorCount === 1 ? '' : 's'}</span>}
+          {items.length} log{items.length === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="px-3.5 py-6 text-center text-[12px] leading-relaxed text-gray-500">
+          No warnings or errors from the page. If the preview is blank, uncaught errors will surface
+          here with a one-click fix.
+        </div>
+      ) : (
+        <ul>
+          {items.map((log) => (
+            <ErrorRow key={log.id} log={log} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Time-travel tab                                                            */
 /* -------------------------------------------------------------------------- */
 
@@ -607,10 +785,28 @@ function TimeTravelTab(): React.ReactElement {
 /*  Panel shell                                                                */
 /* -------------------------------------------------------------------------- */
 
-export function StateXRayPanel(): React.ReactElement {
+/**
+ * Dock controls passed down from the App-level {@link XRayDock} wrapper, which
+ * owns the resizable/collapsible bottom dock (height + collapse persisted across
+ * reopen). Optional so the panel still renders standalone in tests/stories.
+ */
+export interface StateXRayPanelProps {
+  /** Whether the dock is collapsed to just its header. */
+  collapsed?: boolean;
+  /** Toggle the dock's collapsed state. */
+  onToggleCollapse?: () => void;
+}
+
+export function StateXRayPanel({
+  collapsed = false,
+  onToggleCollapse,
+}: StateXRayPanelProps = {}): React.ReactElement {
   const xrayTab = useEaselStore((s) => s.xrayTab);
   const setXrayTab = useEaselStore((s) => s.setXrayTab);
   const setXrayOpen = useEaselStore((s) => s.setXrayOpen);
+  // Error badge: surface the unread error count on the Errors tab even while the
+  // user is on another tab, so the unified error tap is discoverable.
+  const errorCount = useEaselStore((s) => s.pageLogs.filter((l) => l.level === 'error').length);
 
   return (
     <div className="flex h-full flex-col">
@@ -620,39 +816,70 @@ export function StateXRayPanel(): React.ReactElement {
           <ScanEye className="h-3.5 w-3.5 text-brand-400" /> State X-Ray
         </span>
 
-        <div className="flex items-center gap-1">
-          {(['state', 'network', 'time-travel'] as const).map((tab) => (
+        {!collapsed && (
+          <div className="flex items-center gap-1">
+            {(['state', 'network', 'error', 'time-travel'] as const).map((tab) => (
+              <button
+                key={tab}
+                onClick={() => setXrayTab(tab)}
+                className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium transition-all duration-150 ease-spring active:scale-[0.97] ${
+                  xrayTab === tab
+                    ? 'bg-brand-500/15 text-brand-300'
+                    : 'text-gray-400 hover:bg-white/[0.06] hover:text-gray-200'
+                }`}
+              >
+                {TAB_LABELS[tab]}
+                {tab === 'error' && errorCount > 0 && (
+                  <span className="grid h-4 min-w-4 place-items-center rounded-full bg-rose-500/20 px-1 text-[9.5px] font-semibold text-rose-300">
+                    {errorCount}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* When collapsed, still surface the error count next to the title. */}
+        {collapsed && errorCount > 0 && (
+          <span className="flex items-center gap-1 rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10.5px] font-medium text-rose-300">
+            <AlertCircle className="h-3 w-3" /> {errorCount}
+          </span>
+        )}
+
+        <div className="ml-auto flex flex-shrink-0 items-center gap-1">
+          {onToggleCollapse && (
+            <Tooltip label={collapsed ? 'Expand panel' : 'Collapse panel'} side="top">
+              <button
+                onClick={onToggleCollapse}
+                aria-label={collapsed ? 'Expand State X-Ray' : 'Collapse State X-Ray'}
+                aria-expanded={!collapsed}
+                className="rounded-md p-1 text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-90"
+              >
+                {collapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </button>
+            </Tooltip>
+          )}
+          <Tooltip label="Close State X-Ray" side="top">
             <button
-              key={tab}
-              onClick={() => setXrayTab(tab)}
-              className={`rounded-md px-2 py-1 text-[11.5px] font-medium transition-all duration-150 ease-spring active:scale-[0.97] ${
-                xrayTab === tab
-                  ? 'bg-brand-500/15 text-brand-300'
-                  : 'text-gray-400 hover:bg-white/[0.06] hover:text-gray-200'
-              }`}
+              onClick={() => setXrayOpen(false)}
+              aria-label="Close State X-Ray"
+              className="rounded-md p-1 text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-90"
             >
-              {TAB_LABELS[tab]}
+              <X className="h-3.5 w-3.5" />
             </button>
-          ))}
+          </Tooltip>
         </div>
-
-        <Tooltip label="Close State X-Ray" side="top">
-          <button
-            onClick={() => setXrayOpen(false)}
-            aria-label="Close State X-Ray"
-            className="ml-auto flex-shrink-0 rounded-md p-1 text-gray-500 transition-all duration-150 ease-spring hover:bg-white/[0.06] hover:text-gray-300 active:scale-90"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </Tooltip>
       </div>
 
-      {/* Body */}
-      <div className="flex-1 overflow-y-auto">
-        {xrayTab === 'state' && <StateTab />}
-        {xrayTab === 'network' && <NetworkTab />}
-        {xrayTab === 'time-travel' && <TimeTravelTab />}
-      </div>
+      {/* Body — hidden while collapsed so only the header strip shows. */}
+      {!collapsed && (
+        <div className="flex-1 overflow-y-auto">
+          {xrayTab === 'state' && <StateTab />}
+          {xrayTab === 'network' && <NetworkTab />}
+          {xrayTab === 'error' && <ErrorTab />}
+          {xrayTab === 'time-travel' && <TimeTravelTab />}
+        </div>
+      )}
     </div>
   );
 }

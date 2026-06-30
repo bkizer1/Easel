@@ -48,6 +48,8 @@ import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid'
 import {
   serializeValue,
   formatSerializedValue,
+  diffFiberRenderCause,
+  deriveRenderNote as deriveRenderNotePure,
   type ElementStateSnapshot,
   type StateEntry,
   type DetectedFramework,
@@ -891,6 +893,9 @@ interface ReactFiber {
   return?: ReactFiber | null;
   memoizedProps?: unknown;
   memoizedState?: ReactHook | unknown;
+  /** React's previously-committed fiber for this node — the basis of a TRUE
+   *  last-commit render-cause diff (see `diffFiberRenderCause`). */
+  alternate?: ReactFiber | null;
 }
 
 /** One node in React's hook linked list (`fiber.memoizedState.next…`). */
@@ -975,6 +980,39 @@ function formatEntryValue(entry: StateEntry): string {
     return formatSerializedValue(entry.value);
   } catch {
     return '';
+  }
+}
+
+/** Compact, comparable string for any raw value, reusing the shared serializer. */
+function formatRawValue(value: unknown): string {
+  try {
+    return formatSerializedValue(serializeValue(value, { maxDepth: 2, maxEntries: 12 }));
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Read the observable render-gate signals off `el` and delegate to the shared,
+ * unit-tested `deriveRenderNotePure` for the honest "why is this here/shown"
+ * wording. This wrapper only does the DOM reads (so the decision logic stays
+ * pure + testable); it never throws.
+ */
+function deriveRenderNote(el: Element): string | undefined {
+  try {
+    let classList: string[] = [];
+    try {
+      classList = Array.from(el.classList);
+    } catch {
+      classList = [];
+    }
+    return deriveRenderNotePure({
+      hidden: el.hasAttribute('hidden'),
+      ariaHidden: el.getAttribute('aria-hidden'),
+      classList,
+    });
+  } catch {
+    return undefined;
   }
 }
 
@@ -1111,6 +1149,8 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
     let framework: DetectedFramework = 'unknown';
     let componentName: string | undefined;
     const entries: StateEntry[] = [];
+    // Held so render-cause can diff against this fiber's `alternate` below.
+    let reactComponentFiber: ReactFiber | undefined;
 
     // React.
     const fiber = findReactFiber(el);
@@ -1118,6 +1158,7 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
       framework = 'react';
       const componentFiber = nearestComponentFiber(fiber);
       if (componentFiber) {
+        reactComponentFiber = componentFiber;
         componentName = reactComponentName(componentFiber.type);
         collectReactEntries(componentFiber, entries);
       }
@@ -1148,24 +1189,53 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
 
     const computedStyle = collectComputedStyle(el);
 
-    // Render-cause: diff the current label→value map against the cached prior
-    // one for this selector. Only meaningful when a prior snapshot exists.
+    // ── Render-cause ───────────────────────────────────────────────────────
+    // Build the current label→value map up front; it both seeds the cache and
+    // backs the "since you last inspected" fallback diff.
     const currentMap = new Map<string, string>();
     for (const entry of entries) currentMap.set(entry.label, formatEntryValue(entry));
-    const priorMap = renderCauseCache.get(selector);
+
     let renderCause: RenderCause | undefined;
-    if (priorMap) {
-      const changedKeys: string[] = [];
-      for (const [label, formatted] of currentMap) {
-        const prior = priorMap.get(label);
-        if (prior !== undefined && prior !== formatted) changedKeys.push(label);
+
+    // (a) TRUE last-commit cause: diff the component fiber's current props +
+    //     hook-state against React's previously-committed fiber (`alternate`).
+    //     This is the authoritative source whenever React retained an alternate.
+    let changedKeys: string[] | null = null;
+    let source: RenderCause['source'] = 'since-pick';
+    if (reactComponentFiber) {
+      changedKeys = diffFiberRenderCause(reactComponentFiber, formatRawValue);
+      if (changedKeys) source = 'commit';
+    }
+
+    // (b) Fallback: no alternate (first commit / non-React) → diff the current
+    //     value set against the cache from the last time THIS selector was
+    //     inspected. This is the original "since last pick" behavior.
+    if (changedKeys === null) {
+      const priorMap = renderCauseCache.get(selector);
+      if (priorMap) {
+        const sincePick: string[] = [];
+        for (const [label, formatted] of currentMap) {
+          const prior = priorMap.get(label);
+          if (prior !== undefined && prior !== formatted) sincePick.push(label);
+        }
+        // The host's hint can only narrow what it already knows changed; the
+        // cache remains authoritative, so we intersect when a hint is supplied.
+        const filtered = previousKeys ? sincePick.filter((k) => previousKeys.includes(k)) : sincePick;
+        changedKeys = filtered.length ? filtered : sincePick;
+        source = 'since-pick';
       }
-      // The host's hint can only narrow what it already knows changed; the cache
-      // remains authoritative, so we intersect when a hint is supplied.
-      const filtered = previousKeys
-        ? changedKeys.filter((k) => previousKeys.includes(k))
-        : changedKeys;
-      renderCause = { changedKeys: filtered.length ? filtered : changedKeys };
+    }
+
+    // Honest "why is this here/shown" note, walked from the element. Independent
+    // of the changed-key diff — present even on the very first inspection.
+    const note = deriveRenderNote(el);
+
+    if (changedKeys !== null || note) {
+      renderCause = {
+        changedKeys: changedKeys ?? [],
+        ...(changedKeys !== null ? { source } : {}),
+        ...(note ? { note } : {}),
+      };
     }
     renderCauseCache.set(selector, currentMap);
 

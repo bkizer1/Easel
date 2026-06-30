@@ -248,7 +248,7 @@ export interface EaselState {
   /** Whether the State X-Ray cockpit panel is open. */
   xrayOpen: boolean;
   /** Active cockpit tab. */
-  xrayTab: 'state' | 'network' | 'time-travel';
+  xrayTab: 'state' | 'network' | 'error' | 'time-travel';
   /** Live state of the most recently picked element (State tap), or null. */
   currentElementState: ElementStateSnapshot | null;
   /** Observed network requests (newest last), streamed from the CDP tap. */
@@ -465,7 +465,7 @@ export interface EaselActions {
   /** Open/close the cockpit panel. */
   setXrayOpen(open: boolean): void;
   /** Switch the active cockpit tab (refreshes the network log when relevant). */
-  setXrayTab(tab: 'state' | 'network' | 'time-travel'): void;
+  setXrayTab(tab: 'state' | 'network' | 'error' | 'time-travel'): void;
   /** Queue a one-shot InspectorCommand for the guest (drained by PreviewPane). */
   sendInspectorCommand(cmd: InspectorCommand): void;
   /** Record the live element-state snapshot relayed from the guest. */
