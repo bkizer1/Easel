@@ -44,6 +44,14 @@ import type {
 } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { accumulateStyleEdit } from './styleDelta';
+import {
+  collectSvelteEntries,
+  collectReactContextEntries,
+  applyVueWrite,
+  unwrapMaybeRef,
+  hookLabel,
+  type SvelteInstance,
+} from './frameworkTaps';
 import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
 import {
   serializeValue,
@@ -896,6 +904,11 @@ interface ReactFiber {
   /** React's previously-committed fiber for this node — the basis of a TRUE
    *  last-commit render-cause diff (see `diffFiberRenderCause`). */
   alternate?: ReactFiber | null;
+  /** Subscribed React Context dependencies (dev + prod), walked for the
+   *  'context' state group. */
+  dependencies?: { firstContext?: unknown } | null;
+  /** Dev-only ordered list of hook names, used to label hook rows precisely. */
+  _debugHookTypes?: string[];
 }
 
 /** One node in React's hook linked list (`fiber.memoizedState.next…`). */
@@ -1092,7 +1105,7 @@ function collectReactEntries(componentFiber: ReactFiber, entries: StateEntry[]):
       const writable = typeof hook.queue?.dispatch === 'function';
       entries.push({
         group: 'hooks',
-        label: `state[${stateIndex}]`,
+        label: hookLabel(componentFiber._debugHookTypes, index, stateIndex),
         value: serializeValue(value),
         path: ['hooks', String(index)],
         writable,
@@ -1102,6 +1115,9 @@ function collectReactEntries(componentFiber: ReactFiber, entries: StateEntry[]):
     hook = hook.next ?? undefined;
     index++;
   }
+
+  // Subscribed React Context slices (the 'context' group). Read-only.
+  collectReactContextEntries(componentFiber, entries, MAX_STATE_ENTRIES);
 }
 
 /** Collect Vue props + setupState entries off a component instance. */
@@ -1122,15 +1138,44 @@ function collectVueEntries(comp: VueComponentInternal, entries: StateEntry[]): v
     for (const key of Object.keys(comp.setupState)) {
       if (entries.length >= MAX_STATE_ENTRIES) return;
       if (key.startsWith('__') || key.startsWith('$')) continue; // internals
+      // Unwrap refs so the row shows the underlying value, not the ref wrapper.
       entries.push({
         group: 'state',
         label: key,
-        value: serializeValue(comp.setupState[key]),
+        value: serializeValue(unwrapMaybeRef(comp.setupState[key])),
         path: ['setupState', key],
         writable: true,
       });
     }
   }
+}
+
+/**
+ * Best-effort reach for a Svelte component instance from a DOM node. Svelte does
+ * not attach the instance to the DOM by default, so this scans the element and a
+ * few ancestors for an own-property (`__…`) whose value carries a `$$` with a
+ * `ctx` array (the internal instance shape). Returns null when unreachable —
+ * common, and handled honestly by the caller (name-only, no state rows).
+ */
+function findSvelteInstance(el: Element): SvelteInstance | null {
+  try {
+    let node: Element | null = el;
+    let hops = 0;
+    while (node && hops++ < 4) {
+      for (const key of Object.getOwnPropertyNames(node)) {
+        if (!key.startsWith('__')) continue;
+        const v = (node as unknown as Record<string, unknown>)[key];
+        if (v && typeof v === 'object' && '$$' in (v as object)) {
+          const inst = v as SvelteInstance;
+          if (inst.$$ && Array.isArray(inst.$$.ctx)) return inst;
+        }
+      }
+      node = node.parentElement;
+    }
+  } catch {
+    // Reading exotic own-properties can throw; treat as unreachable.
+  }
+  return null;
 }
 
 /**
@@ -1175,8 +1220,10 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
       }
     }
 
-    // Svelte (best-effort — internals are mostly closure-bound; we only surface
-    // the component name when the dev compiler stamped `__svelte_meta`).
+    // Svelte. The component name comes from the dev compiler's `__svelte_meta`;
+    // reactive state comes from the instance's `$$.ctx` when it is reachable
+    // (best-effort — Svelte's instance is often closure-bound and not exposed on
+    // the DOM, in which case we honestly surface the name with no state rows).
     if (framework === 'unknown') {
       const meta = readProp(el, '__svelte_meta');
       if (meta && typeof meta === 'object') {
@@ -1184,6 +1231,8 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
         const loc = readProp(meta, 'loc');
         const file = readProp(loc, 'file');
         if (typeof file === 'string' && file) componentName = file.split('/').pop();
+        const instance = findSvelteInstance(el);
+        if (instance) collectSvelteEntries(instance, entries, MAX_STATE_ENTRIES);
       }
     }
 
@@ -1309,8 +1358,10 @@ function applySetValue(el: Element, path: string[], value: unknown): boolean {
       if (vueComp) {
         const bag = group === 'setupState' ? vueComp.setupState : vueComp.props;
         if (bag && typeof bag === 'object' && key) {
-          (bag as Record<string, unknown>)[key] = value;
-          return true;
+          // Ref-aware: write through `.value` when the member is a Vue ref so
+          // reactivity propagates instead of silently replacing the unwrapped
+          // value on the proxy.
+          return applyVueWrite(bag as Record<string, unknown>, key, value);
         }
       }
       return false;
