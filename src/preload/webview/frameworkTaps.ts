@@ -162,26 +162,4 @@ export function applyVueWrite(
   return true;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  React — hook row labelling                                                  */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Label a React hook row. When the dev build exposes `_debugHookTypes` (the
- * ordered list of hook names, e.g. `['useState','useRef','useState']`), use the
- * hook's real name for a more precise identity than a bare positional index;
- * otherwise fall back to `state[stateIndex]`. `hookIndex` is the raw position in
- * the hook chain; `stateIndex` is the position among non-function (stateful)
- * slots actually shown.
- */
-export function hookLabel(
-  debugHookTypes: string[] | undefined,
-  hookIndex: number,
-  stateIndex: number,
-): string {
-  const t = Array.isArray(debugHookTypes) ? debugHookTypes[hookIndex] : undefined;
-  if (typeof t === 'string' && t) return `${t}[${stateIndex}]`;
-  return `state[${stateIndex}]`;
-}
-
 export type { SerializedValue, StateEntry };

@@ -197,28 +197,45 @@ function XRayDock(): JSX.Element {
   }, [collapsed]);
 
   // Pointer-driven resize from the top-edge handle. Dragging up grows the dock
-  // (height increases as the pointer moves toward the top of the window).
+  // (height increases as the pointer moves toward the top of the window). Uses
+  // pointer CAPTURE (not window listeners) so the drag keeps tracking even when
+  // the pointer crosses the Electron <webview> beneath — which otherwise
+  // swallows host-window pointer events and freezes the drag — and so React
+  // tears the handlers down automatically if the dock unmounts mid-drag.
+  const dragState = useRef<{ startY: number; startH: number } | null>(null);
+
   const onHandlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (collapsed) return; // can't resize a collapsed dock
       e.preventDefault();
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unsupported/failed — the drag still works window-locally */
+      }
+      dragState.current = { startY: e.clientY, startH: height };
       setDragging(true);
-      const startY = e.clientY;
-      const startH = height;
-      const onMove = (ev: PointerEvent): void => {
-        // Pointer moving up (smaller clientY) → taller dock.
-        setHeight(clampDockHeight(startH + (startY - ev.clientY)));
-      };
-      const onUp = (): void => {
-        setDragging(false);
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
     },
     [collapsed, height],
   );
+
+  const onHandlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragState.current;
+    if (!st) return;
+    // Pointer moving up (smaller clientY) → taller dock.
+    setHeight(clampDockHeight(st.startH + (st.startY - e.clientY)));
+  }, []);
+
+  const onHandlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragState.current) return;
+    dragState.current = null;
+    setDragging(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  }, []);
 
   const effectiveHeight = collapsed ? XRAY_DOCK_COLLAPSED_HEIGHT : height;
 
@@ -234,6 +251,9 @@ function XRayDock(): JSX.Element {
           aria-orientation="horizontal"
           aria-label="Resize State X-Ray panel"
           onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+          onPointerCancel={onHandlePointerUp}
           className={[
             'absolute -top-1 left-0 right-0 z-10 h-2 cursor-row-resize',
             'after:absolute after:left-1/2 after:top-1/2 after:h-0.5 after:w-8 after:-translate-x-1/2 after:-translate-y-1/2 after:rounded-full',

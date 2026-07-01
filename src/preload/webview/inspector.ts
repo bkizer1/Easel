@@ -49,7 +49,6 @@ import {
   collectReactContextEntries,
   applyVueWrite,
   unwrapMaybeRef,
-  hookLabel,
   type SvelteInstance,
 } from './frameworkTaps';
 import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
@@ -907,8 +906,6 @@ interface ReactFiber {
   /** Subscribed React Context dependencies (dev + prod), walked for the
    *  'context' state group. */
   dependencies?: { firstContext?: unknown } | null;
-  /** Dev-only ordered list of hook names, used to label hook rows precisely. */
-  _debugHookTypes?: string[];
 }
 
 /** One node in React's hook linked list (`fiber.memoizedState.next…`). */
@@ -1103,9 +1100,14 @@ function collectReactEntries(componentFiber: ReactFiber, entries: StateEntry[]):
     // not meaningful "state" rows for the cockpit.
     if (typeof value !== 'function') {
       const writable = typeof hook.queue?.dispatch === 'function';
+      // Label by the positional STATEFUL index. (React's dev `_debugHookTypes`
+      // can't be indexed by the raw chain position — useContext/useDebugValue add
+      // a type entry but no chain node, so they desync the two lists — and this
+      // keeps the row labels aligned with the render-cause note's `state[N]` keys
+      // and the write-back path below.)
       entries.push({
         group: 'hooks',
-        label: hookLabel(componentFiber._debugHookTypes, index, stateIndex),
+        label: `state[${stateIndex}]`,
         value: serializeValue(value),
         path: ['hooks', String(index)],
         writable,

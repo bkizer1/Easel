@@ -1930,7 +1930,14 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: result.error });
       return;
     }
-    set({ networkCapturing: result.value.capturing });
+    // Disabling capture also tears down interception in main; reflect both so
+    // the cockpit never stays stuck showing "Intercepting" after capture is off.
+    set({
+      networkCapturing: result.value.capturing,
+      ...(result.value.intercepting !== undefined
+        ? { networkIntercepting: result.value.intercepting }
+        : {}),
+    });
     if (result.value.detail && enabled && !result.value.capturing) {
       set({ lastError: result.value.detail });
     }
@@ -1986,7 +1993,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: result.error });
       return;
     }
-    set({ networkEntries: result.value.entries, networkCapturing: result.value.capturing });
+    set({
+      networkEntries: result.value.entries,
+      networkCapturing: result.value.capturing,
+      networkIntercepting: result.value.intercepting,
+    });
   },
 
   async clearNetworkLog() {

@@ -420,6 +420,8 @@ export interface XrayGetNetworkLogResponse {
   entries: NetworkEntry[];
   /** Whether the CDP network tap is currently attached + capturing. */
   capturing: boolean;
+  /** Whether request interception ("Burp" mode) is currently on. */
+  intercepting: boolean;
 }
 
 export interface XraySetNetworkCaptureRequest {

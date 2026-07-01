@@ -11,7 +11,6 @@ import {
   isVueRef,
   unwrapMaybeRef,
   applyVueWrite,
-  hookLabel,
   type StateEntry,
   type SvelteInstance,
 } from './frameworkTaps';
@@ -131,18 +130,5 @@ describe('Vue ref helpers', () => {
 
   it('applyVueWrite returns false when the key is absent', () => {
     expect(applyVueWrite({}, 'missing', 1)).toBe(false);
-  });
-});
-
-describe('hookLabel', () => {
-  it('uses the real hook name from _debugHookTypes when present', () => {
-    const types = ['useState', 'useRef', 'useReducer'];
-    expect(hookLabel(types, 0, 0)).toBe('useState[0]');
-    expect(hookLabel(types, 2, 1)).toBe('useReducer[1]');
-  });
-
-  it('falls back to state[stateIndex] without _debugHookTypes (prod build)', () => {
-    expect(hookLabel(undefined, 3, 2)).toBe('state[2]');
-    expect(hookLabel([], 0, 0)).toBe('state[0]');
   });
 });

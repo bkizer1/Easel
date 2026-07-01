@@ -476,12 +476,19 @@ function handleRequestPaused(p: CdpRequestPaused): void {
 /*  Interception actions (continue / fulfill / fail)                           */
 /* -------------------------------------------------------------------------- */
 
-/** Send a best-effort `Fetch.continueRequest` that never throws. */
+/**
+ * Send a best-effort `Fetch.continueRequest` that never throws AND never leaks an
+ * unhandled rejection. `debugger.sendCommand` returns a promise that REJECTS on a
+ * dead/stale interceptId (e.g. a request whose id was cleared by a navigation
+ * race), so a bare sync try/catch would miss it — we attach `.catch` too.
+ */
 function safeContinue(interceptId: string, params?: FetchContinueParams): void {
   const wc = attached;
   if (!wc || wc.isDestroyed() || !wc.debugger.isAttached()) return;
   try {
-    wc.debugger.sendCommand('Fetch.continueRequest', params ?? { requestId: interceptId });
+    void wc.debugger
+      .sendCommand('Fetch.continueRequest', params ?? { requestId: interceptId })
+      .catch((err) => log.warn('Fetch.continueRequest failed', { err: String(err) }));
   } catch (err) {
     log.warn('Fetch.continueRequest failed', { err: String(err) });
   }
@@ -529,7 +536,9 @@ export function fulfillRequest(
   const wc = attached;
   if (wc && !wc.isDestroyed() && wc.debugger.isAttached()) {
     try {
-      wc.debugger.sendCommand('Fetch.fulfillRequest', buildFulfillParams(interceptId, mock));
+      void wc.debugger
+        .sendCommand('Fetch.fulfillRequest', buildFulfillParams(interceptId, mock))
+        .catch((err) => log.warn('Fetch.fulfillRequest failed', { err: String(err) }));
     } catch (err) {
       log.warn('Fetch.fulfillRequest failed', { err: String(err) });
     }
@@ -555,7 +564,9 @@ export function failRequest(
   const wc = attached;
   if (wc && !wc.isDestroyed() && wc.debugger.isAttached()) {
     try {
-      wc.debugger.sendCommand('Fetch.failRequest', { requestId: interceptId, errorReason: reason });
+      void wc.debugger
+        .sendCommand('Fetch.failRequest', { requestId: interceptId, errorReason: reason })
+        .catch((err) => log.warn('Fetch.failRequest failed', { err: String(err) }));
     } catch (err) {
       log.warn('Fetch.failRequest failed', { err: String(err) });
     }
@@ -689,9 +700,16 @@ function reattachAfterNavigation(): void {
     return;
   }
 
-  // Same live attachment survived (in-page nav): just clear stale paused state
-  // (those Fetch ids are dead after navigation) and resync.
+  // Same live attachment survived (top-level in-page nav, OR — because
+  // did-frame-navigate also fires for SUBFRAMES — a mere iframe navigation that
+  // did NOT detach the debugger). In the subframe case the top document's held
+  // requests are still live, so we must RELEASE them before dropping bookkeeping
+  // — otherwise a cleared-but-still-paused request wedges the page (a later
+  // Continue/Fulfill/Block finds no paused entry and never resolves it). Mirror
+  // disableFetch's release-before-clear; safeContinue is best-effort so it is
+  // harmless for the true full-nav case where some ids are already dead.
   if (attached === wc && wc.debugger.isAttached()) {
+    for (const id of Array.from(pausedRequests.keys())) safeContinue(id);
     clearPausedRequests();
     emitStatus();
     return;
@@ -936,4 +954,7 @@ function detach(): void {
   clearPausedRequests();
   messageHandler = null;
   attached = null;
+  // Push honest state so the renderer clears both Capturing AND Intercepting even
+  // when the teardown was out-of-band (navigation, capture toggled off, quit).
+  emitStatus();
 }
