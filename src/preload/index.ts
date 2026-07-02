@@ -257,6 +257,28 @@ const api: EaselApi = {
     },
   },
 
+  // ── puppeteer.* (Live State Puppeteer, issue #17) ───────────────────────────
+  puppeteer: {
+    getState() {
+      return ipcRenderer.invoke(IpcChannels.puppeteerGetState);
+    },
+    setEnabled(req) {
+      return ipcRenderer.invoke(IpcChannels.puppeteerSetEnabled, req);
+    },
+    removeMock(req) {
+      return ipcRenderer.invoke(IpcChannels.puppeteerRemoveMock, req);
+    },
+    clearAll() {
+      return ipcRenderer.invoke(IpcChannels.puppeteerClearAll);
+    },
+    resync() {
+      return ipcRenderer.invoke(IpcChannels.puppeteerResync);
+    },
+    onChanged(handler) {
+      return subscribe(IpcChannels.puppeteerChanged, handler);
+    },
+  },
+
   // ── tokens.* (Issue #8) ─────────────────────────────────────────────────────
   tokens: {
     match(req) {

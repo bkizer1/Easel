@@ -28,6 +28,7 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { NewSiteWizard } from './components/NewSiteWizard';
 import { PolicyPrompt } from './components/PolicyPrompt';
 import { StateXRayPanel } from './components/StateXRayPanel';
+import { PuppeteerPanel } from './components/PuppeteerPanel';
 import { TweakPanel } from './components/TweakPanel';
 import { TokenPanel } from './components/TokenPanel';
 
@@ -282,6 +283,7 @@ export default function App(): JSX.Element {
   const settingsOpen = useEaselStore((s) => s.settingsOpen);
   const needsAuth = useEaselStore((s) => s.needsAuth);
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
+  const puppeteerOpen = useEaselStore((s) => s.puppeteerOpen);
   const newSiteOpen = useEaselStore((s) => s.newSiteOpen);
 
   // Apply theme whenever settings change.
@@ -363,6 +365,13 @@ export default function App(): JSX.Element {
         {/* State X-Ray cockpit: genuinely dockable bottom panel (issue #13 / WS3).
             Resize via the top-edge handle, collapse/expand, height persisted. */}
         {xrayOpen && <XRayDock />}
+
+        {/* Live State Puppeteer panel: dockable bottom panel (issue #17) */}
+        {puppeteerOpen && (
+          <div className="shrink-0 hairline-t h-72 bg-ink-900/60">
+            <PuppeteerPanel />
+          </div>
+        )}
 
         {/* DiffViewer: slide-up panel when there are live diffs */}
         {liveDiffs.length > 0 && (
