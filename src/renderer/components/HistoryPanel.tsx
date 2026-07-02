@@ -23,11 +23,15 @@ import {
   Trash2,
   GitPullRequest,
   ExternalLink,
+  GitCompare,
+  Loader2,
 } from 'lucide-react';
 import type { Checkpoint } from '@shared/types';
+import type { StateDiffEntry } from '@shared/xray';
 import { useEaselStore } from '../store';
 import { easel } from '../lib/api';
 import { Tooltip } from './Tooltip';
+import { StateDiffList } from './StateDiffList';
 
 function relTime(ts: number): string {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -108,9 +112,82 @@ function VisualDiff({ checkpointId }: { checkpointId: string }): React.ReactElem
   );
 }
 
-function CheckpointEntry({ c, isCurrent }: { c: Checkpoint; isCurrent: boolean }): React.ReactElement {
+/**
+ * Per-checkpoint state deep-diff (State X-Ray time-travel). Compares this
+ * checkpoint's persisted snapshot against the previous (older) checkpoint's, so
+ * the row answers "how did app state change at this checkpoint?". Reuses the same
+ * `compareSnapshots` store action + `StateDiffList` rendering as the cockpit's
+ * Time-travel tab. When there is no previous checkpoint, there is nothing to diff
+ * against (the very first checkpoint).
+ */
+function StateDiff({
+  checkpointId,
+  previousCheckpointId,
+}: {
+  checkpointId: string;
+  previousCheckpointId: string | undefined;
+}): React.ReactElement {
+  const compareSnapshots = useEaselStore((s) => s.compareSnapshots);
+  // `'none'` ⇒ compared but a snapshot was missing for one side.
+  const [diff, setDiff] = useState<StateDiffEntry[] | null | 'none'>(null);
+  const [loaded, setLoaded] = useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    if (!previousCheckpointId) {
+      setLoaded(true);
+      return;
+    }
+    void compareSnapshots(previousCheckpointId, checkpointId).then((result) => {
+      if (!active) return;
+      setDiff(result === null ? 'none' : result);
+      setLoaded(true);
+    });
+    return () => {
+      active = false;
+    };
+  }, [checkpointId, previousCheckpointId, compareSnapshots]);
+
+  if (!previousCheckpointId) {
+    return (
+      <div className="px-3.5 py-3 text-[11px] text-gray-500">
+        First checkpoint — no earlier state to diff against.
+      </div>
+    );
+  }
+
+  if (!loaded) {
+    return (
+      <div className="flex items-center gap-1.5 px-3.5 py-3 text-[11px] text-gray-500">
+        <Loader2 className="h-3 w-3 animate-spin" /> Comparing state…
+      </div>
+    );
+  }
+
+  return (
+    <div className="pb-1">
+      <StateDiffList
+        diff={diff}
+        emptyPrompt="No state diff available."
+        missingPrompt="No state snapshot stored for one of these checkpoints."
+        noChangesPrompt="No state changes at this checkpoint."
+      />
+    </div>
+  );
+}
+
+function CheckpointEntry({
+  c,
+  isCurrent,
+  previousCheckpointId,
+}: {
+  c: Checkpoint;
+  isCurrent: boolean;
+  previousCheckpointId: string | undefined;
+}): React.ReactElement {
   const restoreCheckpoint = useEaselStore((s) => s.restoreCheckpoint);
   const [expanded, setExpanded] = useState(false);
+  const [stateExpanded, setStateExpanded] = useState(false);
 
   return (
     <li>
@@ -147,6 +224,17 @@ function CheckpointEntry({ c, isCurrent }: { c: Checkpoint; isCurrent: boolean }
             </span>
           </button>
         </Tooltip>
+        <Tooltip label="State diff vs. previous checkpoint" side="left">
+          <button
+            onClick={() => setStateExpanded((e) => !e)}
+            aria-label="State diff vs. previous checkpoint"
+            className={`mt-0.5 flex shrink-0 items-center gap-0.5 rounded-md px-1 py-0.5 transition-all duration-150 ease-spring hover:bg-white/10 hover:text-brand-300 active:scale-90 ${
+              stateExpanded ? 'text-brand-300' : 'text-gray-500'
+            }`}
+          >
+            <GitCompare className="h-3 w-3" />
+          </button>
+        </Tooltip>
         <Tooltip label="Before / after screenshots" side="left">
           <button
             onClick={() => setExpanded((e) => !e)}
@@ -158,6 +246,9 @@ function CheckpointEntry({ c, isCurrent }: { c: Checkpoint; isCurrent: boolean }
           </button>
         </Tooltip>
       </div>
+      {stateExpanded && (
+        <StateDiff checkpointId={c.id} previousCheckpointId={previousCheckpointId} />
+      )}
       {expanded && <VisualDiff checkpointId={c.id} />}
     </li>
   );
@@ -324,8 +415,15 @@ export function HistoryPanel(): React.ReactElement {
         </div>
       ) : (
         <ul className="max-h-80 overflow-y-auto py-1">
-          {items.map((c) => (
-            <CheckpointEntry key={c.id} c={c} isCurrent={c.id === currentId} />
+          {items.map((c, i) => (
+            <CheckpointEntry
+              key={c.id}
+              c={c}
+              isCurrent={c.id === currentId}
+              // `items` is newest-first, so the older (previous) checkpoint is the
+              // next one in the list — what this checkpoint's state is diffed against.
+              previousCheckpointId={items[i + 1]?.id}
+            />
           ))}
         </ul>
       )}

@@ -38,6 +38,12 @@ export interface EaselPolicy {
   requireConfirm: string[];
   /** Max distinct files one edit may write. `undefined`/`<= 0` means unlimited. */
   maxFilesPerEdit?: number;
+  /**
+   * When explicitly `false`, disables the Live State Puppeteer feature entirely
+   * for this project (the user toggle is greyed out). Omitted or `true` means
+   * the user may opt in via the toggle.  Default (unset / no file): allowed.
+   */
+  allowStatePuppeteer?: boolean;
 }
 
 /** A policy as resolved for a project, plus how it was obtained. */
@@ -94,6 +100,7 @@ function validatePolicy(parsed: unknown): EaselPolicy | null {
   if ('deny' in obj && !Array.isArray(obj.deny)) return null;
   if ('requireConfirm' in obj && !Array.isArray(obj.requireConfirm)) return null;
   if ('maxFilesPerEdit' in obj && typeof obj.maxFilesPerEdit !== 'number') return null;
+  if ('allowStatePuppeteer' in obj && typeof obj.allowStatePuppeteer !== 'boolean') return null;
 
   const policy: EaselPolicy = {
     deny: asStringArray(obj.deny),
@@ -101,6 +108,9 @@ function validatePolicy(parsed: unknown): EaselPolicy | null {
   };
   if (typeof obj.maxFilesPerEdit === 'number' && Number.isFinite(obj.maxFilesPerEdit)) {
     policy.maxFilesPerEdit = obj.maxFilesPerEdit;
+  }
+  if (typeof obj.allowStatePuppeteer === 'boolean') {
+    policy.allowStatePuppeteer = obj.allowStatePuppeteer;
   }
   return policy;
 }
@@ -269,4 +279,35 @@ export function evaluateWrite(
   }
 
   return { decision: 'allow' };
+}
+
+/**
+ * Decide whether Live State Puppeteer is permitted for the given loaded policy.
+ *
+ * Precedence:
+ *  - `malformed` policy → not allowed (the user should fix policy.json first).
+ *  - `allowStatePuppeteer === false` → explicitly blocked by the project owner.
+ *  - Anything else (unset / `true` / default policy) → allowed (the user toggle
+ *    is the opt-in gate; the policy is only a hard-disable mechanism).
+ *
+ * @returns `{ allowed: true }` or `{ allowed: false, reason: <human message> }`.
+ */
+export function evaluatePuppeteer(loaded: LoadedPolicy): { allowed: boolean; reason?: string } {
+  if (loaded.source === 'malformed') {
+    return {
+      allowed: false,
+      reason:
+        'State Puppeteer is unavailable because .easel/policy.json is malformed. ' +
+        'Fix the file and try again.',
+    };
+  }
+  if (loaded.policy.allowStatePuppeteer === false) {
+    return {
+      allowed: false,
+      reason:
+        'State Puppeteer is disabled by the project policy ' +
+        '(.easel/policy.json → allowStatePuppeteer: false).',
+    };
+  }
+  return { allowed: true };
 }

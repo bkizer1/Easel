@@ -30,18 +30,30 @@ import type {
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
+  RefactorExtractSpec,
+  RefactorSummary,
+  ResponsiveFrame,
   ScratchInfo,
   SourceLocation,
   StyleEdit,
   TokenMatch,
 } from '@shared/types';
-import type { DevServerStatePayload, InspectorCommand, PreviewStatusPayload, ScaffoldEventPayload } from '@shared/ipc';
+import type {
+  DevServerStatePayload,
+  InspectorCommand,
+  NetworkRequestRewrite,
+  NetworkResponseMock,
+  PreviewStatusPayload,
+  ScaffoldEventPayload,
+} from '@shared/ipc';
 import { buildSitePrompt, type NewSiteBrief } from '@shared/siteBrief';
+import { MATRIX_PRESETS, DEFAULT_MATRIX_FRAME_ID, assembleFrames } from './lib/responsiveMatrix';
 import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { mergeFileDiffs } from './lib/mergeFileDiffs';
+import { detectClusters } from './lib/refactorClusters';
 import {
   isStaleSelfHeal,
   nextCorrelationOnRetrying,
@@ -56,10 +68,10 @@ import {
   formatSerializedValue,
   type ElementStateSnapshot,
   type NetworkEntry,
-  type SerializedValue,
   type StateDiffEntry,
   type StateEntry,
 } from '@shared/xray';
+import { EMPTY_PUPPETEER_STATE, type PuppeteerState } from '@shared/puppeteer';
 
 /* -------------------------------------------------------------------------- */
 /*  ID generation                                                             */
@@ -162,6 +174,22 @@ export const VIEWPORT_PRESETS: ViewportPreset[] = [
   { label: 'Mobile', width: 390 },
 ];
 
+/**
+ * A mounted Responsive Matrix frame, registered by PreviewPane once its guest
+ * `<webview>` is ready. Carries the `webContentsId` so {@link submitEdit} can
+ * capture that specific breakpoint (issue #14).
+ */
+export interface MatrixFrameRegistration {
+  /** Matches a {@link MATRIX_PRESETS} id. */
+  id: string;
+  /** Human-readable breakpoint label, e.g. `Desktop`. */
+  label: string;
+  /** CSS px width the frame is rendered at. */
+  width: number;
+  /** Electron guest WebContents id (from `<webview>.getWebContentsId()`). */
+  webContentsId: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  State shape                                                               */
 /* -------------------------------------------------------------------------- */
@@ -187,6 +215,20 @@ export interface EaselState {
   devToolsNonce: number;
   /** Constrained preview width (px) for responsive testing; null = fill. */
   viewportWidth: number | null;
+  /**
+   * Whether the Responsive Matrix is on (issue #14): the dev-server URL renders
+   * in several stacked `<webview>`s at Desktop/Tablet/Mobile widths and every
+   * breakpoint is captured on submit. Off → the single preview above.
+   */
+  responsiveMatrix: boolean;
+  /** Id (from {@link MATRIX_PRESETS}) of the active, interactive matrix frame. */
+  matrixActiveFrameId: string;
+  /**
+   * Live registry of the mounted matrix `<webview>`s, pushed by PreviewPane as
+   * each frame's guest becomes ready. {@link submitEdit} reads it to capture
+   * every breakpoint by `webContentsId`. Empty when the matrix is off.
+   */
+  matrixFrames: MatrixFrameRegistration[];
   /** Warnings/errors captured from the previewed page's console. */
   pageLogs: PageLog[];
   /** Whether the checkpoint History panel is open. */
@@ -212,6 +254,15 @@ export interface EaselState {
    * this; #31 only wires the state + correlation re-arm.
    */
   selfHealPhase: SelfHealPhase | null;
+  /**
+   * Lasso refactor (issue #15): the {@link RefactorSummary} for the in-flight
+   * edit when it was initiated via {@link submitRefactor}, or null for ordinary
+   * edits. Set by {@link submitEdit} at the moment the request is armed and
+   * copied onto the terminal assistant {@link ChatMessage} by the `done` handler
+   * so the ChatPanel can render the grouped diff presentation. Cleared on both
+   * `done` and `error` so it never leaks into subsequent turns.
+   */
+  activeRefactor: RefactorSummary | null;
   /** Live FileDiffs accumulated during the current (or most recent) edit. */
   liveDiffs: FileDiff[];
   /** Ordered checkpoint timeline for the open project, newest first. */
@@ -243,13 +294,15 @@ export interface EaselState {
   /** Whether the State X-Ray cockpit panel is open. */
   xrayOpen: boolean;
   /** Active cockpit tab. */
-  xrayTab: 'state' | 'network' | 'time-travel';
+  xrayTab: 'state' | 'network' | 'error' | 'time-travel';
   /** Live state of the most recently picked element (State tap), or null. */
   currentElementState: ElementStateSnapshot | null;
   /** Observed network requests (newest last), streamed from the CDP tap. */
   networkEntries: NetworkEntry[];
   /** Whether the CDP network tap is attached + capturing. */
   networkCapturing: boolean;
+  /** Whether OPT-IN request interception ("Burp" mode) is active. */
+  networkIntercepting: boolean;
   /** A one-shot InspectorCommand for the guest, drained by PreviewPane. */
   pendingInspectorCommand: InspectorCommand | null;
   /** Bumped whenever {@link pendingInspectorCommand} is set, to trigger send. */
@@ -286,6 +339,15 @@ export interface EaselState {
   replayBusy: boolean;
   /** True while an exportSession call is in flight. */
   exporting: boolean;
+
+  // ── Issue #17: Live State Puppeteer ───────────────────────────────────────
+  /**
+   * Authoritative puppeteer state mirrored from main (enabled flag, active
+   * mocks, recorded state overrides, optional policy-blocked reason).
+   */
+  puppeteer: PuppeteerState;
+  /** Whether the Puppeteer panel is open in the cockpit dock. */
+  puppeteerOpen: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -330,6 +392,12 @@ export interface EaselActions {
   toggleDevTools(): void;
   /** Constrain the preview width for responsive testing (null = fill). */
   setViewportWidth(width: number | null): void;
+  /** Toggle the Responsive Matrix (issue #14); clears the frame registry off. */
+  setResponsiveMatrix(enabled: boolean): void;
+  /** Choose which matrix frame is the active, interactive one (by preset id). */
+  setMatrixActiveFrameId(id: string): void;
+  /** Replace the live registry of mounted matrix frames (pushed by PreviewPane). */
+  setMatrixFrames(frames: MatrixFrameRegistration[]): void;
   /** Append a captured page console warning/error. */
   addPageLog(log: Omit<PageLog, 'id' | 'ts'>): void;
   /**
@@ -371,8 +439,26 @@ export interface EaselActions {
    * Assemble an EditRequest from the current annotations + targets + a
    * screenshot of their union bounding box, push a user ChatMessage, submit
    * the request, and clear the annotation/target draft.
+   *
+   * `opts.refactor` is forwarded verbatim onto the {@link EditRequest} so the
+   * agent backend receives the full refactor spec. `opts.refactorSummary` is
+   * stored as {@link EaselState.activeRefactor} and later stamped onto the
+   * terminal assistant {@link ChatMessage} for the ChatPanel's grouped diff view.
+   * Both are optional; omitting them keeps the existing behavior for ordinary edits.
    */
-  submitEdit(instruction: string): Promise<void>;
+  submitEdit(
+    instruction: string,
+    opts?: { refactor?: RefactorExtractSpec; refactorSummary?: RefactorSummary },
+  ): Promise<void>;
+
+  /**
+   * Lasso refactor (issue #15): turn a detected similarity cluster (from the
+   * current region targets) into an "extract a reusable component" refactor —
+   * sets the cluster members as the targets and submits a refactor-shaped
+   * EditRequest through {@link submitEdit}. `suggestedName` overrides the
+   * cluster's auto-derived name. No-op (sets lastError) if the cluster id is unknown.
+   */
+  submitRefactor(clusterId: string, suggestedName?: string): Promise<void>;
 
   /** Cancel the currently in-flight edit (no-op if idle). */
   cancelEdit(): Promise<void>;
@@ -470,7 +556,7 @@ export interface EaselActions {
   /** Open/close the cockpit panel. */
   setXrayOpen(open: boolean): void;
   /** Switch the active cockpit tab (refreshes the network log when relevant). */
-  setXrayTab(tab: 'state' | 'network' | 'time-travel'): void;
+  setXrayTab(tab: 'state' | 'network' | 'error' | 'time-travel'): void;
   /** Queue a one-shot InspectorCommand for the guest (drained by PreviewPane). */
   sendInspectorCommand(cmd: InspectorCommand): void;
   /** Record the live element-state snapshot relayed from the guest. */
@@ -492,6 +578,14 @@ export interface EaselActions {
   bridgeNetworkToEdit(entryId: string): Promise<void>;
   /** Enable/disable the CDP network tap on the guest webview. */
   setNetworkCapture(enabled: boolean): Promise<void>;
+  /** Enable/disable OPT-IN request interception ("Burp" mode). */
+  setNetworkIntercept(enabled: boolean): Promise<void>;
+  /** Resume a paused (intercepted) request, optionally rewriting it. */
+  continueRequest(interceptId: string, rewrite?: NetworkRequestRewrite): Promise<void>;
+  /** Fulfill (mock) a paused request with a synthetic response. */
+  fulfillRequest(interceptId: string, mock: NetworkResponseMock): Promise<void>;
+  /** Block (fail) a paused request at the interceptor. */
+  failRequest(interceptId: string, reason?: string): Promise<void>;
   /** Refresh the buffered network log + capture state from main. */
   loadNetworkLog(): Promise<void>;
   /** Clear the buffered network log. */
@@ -574,6 +668,28 @@ export interface EaselActions {
    * `code:'conflict'` sets a friendly lastError. Always clears replayBusy.
    */
   replayStep(checkpointId: string): Promise<void>;
+
+  // ── Issue #17: Live State Puppeteer ───────────────────────────────────────
+  /** Open/close the Puppeteer cockpit panel. */
+  setPuppeteerOpen(open: boolean): void;
+  /** Load (or reload) the puppeteer state from main. */
+  loadPuppeteerState(): Promise<void>;
+  /**
+   * Opt in/out of puppeteer control. Sends the toggle to main, which installs or
+   * removes the guest fetch/XHR monkeypatch. When the requested enable is blocked
+   * by policy (detail present + still disabled after the call), surfaces the
+   * reason as lastError consistent with setNetworkCapture.
+   */
+  setPuppeteerEnabled(enabled: boolean): Promise<void>;
+  /** Remove a single active fetch mock by id. */
+  removePuppeteerMock(id: string): Promise<void>;
+  /** Clear all active mocks + recorded state overrides. */
+  clearPuppeteer(): Promise<void>;
+  /**
+   * Re-push the active enabled+mocks state into the guest after a reload/HMR
+   * cycle so interception stays sticky. Called from PreviewPane on inspector-ready.
+   */
+  resyncPuppeteer(): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -598,6 +714,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   previewReloadNonce: 0,
   devToolsNonce: 0,
   viewportWidth: null,
+  responsiveMatrix: false,
+  matrixActiveFrameId: DEFAULT_MATRIX_FRAME_ID,
+  matrixFrames: [],
   pageLogs: [],
   historyOpen: false,
   mode: 'idle',
@@ -608,6 +727,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   activeRequestId: null,
   streaming: false,
   selfHealPhase: null,
+  activeRefactor: null,
   liveDiffs: [],
   checkpoints: [],
   currentCheckpointId: undefined,
@@ -625,6 +745,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   currentElementState: null,
   networkEntries: [],
   networkCapturing: false,
+  networkIntercepting: false,
   pendingInspectorCommand: null,
   inspectorCommandNonce: 0,
   styleTweak: null,
@@ -638,6 +759,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   scrubIndex: 0,
   replayBusy: false,
   exporting: false,
+  puppeteer: EMPTY_PUPPETEER_STATE,
+  puppeteerOpen: false,
 
   /* ---- Init / subscriptions ------------------------------------------------ */
 
@@ -687,6 +810,24 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       });
     });
 
+    // Live State Puppeteer: mirror authoritative state pushed by main on every
+    // toggle, mock add/remove, or clear. Each push is idempotent with the
+    // action return values that also update local state.
+    const unsubPuppeteer = easel.puppeteer.onChanged(({ state }) => {
+      set({ puppeteer: state });
+    });
+
+    // State X-Ray: reconcile capture/intercept flags when main reports an
+    // out-of-band change (e.g. a guest reload silently detached the debugger, or
+    // the tap re-attached after navigation) — keeps the cockpit honest instead
+    // of falsely showing "Capturing"/"Intercept" after a detach.
+    const unsubNetworkStatus = easel.xray.onNetworkStatus((payload) => {
+      set({
+        networkCapturing: payload.capturing,
+        networkIntercepting: payload.intercepting,
+      });
+    });
+
     // Load initial data from main (fire-and-forget; errors set lastError).
     void (async () => {
       // Load settings first so the rest of the UI can render properly.
@@ -707,6 +848,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       if (dsResult.ok) set({ devServer: dsResult.value });
 
       await get().listCheckpoints();
+
+      // Hydrate puppeteer state from main so the panel renders the correct
+      // initial enabled/mocks/overrides without waiting for a push event.
+      await get().loadPuppeteerState();
     })();
 
     // Cleanup: unsubscribe all push listeners on unmount.
@@ -719,6 +864,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       unsubScaffold();
       unsubEdit();
       unsubNetwork();
+      unsubPuppeteer();
+      unsubNetworkStatus();
     };
   },
 
@@ -759,6 +906,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       activeRequestId: null,
       streaming: false,
       selfHealPhase: null,
+      activeRefactor: null,
       liveDiffs: [],
       checkpoints: [],
       currentCheckpointId: undefined,
@@ -771,6 +919,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       xrayOpen: false,
       currentElementState: null,
       networkEntries: [],
+      networkCapturing: false,
+      networkIntercepting: false,
       // Issues #6-#11: clear feature state so it never leaks into the next project.
       styleTweak: null,
       tokenMatches: null,
@@ -860,6 +1010,25 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   setViewportWidth(width) {
     set({ viewportWidth: width });
+  },
+
+  setResponsiveMatrix(enabled) {
+    set((s) => ({
+      responsiveMatrix: enabled,
+      // Drop the live registry when leaving matrix mode; keep a valid active id.
+      matrixFrames: enabled ? s.matrixFrames : [],
+      matrixActiveFrameId: MATRIX_PRESETS.some((p) => p.id === s.matrixActiveFrameId)
+        ? s.matrixActiveFrameId
+        : DEFAULT_MATRIX_FRAME_ID,
+    }));
+  },
+
+  setMatrixActiveFrameId(id) {
+    set({ matrixActiveFrameId: id });
+  },
+
+  setMatrixFrames(frames) {
+    set({ matrixFrames: frames });
   },
 
   addPageLog(log) {
@@ -1016,8 +1185,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   /* ---- Submit edit --------------------------------------------------------- */
 
-  async submitEdit(instruction) {
+  async submitEdit(instruction, opts) {
     const { project, annotations, targets, previewUrl } = get();
+    const { responsiveMatrix, matrixFrames, matrixActiveFrameId } = get();
 
     if (!project) {
       set({ lastError: 'No project is open.' });
@@ -1034,12 +1204,38 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     // main process reads webview pixels via webContents.capturePage.
     const annotationBoxes = annotations.map((a) => a.boundingBox);
     const unionBox = annotationBoxes.length > 0 ? bboxUnion(annotationBoxes) : undefined;
+    // In the Responsive Matrix the marked region lives on the active frame's
+    // webview, so capture that specific guest; otherwise the single preview
+    // (webContentsId undefined → main captures the sole guest).
+    const activeFrame = responsiveMatrix
+      ? matrixFrames.find((f) => f.id === matrixActiveFrameId)
+      : undefined;
     let screenshotDataUrl: string | undefined;
     try {
-      screenshotDataUrl = (await captureRegion(unionBox)) ?? undefined;
+      screenshotDataUrl = (await captureRegion(unionBox, activeFrame?.webContentsId)) ?? undefined;
     } catch {
       // Screenshot is best-effort; the agent can operate without it.
       screenshotDataUrl = undefined;
+    }
+
+    // Responsive Matrix (issue #14): full-frame capture of every visible
+    // breakpoint so the agent sees how the element renders across widths and
+    // can fix one breakpoint without regressing the others.
+    let frames: ResponsiveFrame[] | undefined;
+    if (responsiveMatrix && matrixFrames.length > 0) {
+      try {
+        const captures = await Promise.all(
+          matrixFrames.map(async (f) => ({
+            def: { id: f.id, label: f.label, width: f.width },
+            active: f.id === matrixActiveFrameId,
+            screenshotDataUrl: await captureRegion(undefined, f.webContentsId),
+          })),
+        );
+        frames = assembleFrames(captures);
+      } catch {
+        // Cross-breakpoint context is best-effort; the single screenshot stands.
+        frames = undefined;
+      }
     }
 
     const requestId = genId();
@@ -1067,6 +1263,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       // Issue #31: a new turn always starts from a clean self-heal phase, so a
       // prior turn's phase (e.g. a fail-open verify) can never bleed into it.
       selfHealPhase: null,
+      // Issue #15: stamp the in-flight refactor summary (null for ordinary edits).
+      activeRefactor: opts?.refactorSummary ?? null,
     }));
 
     // Intentionally keep the draft selection (annotations + targets) on screen
@@ -1082,8 +1280,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         annotations,
         targets,
         screenshotDataUrl,
+        frames,
         projectRoot: project.root,
         devServerUrl: previewUrl ?? project.devServerUrl,
+        refactor: opts?.refactor,
       },
     });
 
@@ -1100,10 +1300,43 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         chat: [...s.chat, errMsg],
         lastError: result.error,
         streaming: false,
+        // Clear any refactor tag so a failed submit can't leak it onto a later turn.
+        activeRefactor: null,
         activeRequestId: null,
       }));
     }
     // On IPC success, streaming events drive the rest via applyAgentEvent.
+  },
+
+  /* ---- Lasso refactor (issue #15) ----------------------------------------- */
+
+  async submitRefactor(clusterId, suggestedName) {
+    const { targets } = get();
+    const cluster = detectClusters(targets).find((c) => c.id === clusterId);
+    if (!cluster) {
+      set({ lastError: 'Refactor target no longer available.' });
+      return;
+    }
+    const name = (suggestedName?.trim() || cluster.suggestedName);
+    const tag = cluster.members[0]?.tagName ?? 'element';
+    const refactor = {
+      kind: 'extract-component',
+      memberTargetIds: cluster.members.map((m) => m.id),
+      files: cluster.files,
+      suggestedName: name,
+    } satisfies RefactorExtractSpec;
+    const refactorSummary = {
+      componentName: name,
+      memberCount: cluster.members.length,
+      fileCount: cluster.files.length,
+    } satisfies RefactorSummary;
+    const instruction =
+      `Extract the ${cluster.members.length} similar <${tag}> elements (across ${cluster.files.length} files) ` +
+      `into a single reusable ${name} component, and update every call site to use it.`;
+    // Narrow the draft selection to exactly the cluster members so the
+    // EditRequest carries them as the call sites to rewrite.
+    set({ targets: cluster.members });
+    await get().submitEdit(instruction, { refactor, refactorSummary });
   },
 
   /* ---- Cancel edit --------------------------------------------------------- */
@@ -1314,30 +1547,13 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
           };
         });
 
-        // Time-travel (State X-Ray): persist the live inspected state alongside
-        // the checkpoint so any two points can be deep-diffed later. Best-effort:
-        // only when an element is currently inspected. The snapshot lives in
-        // userData (main), never in the user's tree.
-        {
-          const cur = get().currentElementState;
-          if (cur) {
-            // Build a SerializedValue tree directly from the inspected entries so
-            // the persisted snapshot diffs cleanly against another checkpoint's.
-            const data: SerializedValue = {
-              kind: 'object',
-              entries: cur.entries.map((entry) => ({ key: entry.label, value: entry.value })),
-              truncated: false,
-            };
-            void easel.xray.saveSnapshot({
-              snapshot: {
-                checkpointId: e.checkpoint.id,
-                capturedAt: Date.now(),
-                label: e.checkpoint.message,
-                data,
-              },
-            });
-          }
-        }
+        // Time-travel (State X-Ray): the per-checkpoint state snapshot is now
+        // captured + persisted in MAIN, BEFORE the checkpoint commit, keyed by
+        // the resulting checkpoint id, UNCONDITIONALLY (see
+        // `_checkpointWithSnapshot` in src/main/ipc.ts + `stateCapture.ts`). The
+        // old reactive renderer-side capture (gated on an actively-inspected
+        // element) is intentionally gone: it lost snapshots for ordinary edits
+        // and would now double-write over the main-captured one.
         break;
       }
 
@@ -1354,6 +1570,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         const isRetryDone = sh?.phase === 'retrying' && sh.requestId === e.requestId;
         const finalDiffs = isRetryDone ? mergeFileDiffs(get().liveDiffs, e.diffs) : e.diffs;
 
+        // Issue #15: capture before the updater so we read current (not post-set) state.
+        const doneRefactor = get().activeRefactor ?? undefined;
+
         // Terminal success: finalize the last assistant turn with the summary
         // and complete diff set, then clear streaming state.
         set((s) => {
@@ -1365,12 +1584,20 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
               // through to the summary if the backend sent it only at done.
               content: last.content || e.summary,
               diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
+              // Issue #15: tag the assistant turn with the refactor summary so
+              // the ChatPanel can render the grouped diff presentation.
+              refactor: doneRefactor,
             };
             return {
               chat: [...s.chat.slice(0, -1), updated],
               liveDiffs: finalDiffs,
               streaming: false,
               activeRequestId: null,
+              // Issue #15: intentionally DO NOT clear `activeRefactor` here. A
+              // self-heal retry emits a second `done` for the same turn (with its
+              // own bubble); keeping the tag lets the retried diff stay grouped.
+              // The next `submitEdit` always overwrites it (null for plain edits),
+              // and `error` clears it, so it can't leak into an unrelated turn.
               pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
                 (p) => p.requestId !== e.requestId,
               ),
@@ -1384,12 +1611,17 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             createdAt: Date.now(),
             requestId: e.requestId,
             diffs: finalDiffs.length > 0 ? finalDiffs : undefined,
+            // Issue #15: tag the fallback message with the refactor summary.
+            refactor: doneRefactor,
           };
           return {
             chat: [...s.chat, doneMsg],
             liveDiffs: finalDiffs,
             streaming: false,
             activeRequestId: null,
+            // Issue #15: see above — `activeRefactor` is left in place so a
+            // self-heal retry's `done` keeps the grouped diff presentation;
+            // the next submit overwrites it and `error` clears it.
             pendingPolicyConfirms: s.pendingPolicyConfirms.filter(
               (p) => p.requestId !== e.requestId,
             ),
@@ -1448,6 +1680,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
             activeRequestId: null,
             // Issue #31: an error ends any in-flight self-heal lifecycle too.
             selfHealPhase: null,
+            // Issue #15: a failed/cancelled refactor must not leave a dangling tag.
+            activeRefactor: null,
             // Auth failures surface via the banner, not the error toast.
             lastError: isCancelled || isAuth ? null : e.message,
             needsAuth: isAuth ? true : s.needsAuth,
@@ -1958,10 +2192,61 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: result.error });
       return;
     }
-    set({ networkCapturing: result.value.capturing });
+    // Disabling capture also tears down interception in main; reflect both so
+    // the cockpit never stays stuck showing "Intercepting" after capture is off.
+    set({
+      networkCapturing: result.value.capturing,
+      ...(result.value.intercepting !== undefined
+        ? { networkIntercepting: result.value.intercepting }
+        : {}),
+    });
     if (result.value.detail && enabled && !result.value.capturing) {
       set({ lastError: result.value.detail });
     }
+  },
+
+  async setNetworkIntercept(enabled) {
+    const result = await easel.xray.setNetworkIntercept({ enabled });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    // Interception requires (and turns on) capture; reflect both.
+    set({
+      networkIntercepting: result.value.intercepting,
+      networkCapturing: result.value.capturing,
+    });
+    if (result.value.detail && enabled && !result.value.intercepting) {
+      set({ lastError: result.value.detail });
+    }
+  },
+
+  async continueRequest(interceptId, rewrite?: NetworkRequestRewrite) {
+    const result = await easel.xray.continueRequest({ interceptId, ...(rewrite ? { rewrite } : {}) });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    // The resolved entry (paused → false) streams back over network.event.
+    if (!result.value.applied && result.value.detail) set({ lastError: result.value.detail });
+  },
+
+  async fulfillRequest(interceptId, mock: NetworkResponseMock) {
+    const result = await easel.xray.fulfillRequest({ interceptId, mock });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    if (!result.value.applied && result.value.detail) set({ lastError: result.value.detail });
+  },
+
+  async failRequest(interceptId, reason?: string) {
+    const result = await easel.xray.failRequest({ interceptId, ...(reason ? { reason } : {}) });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    if (!result.value.applied && result.value.detail) set({ lastError: result.value.detail });
   },
 
   async loadNetworkLog() {
@@ -1970,7 +2255,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       set({ lastError: result.error });
       return;
     }
-    set({ networkEntries: result.value.entries, networkCapturing: result.value.capturing });
+    set({
+      networkEntries: result.value.entries,
+      networkCapturing: result.value.capturing,
+      networkIntercepting: result.value.intercepting,
+    });
   },
 
   async clearNetworkLog() {
@@ -2029,6 +2318,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       // Issue #31/#32: a new turn always starts from a clean self-heal phase, so
       // a prior turn's phase can't bleed in (mirrors submitEdit).
       selfHealPhase: null,
+      // Issue #15: submitDirectEdit is not a refactor path; always start clean.
+      activeRefactor: null,
     }));
 
     const result = await easel.edit.submit({ request });
@@ -2044,6 +2335,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         chat: [...s.chat, errMsg],
         lastError: result.error,
         streaming: false,
+        // Clear any refactor tag so a failed submit can't leak it onto a later turn.
+        activeRefactor: null,
         activeRequestId: null,
       }));
     }
@@ -2301,5 +2594,60 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     // in case the push is delayed or missed.
     await get().listCheckpoints();
     set({ replayBusy: false, lastError: null });
+  },
+
+  /* ---- Issue #17: Live State Puppeteer ------------------------------------- */
+
+  setPuppeteerOpen(open) {
+    set({ puppeteerOpen: open });
+  },
+
+  async loadPuppeteerState() {
+    const result = await easel.puppeteer.getState();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+  },
+
+  async setPuppeteerEnabled(enabled) {
+    const result = await easel.puppeteer.setEnabled({ enabled });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+    // Surface the policy/availability reason the same way setNetworkCapture
+    // surfaces its detail: set lastError when the requested enable was not
+    // honoured (detail present and the state is still disabled).
+    if (result.value.detail && enabled && !result.value.state.enabled) {
+      set({ lastError: result.value.detail });
+    }
+  },
+
+  async removePuppeteerMock(id) {
+    const result = await easel.puppeteer.removeMock({ id });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+  },
+
+  async clearPuppeteer() {
+    const result = await easel.puppeteer.clearAll();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    set({ puppeteer: result.value.state });
+  },
+
+  async resyncPuppeteer() {
+    const result = await easel.puppeteer.resync();
+    if (!result.ok) {
+      set({ lastError: result.error });
+    }
   },
 }));

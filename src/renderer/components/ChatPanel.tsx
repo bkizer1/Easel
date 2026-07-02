@@ -23,6 +23,7 @@ import {
 import type { ChatMessage, FileDiff, InstructionMacro } from '@shared/types';
 import { useEaselStore } from '../store';
 import { DiffViewer } from './DiffViewer';
+import { ExtractComponentCta } from './ExtractComponentCta';
 import { VoiceButton } from './VoiceButton';
 import { Tooltip } from './Tooltip';
 import { hotkeyMatches, normalizeHotkey } from '../lib/hotkeys';
@@ -251,7 +252,7 @@ function MessageBubble({
         </div>
       )}
       {!diffsDismissed && diffs.length > 0 && (
-        <DiffViewer diffs={diffs} checkpointId={diffCheckpointId} onDismiss={() => setDiffsDismissed(true)} />
+        <DiffViewer diffs={diffs} checkpointId={diffCheckpointId} refactor={message.refactor} onDismiss={() => setDiffsDismissed(true)} />
       )}
     </div>
   );
@@ -642,6 +643,7 @@ export function ChatPanel(): React.ReactElement {
       <div className="flex-shrink-0 p-3 hairline-t">
         <SelfHealIndicator />
         <SelectionChip />
+        <ExtractComponentCta />
         <div
           className={`relative flex items-end gap-2 rounded-2xl bg-ink-800/80 border px-3 py-2.5 transition-all duration-200 ${
             composerDisabled
