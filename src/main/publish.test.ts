@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { rmrf } from './rmrf';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,7 +42,7 @@ function freshRepo(): string {
   return d;
 }
 beforeEach(() => {
-  while (created.length) rmSync(created.pop()!, { recursive: true, force: true });
+  while (created.length) rmrf(created.pop()!);
 });
 
 describe('buildPrContent', () => {
