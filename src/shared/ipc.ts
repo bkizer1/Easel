@@ -30,7 +30,7 @@ import type {
   TokenMatch,
 } from './types';
 import type { GridConfig } from './grid';
-import type { ElementStateSnapshot, NetworkEntry, StateSnapshot } from './xray';
+import type { ElementStateSnapshot, NetworkEntry, StateSnapshot, SerializedValue } from './xray';
 import type { NewSiteBrief } from './siteBrief';
 
 /* -------------------------------------------------------------------------- */
@@ -138,6 +138,14 @@ export const IpcChannels = {
   xrayClearNetworkLog: 'xray.clearNetworkLog',
   /** Enable/disable the CDP network tap on the guest webview. */
   xraySetNetworkCapture: 'xray.setNetworkCapture',
+  /** Enable/disable CDP Fetch request interception ("Burp" mode) on the tap. */
+  xraySetNetworkIntercept: 'xray.setNetworkIntercept',
+  /** Resume a paused (intercepted) request unchanged, or with rewrite overrides. */
+  xrayContinueRequest: 'xray.continueRequest',
+  /** Fulfill (mock) a paused request with a synthetic response. */
+  xrayFulfillRequest: 'xray.fulfillRequest',
+  /** Block (fail) a paused request at the interceptor. */
+  xrayFailRequest: 'xray.failRequest',
   /** Persist a serialized state snapshot keyed by checkpoint id (userData). */
   xraySaveSnapshot: 'xray.saveSnapshot',
   /** Read a persisted state snapshot for a checkpoint id (or null). */
@@ -146,6 +154,13 @@ export const IpcChannels = {
   xrayListSnapshots: 'xray.listSnapshots',
   /** Emitted by main as network requests are observed (CDP). */
   networkEvent: 'network.event',
+  /**
+   * Emitted by main when the tap's capture/intercept state changes WITHOUT a
+   * renderer request — e.g. the guest reloaded/navigated and the debugger
+   * detached, or the tap re-attached. Lets the renderer keep its `networkCapturing`
+   * flag honest instead of falsely showing "Capturing" after a silent detach.
+   */
+  networkStatus: 'network.status',
 
   // Tokens (Issue #8) -------------------------------------------------------
   /** Match a picked element's computed values against the project's design tokens. */
@@ -405,6 +420,8 @@ export interface XrayGetNetworkLogResponse {
   entries: NetworkEntry[];
   /** Whether the CDP network tap is currently attached + capturing. */
   capturing: boolean;
+  /** Whether request interception ("Burp" mode) is currently on. */
+  intercepting: boolean;
 }
 
 export interface XraySetNetworkCaptureRequest {
@@ -413,7 +430,71 @@ export interface XraySetNetworkCaptureRequest {
 export interface XraySetNetworkCaptureResponse {
   /** Effective state after the request (false if attach failed). */
   capturing: boolean;
+  /** Whether request interception (Fetch domain) is currently on. */
+  intercepting?: boolean;
   /** Reason capture could not be enabled (e.g. no guest webview). */
+  detail?: string;
+}
+
+// xray.* network interception ("Burp" mode) ---------------------------------
+
+export interface XraySetNetworkInterceptRequest {
+  enabled: boolean;
+}
+export interface XraySetNetworkInterceptResponse {
+  /** Effective interception state (false if it could not be enabled). */
+  intercepting: boolean;
+  /** Whether capture is on (interception implies + requires capture). */
+  capturing: boolean;
+  /** Reason interception could not be toggled (e.g. no guest webview). */
+  detail?: string;
+}
+
+/** Optional rewrite overrides applied when continuing a paused request. */
+export interface NetworkRequestRewrite {
+  url?: string;
+  method?: string;
+  /** Header overrides as a plain `{name: value}` map (merged into the request). */
+  headers?: Record<string, string>;
+  /** New request body (raw text; sent as-is). */
+  postData?: string;
+}
+
+export interface XrayContinueRequestRequest {
+  /** The {@link NetworkEntry.interceptId} of the paused request. */
+  interceptId: string;
+  /** Optional overrides; omit for a plain pass-through. */
+  rewrite?: NetworkRequestRewrite;
+}
+
+/** A synthetic response used to fulfill (mock) a paused request. */
+export interface NetworkResponseMock {
+  /** HTTP status code, e.g. 200, 404, 503. */
+  responseCode: number;
+  /** Response header overrides as a plain `{name: value}` map. */
+  headers?: Record<string, string>;
+  /** Response body as plain text (encoded to base64 by main before sending). */
+  body?: string;
+}
+
+export interface XrayFulfillRequestRequest {
+  interceptId: string;
+  mock: NetworkResponseMock;
+}
+
+export interface XrayFailRequestRequest {
+  interceptId: string;
+  /**
+   * CDP `Network.ErrorReason`, e.g. `BlockedByClient`, `Failed`, `Aborted`.
+   * Defaults to `BlockedByClient` when omitted.
+   */
+  reason?: string;
+}
+
+/** Generic result of a continue/fulfill/fail interception action. */
+export interface XrayInterceptActionResponse {
+  /** Whether the action was applied (false if the request was no longer paused). */
+  applied: boolean;
   detail?: string;
 }
 
@@ -436,6 +517,19 @@ export interface XrayListSnapshotsResponse {
 /** Pushed on {@link IpcChannels.networkEvent} as requests are observed. */
 export interface NetworkEventPayload {
   entry: NetworkEntry;
+}
+
+/**
+ * Pushed on {@link IpcChannels.networkStatus} when the tap's capture/intercept
+ * state changes without a renderer request (e.g. a guest reload silently
+ * detached the debugger, or the tap re-attached after navigation). Lets the
+ * renderer reconcile its `networkCapturing` flag with reality.
+ */
+export interface NetworkStatusPayload {
+  capturing: boolean;
+  intercepting: boolean;
+  /** Human note for the change (e.g. "Preview navigated — capture paused."). */
+  detail?: string;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -580,6 +674,24 @@ export interface EaselApi {
     setNetworkCapture(
       req: XraySetNetworkCaptureRequest,
     ): Promise<IpcResult<XraySetNetworkCaptureResponse>>;
+    /** Enable/disable CDP Fetch request interception ("Burp" mode). */
+    setNetworkIntercept(
+      req: XraySetNetworkInterceptRequest,
+    ): Promise<IpcResult<XraySetNetworkInterceptResponse>>;
+    /** Resume a paused request (optionally with rewrite overrides). */
+    continueRequest(
+      req: XrayContinueRequestRequest,
+    ): Promise<IpcResult<XrayInterceptActionResponse>>;
+    /** Fulfill (mock) a paused request with a synthetic response. */
+    fulfillRequest(
+      req: XrayFulfillRequestRequest,
+    ): Promise<IpcResult<XrayInterceptActionResponse>>;
+    /** Block (fail) a paused request at the interceptor. */
+    failRequest(
+      req: XrayFailRequestRequest,
+    ): Promise<IpcResult<XrayInterceptActionResponse>>;
+    /** Subscribe to out-of-band capture/intercept state changes (reload sync). */
+    onNetworkStatus(handler: (payload: NetworkStatusPayload) => void): Unsubscribe;
     /** Persist a serialized state snapshot keyed by checkpoint id. */
     saveSnapshot(req: XraySaveSnapshotRequest): Promise<IpcResult<void>>;
     /** Read a persisted state snapshot for a checkpoint id. */
@@ -657,6 +769,22 @@ export interface IpcInvokeMap {
     request: XraySetNetworkCaptureRequest;
     response: IpcResult<XraySetNetworkCaptureResponse>;
   };
+  [IpcChannels.xraySetNetworkIntercept]: {
+    request: XraySetNetworkInterceptRequest;
+    response: IpcResult<XraySetNetworkInterceptResponse>;
+  };
+  [IpcChannels.xrayContinueRequest]: {
+    request: XrayContinueRequestRequest;
+    response: IpcResult<XrayInterceptActionResponse>;
+  };
+  [IpcChannels.xrayFulfillRequest]: {
+    request: XrayFulfillRequestRequest;
+    response: IpcResult<XrayInterceptActionResponse>;
+  };
+  [IpcChannels.xrayFailRequest]: {
+    request: XrayFailRequestRequest;
+    response: IpcResult<XrayInterceptActionResponse>;
+  };
   [IpcChannels.xraySaveSnapshot]: { request: XraySaveSnapshotRequest; response: IpcResult<void> };
   [IpcChannels.xrayGetSnapshot]: {
     request: XrayGetSnapshotRequest;
@@ -683,6 +811,7 @@ export interface IpcEventMap {
   [IpcChannels.previewStatus]: PreviewStatusPayload;
   [IpcChannels.devServerEvent]: DevServerStatePayload;
   [IpcChannels.networkEvent]: NetworkEventPayload;
+  [IpcChannels.networkStatus]: NetworkStatusPayload;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -775,6 +904,23 @@ export type InspectorMessage =
       type: 'element-state';
       snapshot: ElementStateSnapshot;
     }
+  | {
+      /**
+       * Time-travel (State X-Ray): the guest's reply to a `snapshot-state`
+       * command. Carries a bounded {@link SerializedValue} tree of detectable app
+       * state — captured UNCONDITIONALLY (no element need be picked) so every
+       * checkpoint created during normal editing gets a usable snapshot. The
+       * MAIN process drives this before {@link createCheckpoint} and persists the
+       * reply keyed by the new checkpoint id. `requestId` correlates the reply to
+       * the originating command. Distinct from `element-state`, which is the live
+       * state of one specifically-picked element.
+       */
+      type: 'state-snapshot';
+      /** Echoes the {@link InspectorCommand} `snapshot-state` `requestId`. */
+      requestId: string;
+      /** The bounded, cycle-safe serialized state tree (never live objects). */
+      data: SerializedValue;
+    }
   // ── Issue #6: Live DOM/CSS tweak ────────────────────────────────────────────
   | {
       /** Accumulated inline-style delta for the tweaked element. */
@@ -831,6 +977,18 @@ export type InspectorCommand =
       selector: string;
       /** Entry labels from the host's last snapshot, for render-cause diffing. */
       previousKeys?: string[];
+    }
+  | {
+      /**
+       * Time-travel (State X-Ray): capture a bounded snapshot of detectable app
+       * state UNCONDITIONALLY (no element need be picked) and reply with a
+       * `state-snapshot` message echoing `requestId`. Driven by MAIN before a
+       * checkpoint is created; the reply is persisted keyed by the new checkpoint
+       * id so any two checkpoints can be deep-diffed in the History/cockpit view.
+       */
+      type: 'snapshot-state';
+      /** Correlates the eventual `state-snapshot` reply. */
+      requestId: string;
     }
   | {
       /**

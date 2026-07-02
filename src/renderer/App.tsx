@@ -16,7 +16,7 @@
  * individual component files. This file is the integration point only.
  */
 
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { KeyRound, X } from 'lucide-react';
 import { useEaselStore } from './store';
 import { Tooltip } from './components/Tooltip';
@@ -131,6 +131,143 @@ function AuthBanner(): JSX.Element {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  State X-Ray dock (resizable / collapsible bottom panel, issue #13 / WS3)   */
+/* -------------------------------------------------------------------------- */
+
+/** localStorage keys for the dock's persisted height + collapse state. */
+const XRAY_DOCK_HEIGHT_KEY = 'easel.xray.dock.height';
+const XRAY_DOCK_COLLAPSED_KEY = 'easel.xray.dock.collapsed';
+
+/** Sensible bounds for the dock height (px). Collapsed shows only the header. */
+const XRAY_DOCK_MIN_HEIGHT = 140;
+const XRAY_DOCK_MAX_HEIGHT = 720;
+const XRAY_DOCK_DEFAULT_HEIGHT = 288; // matches the previous hard-coded h-72
+/** Height of the header-only strip when collapsed (≈ the header row). */
+const XRAY_DOCK_COLLAPSED_HEIGHT = 41;
+
+function clampDockHeight(h: number): number {
+  return Math.min(XRAY_DOCK_MAX_HEIGHT, Math.max(XRAY_DOCK_MIN_HEIGHT, h));
+}
+
+function readPersistedHeight(): number {
+  try {
+    const raw = window.localStorage.getItem(XRAY_DOCK_HEIGHT_KEY);
+    const n = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) ? clampDockHeight(n) : XRAY_DOCK_DEFAULT_HEIGHT;
+  } catch {
+    return XRAY_DOCK_DEFAULT_HEIGHT;
+  }
+}
+
+function readPersistedCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(XRAY_DOCK_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Genuinely dockable container for {@link StateXRayPanel}: a drag handle on the
+ * top edge resizes the height (bounded to [{@link XRAY_DOCK_MIN_HEIGHT},
+ * {@link XRAY_DOCK_MAX_HEIGHT}]), a collapse/expand affordance shrinks it to a
+ * header-only strip, and both height + collapse persist across reopen via
+ * localStorage. Replaces the previous fixed `h-72` strip.
+ */
+function XRayDock(): JSX.Element {
+  const [height, setHeight] = useState<number>(readPersistedHeight);
+  const [collapsed, setCollapsed] = useState<boolean>(readPersistedCollapsed);
+  const [dragging, setDragging] = useState(false);
+
+  // Persist height (debounced via effect on settled value) + collapse state.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(XRAY_DOCK_HEIGHT_KEY, String(height));
+    } catch {
+      /* storage may be unavailable; non-fatal */
+    }
+  }, [height]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(XRAY_DOCK_COLLAPSED_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* non-fatal */
+    }
+  }, [collapsed]);
+
+  // Pointer-driven resize from the top-edge handle. Dragging up grows the dock
+  // (height increases as the pointer moves toward the top of the window). Uses
+  // pointer CAPTURE (not window listeners) so the drag keeps tracking even when
+  // the pointer crosses the Electron <webview> beneath — which otherwise
+  // swallows host-window pointer events and freezes the drag — and so React
+  // tears the handlers down automatically if the dock unmounts mid-drag.
+  const dragState = useRef<{ startY: number; startH: number } | null>(null);
+
+  const onHandlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (collapsed) return; // can't resize a collapsed dock
+      e.preventDefault();
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unsupported/failed — the drag still works window-locally */
+      }
+      dragState.current = { startY: e.clientY, startH: height };
+      setDragging(true);
+    },
+    [collapsed, height],
+  );
+
+  const onHandlePointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragState.current;
+    if (!st) return;
+    // Pointer moving up (smaller clientY) → taller dock.
+    setHeight(clampDockHeight(st.startH + (st.startY - e.clientY)));
+  }, []);
+
+  const onHandlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragState.current) return;
+    dragState.current = null;
+    setDragging(false);
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      /* already released */
+    }
+  }, []);
+
+  const effectiveHeight = collapsed ? XRAY_DOCK_COLLAPSED_HEIGHT : height;
+
+  return (
+    <div
+      className="shrink-0 hairline-t bg-ink-900/60 relative"
+      style={{ height: effectiveHeight }}
+    >
+      {/* Top-edge resize handle (hidden when collapsed). */}
+      {!collapsed && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize State X-Ray panel"
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={onHandlePointerUp}
+          onPointerCancel={onHandlePointerUp}
+          className={[
+            'absolute -top-1 left-0 right-0 z-10 h-2 cursor-row-resize',
+            'after:absolute after:left-1/2 after:top-1/2 after:h-0.5 after:w-8 after:-translate-x-1/2 after:-translate-y-1/2 after:rounded-full',
+            dragging ? 'after:bg-brand-400/70' : 'after:bg-white/10 hover:after:bg-white/25',
+            'transition-colors',
+          ].join(' ')}
+        />
+      )}
+      <StateXRayPanel collapsed={collapsed} onToggleCollapse={() => setCollapsed((c) => !c)} />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Root App component                                                         */
 /* -------------------------------------------------------------------------- */
 
@@ -223,12 +360,9 @@ export default function App(): JSX.Element {
           </div>
         </div>
 
-        {/* State X-Ray cockpit: dockable bottom panel (issue #13) */}
-        {xrayOpen && (
-          <div className="shrink-0 hairline-t h-72 bg-ink-900/60">
-            <StateXRayPanel />
-          </div>
-        )}
+        {/* State X-Ray cockpit: genuinely dockable bottom panel (issue #13 / WS3).
+            Resize via the top-edge handle, collapse/expand, height persisted. */}
+        {xrayOpen && <XRayDock />}
 
         {/* DiffViewer: slide-up panel when there are live diffs */}
         {liveDiffs.length > 0 && (

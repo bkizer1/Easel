@@ -228,6 +228,21 @@ const api: EaselApi = {
     setNetworkCapture(req) {
       return ipcRenderer.invoke(IpcChannels.xraySetNetworkCapture, req);
     },
+    setNetworkIntercept(req) {
+      return ipcRenderer.invoke(IpcChannels.xraySetNetworkIntercept, req);
+    },
+    continueRequest(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayContinueRequest, req);
+    },
+    fulfillRequest(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayFulfillRequest, req);
+    },
+    failRequest(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayFailRequest, req);
+    },
+    onNetworkStatus(handler) {
+      return subscribe(IpcChannels.networkStatus, handler);
+    },
     saveSnapshot(req) {
       return ipcRenderer.invoke(IpcChannels.xraySaveSnapshot, req);
     },

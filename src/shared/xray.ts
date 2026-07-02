@@ -392,15 +392,186 @@ export interface StateEntry {
 }
 
 /**
- * Best-effort render-cause information for a picked element: which keys changed
- * since the previous snapshot of the same element (the guest compares the new
- * key set against the keys the host last saw).
+ * How a {@link RenderCause}'s {@link RenderCause.changedKeys} was derived, so the
+ * cockpit can label it honestly:
+ *  - `'commit'`: diffed the component fiber's current values against React's
+ *    previously-committed fiber (`fiber.alternate`) — a TRUE last-commit cause.
+ *  - `'since-pick'`: no alternate was available, so we fell back to diffing
+ *    against the value set captured the last time *you* inspected this element.
+ */
+export type RenderCauseSource = 'commit' | 'since-pick';
+
+/**
+ * Best-effort render-cause information for a picked element. {@link changedKeys}
+ * are the prop/state labels whose value actually differs; {@link source} records
+ * HOW that was determined so the UI never overclaims (see {@link RenderCauseSource}).
  */
 export interface RenderCause {
-  /** Keys (prop/state labels) whose serialized value changed since last capture. */
+  /** Keys (prop/state labels) whose serialized value changed. */
   changedKeys: string[];
-  /** Human note, e.g. the gating className/conditional walked from the fiber. */
+  /** Provenance of {@link changedKeys}; absent on legacy snapshots (treat as `since-pick`). */
+  source?: RenderCauseSource;
+  /**
+   * Honest, observed "why is this here / why is it shown" note — e.g. the gating
+   * className(s) on the element or a detectable conditional/visibility gate.
+   * Omitted when nothing meaningful was found (never speculative).
+   */
   note?: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Render-cause — alternate-based fiber diff (pure, framework-internal)        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Minimal structural view of a React fiber for render-cause diffing. The real
+ * fiber has hundreds of fields; we only narrow `memoizedProps`, the hook chain
+ * head (`memoizedState`), and `alternate` (React's previously-committed fiber).
+ * Everything is optional — these are private internals that vary by React
+ * version, so every access is guarded. Kept here (not in inspector.ts) so the
+ * diff is a PURE function importable by both the guest tap and unit tests
+ * (inspector.ts imports `electron` at module top and cannot be imported under
+ * vitest).
+ */
+export interface RenderCauseFiber {
+  memoizedProps?: unknown;
+  memoizedState?: RenderCauseHook | unknown;
+  alternate?: RenderCauseFiber | null;
+}
+
+/** One node of React's hook linked list, as far as render-cause cares. */
+export interface RenderCauseHook {
+  memoizedState?: unknown;
+  next?: RenderCauseHook | null;
+}
+
+/** Collect the prop label→value map a component fiber rendered with. */
+function propEntries(fiber: RenderCauseFiber | null | undefined): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  const props = fiber?.memoizedProps;
+  if (props && typeof props === 'object') {
+    let keys: string[] = [];
+    try {
+      keys = Object.keys(props as Record<string, unknown>);
+    } catch {
+      keys = [];
+    }
+    for (const key of keys) {
+      if (key === 'children') continue; // noisy React element tree, ignored everywhere
+      try {
+        out.set(key, (props as Record<string, unknown>)[key]);
+      } catch {
+        // throwing getter — treat as present-but-unreadable (still a key)
+        out.set(key, undefined);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Collect the `state[i]` label→value map from a component fiber's hook chain,
+ * skipping function slots (effects/refs/callbacks) exactly like the cockpit's
+ * `collectReactEntries` does — so labels line up with the rows the user sees.
+ */
+function hookStateEntries(fiber: RenderCauseFiber | null | undefined): Map<string, unknown> {
+  const out = new Map<string, unknown>();
+  let hook = fiber?.memoizedState as RenderCauseHook | undefined;
+  let stateIndex = 0;
+  let guard = 0;
+  while (hook && typeof hook === 'object' && guard++ < 200) {
+    const value = hook.memoizedState;
+    if (typeof value !== 'function') {
+      out.set(`state[${stateIndex}]`, value);
+      stateIndex++;
+    }
+    hook = hook.next ?? undefined;
+  }
+  return out;
+}
+
+/**
+ * Compute a TRUE last-commit render cause by diffing a component fiber's current
+ * props + hook-state against its `alternate` (React's previously-committed
+ * fiber). Returns the labels whose serialized value actually changed at the last
+ * commit, or `null` when no alternate exists (first commit, or React did not
+ * retain one) so the caller can fall back to a "since you last inspected" diff.
+ *
+ * Pure: takes a serializer so it shares the cockpit's exact value formatting and
+ * has no DOM/Electron dependency (unit-testable against a real React fiber).
+ */
+export function diffFiberRenderCause(
+  fiber: RenderCauseFiber | null | undefined,
+  format: (v: unknown) => string,
+): string[] | null {
+  const alternate = fiber?.alternate;
+  if (!alternate) return null;
+
+  const changed: string[] = [];
+
+  const curProps = propEntries(fiber);
+  const prevProps = propEntries(alternate);
+  for (const [key, val] of curProps) {
+    if (!prevProps.has(key) || format(prevProps.get(key)) !== format(val)) {
+      changed.push(key);
+    }
+  }
+
+  const curHooks = hookStateEntries(fiber);
+  const prevHooks = hookStateEntries(alternate);
+  for (const [label, val] of curHooks) {
+    if (!prevHooks.has(label) || format(prevHooks.get(label)) !== format(val)) {
+      changed.push(label);
+    }
+  }
+
+  return changed;
+}
+
+/** Observable, DOM-free inputs for {@link deriveRenderNote}. */
+export interface RenderNoteInputs {
+  /** Whether the element carries the `hidden` attribute. */
+  hidden: boolean;
+  /** Value of `aria-hidden` (or null when absent). */
+  ariaHidden: string | null;
+  /** The element's class list (order preserved). */
+  classList: readonly string[];
+}
+
+/** Max gating classes named in a render note before truncating to "+N more". */
+const RENDER_NOTE_MAX_CLASSES = 3;
+
+/** Classnames that LOOK like visibility/conditional gates (a developer toggle). */
+const RENDER_NOTE_GATE_HINT =
+  /^(is-|has-|show|hide|hidden|visible|active|open|collapsed?|expanded?|selected|disabled|toggle)/i;
+
+/**
+ * Pure render-note derivation from observable element signals. Returns an
+ * HONEST, non-speculative "why is this here / why is it shown" string, or
+ * `undefined` when nothing meaningful is observable. Kept here (DOM-free, taking
+ * already-read inputs) so the gate-vs-classed wording is unit-testable without
+ * importing the Electron-coupled inspector. The DOM reading lives in
+ * `inspector.ts::deriveRenderNote`, which delegates the decision to this.
+ */
+export function deriveRenderNote(inputs: RenderNoteInputs): string | undefined {
+  // 1. An explicit visibility/conditional gate carried on the element.
+  if (inputs.hidden) return 'gated by [hidden] attribute';
+  if (inputs.ariaHidden === 'true') return 'gated by [aria-hidden]';
+
+  // 2. Gating className(s). We report what is literally on the element — we do
+  //    NOT claim a class "causes" the render, only that the element is classed
+  //    by it (the observable fact). Prefer gate-looking classes for actionability.
+  const classList = inputs.classList;
+  if (classList.length > 0) {
+    const gates = classList.filter((c) => RENDER_NOTE_GATE_HINT.test(c));
+    const pool = gates.length > 0 ? gates : classList;
+    const chosen = pool.slice(0, RENDER_NOTE_MAX_CLASSES);
+    const more = pool.length - chosen.length;
+    const list = chosen.map((c) => `.${c}`).join(', ') + (more > 0 ? `, +${more} more` : '');
+    return gates.length > 0 ? `possibly gated by ${list}` : `classed ${list}`;
+  }
+
+  return undefined;
 }
 
 /**
@@ -464,6 +635,32 @@ export interface NetworkEntry {
   initiator?: SourceLocation;
   /** Raw initiator URL (script that issued the request), for display. */
   initiatorUrl?: string;
+
+  /* ── Interception lifecycle (the "Burp" part — Workstream 2) ────────────────
+   * All optional + backward-compatible: a passively-logged request has none of
+   * these set. They are only populated when the Fetch interception mode is on.
+   */
+  /**
+   * CDP `Fetch.requestPaused` id, present only while this request is HELD by the
+   * interceptor awaiting a Continue/Fulfill/Block decision. Cleared (the field
+   * removed) once an action resolves it. This is the handle the
+   * continue/fulfill/fail IPC operations take.
+   */
+  interceptId?: string;
+  /** True while the request is paused at the interceptor awaiting a decision. */
+  paused?: boolean;
+  /** Which interception stage paused it: `'request'` or `'response'`. */
+  pausedStage?: 'request' | 'response';
+  /** Set once the user fulfilled (mocked) the response for this request. */
+  mocked?: boolean;
+  /** Set once the user blocked (failed) this request at the interceptor. */
+  blocked?: boolean;
+  /**
+   * Short human summary of an applied rewrite/override (e.g. `→ 503` for a mock,
+   * `method PUT` for a request rewrite, or `BlockedByClient` for a block), shown
+   * inline in the cockpit so the user can see what they did to the request.
+   */
+  interceptSummary?: string;
 }
 
 /* -------------------------------------------------------------------------- */
