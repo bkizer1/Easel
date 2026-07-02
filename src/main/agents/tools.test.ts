@@ -175,6 +175,51 @@ describe('executeTool set_app_state', () => {
     expect(calls.clearMocks).toBe(0);
   });
 
+  it('rejects mock_fetch with an empty url_pattern (would match every request)', async () => {
+    const { cap, calls } = makeCapability();
+    const res = await executeTool(
+      { tool: 'set_app_state', input: { action: 'mock_fetch', url_pattern: '' } },
+      ctxWith(cap),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/non-empty url_pattern/i);
+    expect(calls.mocks).toHaveLength(0);
+  });
+
+  it('rejects mock_fetch with a whitespace-only url_pattern', async () => {
+    const { cap, calls } = makeCapability();
+    const res = await executeTool(
+      { tool: 'set_app_state', input: { action: 'mock_fetch', url_pattern: '   ' } },
+      ctxWith(cap),
+    );
+    expect(res.ok).toBe(false);
+    expect(calls.mocks).toHaveLength(0);
+  });
+
+  it('rejects mock_fetch with an out-of-range status', async () => {
+    const { cap, calls } = makeCapability();
+    for (const status of [100, 199, 600, 999, 200.5]) {
+      const res = await executeTool(
+        { tool: 'set_app_state', input: { action: 'mock_fetch', url_pattern: '/api', status } },
+        ctxWith(cap),
+      );
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/between 200 and 599/i);
+    }
+    expect(calls.mocks).toHaveLength(0);
+  });
+
+  it('accepts mock_fetch with an in-range custom status', async () => {
+    const { cap, calls } = makeCapability();
+    const res = await executeTool(
+      { tool: 'set_app_state', input: { action: 'mock_fetch', url_pattern: '/api', status: 503 } },
+      ctxWith(cap),
+    );
+    expect(res.ok).toBe(true);
+    expect(calls.mocks).toHaveLength(1);
+    expect(calls.mocks[0]).toMatchObject({ urlPattern: '/api', status: 503 });
+  });
+
   it('fails with the policy reason when policy blocks it', async () => {
     const { cap, calls } = makeCapability({ allowed: { ok: false, reason: 'blocked by .easel/policy.json' } });
     const res = await executeTool(

@@ -787,6 +787,33 @@ async function _execSetAppState(
   // Perform the requested action.
   switch (input.action) {
     case 'mock_fetch': {
+      // Guard: an empty url_pattern with the default `substring` match matches
+      // EVERY request (`''.includes` is always true), silently intercepting all
+      // fetch/XHR on the page. Require a non-empty pattern so a mock is always
+      // scoped to something.
+      if (!input.url_pattern || input.url_pattern.trim() === '') {
+        return {
+          ok: false,
+          output: '',
+          error:
+            'mock_fetch requires a non-empty url_pattern — an empty pattern would ' +
+            'intercept every request on the page. Provide the URL or path to match.',
+        };
+      }
+      // Guard: the Fetch `Response` constructor only accepts a status in the
+      // range 200–599 (it throws RangeError otherwise), which would turn a
+      // served mock into an unhandled rejection. Reject an out-of-range status
+      // up front with a clear message the model can correct.
+      if (
+        input.status !== undefined &&
+        (!Number.isInteger(input.status) || input.status < 200 || input.status > 599)
+      ) {
+        return {
+          ok: false,
+          output: '',
+          error: `mock_fetch status must be an integer between 200 and 599 (got ${String(input.status)}).`,
+        };
+      }
       const spec: FetchMockSpec = {
         id: ctx.puppeteer.genId(),
         urlPattern: input.url_pattern,

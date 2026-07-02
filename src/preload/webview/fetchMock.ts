@@ -182,7 +182,16 @@ function delay(ms: number): Promise<void> {
  */
 function buildFetchResponse(spec: FetchMockSpec): Response {
   const { status, statusText, headers, body } = buildMockResponseParts(spec);
-  return new Response(body, { status, statusText, headers });
+  try {
+    return new Response(body, { status, statusText, headers });
+  } catch {
+    // The Fetch `Response` constructor rejects a status outside 200–599 (throws
+    // RangeError). The agent tool validates its statuses, but a mock could come
+    // from another producer (e.g. a future panel affordance); fall back to a
+    // well-formed 200 so a bad status never turns a mocked fetch into an
+    // unhandled rejection.
+    return new Response(body, { status: 200, headers });
+  }
 }
 
 /* -------------------------------------------------------------------------- */

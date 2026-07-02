@@ -245,6 +245,18 @@ describe('installFetchMock (fetch)', () => {
     expect(json).toEqual([{ id: 1 }]);
   });
 
+  it('falls back to a 200 Response when a spec carries an out-of-range status', async () => {
+    // The Fetch Response constructor throws RangeError for a status outside
+    // 200–599; buildFetchResponse must catch this so a bad spec never turns a
+    // mocked fetch into an unhandled rejection.
+    activeSpecs = [spec({ id: '1', urlPattern: '/api', status: 999, textBody: 'body' })];
+    uninstall = installFetchMock(() => activeSpecs, onConsumedOnce);
+
+    const response = await window.fetch('/api');
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('body');
+  });
+
   it('matches method-specific specs', async () => {
     activeSpecs = [spec({ id: '1', urlPattern: '/api', method: 'POST', jsonBody: { ok: true } })];
     uninstall = installFetchMock(() => activeSpecs, onConsumedOnce);
