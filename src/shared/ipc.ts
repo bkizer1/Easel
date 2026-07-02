@@ -386,6 +386,14 @@ export interface PreviewCaptureRequest {
    * {@link EditRequest.screenshotDataUrl}.
    */
   box?: BoundingBox;
+  /**
+   * Optional id of the specific guest WebContents to capture (read in the
+   * renderer via `<webview>.getWebContentsId()`). When omitted the main process
+   * captures the first guest — the single-preview default. Required to
+   * disambiguate frames in the Responsive Matrix (issue #14), where several
+   * `<webview>`s are live at once and `guests[0]` is ambiguous.
+   */
+  webContentsId?: number;
 }
 
 export interface PreviewCaptureResponse {

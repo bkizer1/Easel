@@ -29,6 +29,7 @@ import type {
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
+  ResponsiveFrame,
   ScratchInfo,
   SourceLocation,
   StyleEdit,
@@ -43,6 +44,7 @@ import type {
   ScaffoldEventPayload,
 } from '@shared/ipc';
 import { buildSitePrompt, type NewSiteBrief } from '@shared/siteBrief';
+import { MATRIX_PRESETS, DEFAULT_MATRIX_FRAME_ID, assembleFrames } from './lib/responsiveMatrix';
 import { buildStyleEditInstruction } from './lib/styleEdit';
 import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
@@ -168,6 +170,22 @@ export const VIEWPORT_PRESETS: ViewportPreset[] = [
   { label: 'Mobile', width: 390 },
 ];
 
+/**
+ * A mounted Responsive Matrix frame, registered by PreviewPane once its guest
+ * `<webview>` is ready. Carries the `webContentsId` so {@link submitEdit} can
+ * capture that specific breakpoint (issue #14).
+ */
+export interface MatrixFrameRegistration {
+  /** Matches a {@link MATRIX_PRESETS} id. */
+  id: string;
+  /** Human-readable breakpoint label, e.g. `Desktop`. */
+  label: string;
+  /** CSS px width the frame is rendered at. */
+  width: number;
+  /** Electron guest WebContents id (from `<webview>.getWebContentsId()`). */
+  webContentsId: number;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  State shape                                                               */
 /* -------------------------------------------------------------------------- */
@@ -193,6 +211,20 @@ export interface EaselState {
   devToolsNonce: number;
   /** Constrained preview width (px) for responsive testing; null = fill. */
   viewportWidth: number | null;
+  /**
+   * Whether the Responsive Matrix is on (issue #14): the dev-server URL renders
+   * in several stacked `<webview>`s at Desktop/Tablet/Mobile widths and every
+   * breakpoint is captured on submit. Off → the single preview above.
+   */
+  responsiveMatrix: boolean;
+  /** Id (from {@link MATRIX_PRESETS}) of the active, interactive matrix frame. */
+  matrixActiveFrameId: string;
+  /**
+   * Live registry of the mounted matrix `<webview>`s, pushed by PreviewPane as
+   * each frame's guest becomes ready. {@link submitEdit} reads it to capture
+   * every breakpoint by `webContentsId`. Empty when the matrix is off.
+   */
+  matrixFrames: MatrixFrameRegistration[];
   /** Warnings/errors captured from the previewed page's console. */
   pageLogs: PageLog[];
   /** Whether the checkpoint History panel is open. */
@@ -335,6 +367,12 @@ export interface EaselActions {
   toggleDevTools(): void;
   /** Constrain the preview width for responsive testing (null = fill). */
   setViewportWidth(width: number | null): void;
+  /** Toggle the Responsive Matrix (issue #14); clears the frame registry off. */
+  setResponsiveMatrix(enabled: boolean): void;
+  /** Choose which matrix frame is the active, interactive one (by preset id). */
+  setMatrixActiveFrameId(id: string): void;
+  /** Replace the live registry of mounted matrix frames (pushed by PreviewPane). */
+  setMatrixFrames(frames: MatrixFrameRegistration[]): void;
   /** Append a captured page console warning/error. */
   addPageLog(log: Omit<PageLog, 'id' | 'ts'>): void;
   /**
@@ -609,6 +647,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   previewReloadNonce: 0,
   devToolsNonce: 0,
   viewportWidth: null,
+  responsiveMatrix: false,
+  matrixActiveFrameId: DEFAULT_MATRIX_FRAME_ID,
+  matrixFrames: [],
   pageLogs: [],
   historyOpen: false,
   mode: 'idle',
@@ -897,6 +938,25 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     set({ viewportWidth: width });
   },
 
+  setResponsiveMatrix(enabled) {
+    set((s) => ({
+      responsiveMatrix: enabled,
+      // Drop the live registry when leaving matrix mode; keep a valid active id.
+      matrixFrames: enabled ? s.matrixFrames : [],
+      matrixActiveFrameId: MATRIX_PRESETS.some((p) => p.id === s.matrixActiveFrameId)
+        ? s.matrixActiveFrameId
+        : DEFAULT_MATRIX_FRAME_ID,
+    }));
+  },
+
+  setMatrixActiveFrameId(id) {
+    set({ matrixActiveFrameId: id });
+  },
+
+  setMatrixFrames(frames) {
+    set({ matrixFrames: frames });
+  },
+
   addPageLog(log) {
     set((s) => {
       const entry: PageLog = { ...log, id: genId(), ts: Date.now() };
@@ -1053,6 +1113,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
   async submitEdit(instruction) {
     const { project, annotations, targets, previewUrl } = get();
+    const { responsiveMatrix, matrixFrames, matrixActiveFrameId } = get();
 
     if (!project) {
       set({ lastError: 'No project is open.' });
@@ -1069,12 +1130,38 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     // main process reads webview pixels via webContents.capturePage.
     const annotationBoxes = annotations.map((a) => a.boundingBox);
     const unionBox = annotationBoxes.length > 0 ? bboxUnion(annotationBoxes) : undefined;
+    // In the Responsive Matrix the marked region lives on the active frame's
+    // webview, so capture that specific guest; otherwise the single preview
+    // (webContentsId undefined → main captures the sole guest).
+    const activeFrame = responsiveMatrix
+      ? matrixFrames.find((f) => f.id === matrixActiveFrameId)
+      : undefined;
     let screenshotDataUrl: string | undefined;
     try {
-      screenshotDataUrl = (await captureRegion(unionBox)) ?? undefined;
+      screenshotDataUrl = (await captureRegion(unionBox, activeFrame?.webContentsId)) ?? undefined;
     } catch {
       // Screenshot is best-effort; the agent can operate without it.
       screenshotDataUrl = undefined;
+    }
+
+    // Responsive Matrix (issue #14): full-frame capture of every visible
+    // breakpoint so the agent sees how the element renders across widths and
+    // can fix one breakpoint without regressing the others.
+    let frames: ResponsiveFrame[] | undefined;
+    if (responsiveMatrix && matrixFrames.length > 0) {
+      try {
+        const captures = await Promise.all(
+          matrixFrames.map(async (f) => ({
+            def: { id: f.id, label: f.label, width: f.width },
+            active: f.id === matrixActiveFrameId,
+            screenshotDataUrl: await captureRegion(undefined, f.webContentsId),
+          })),
+        );
+        frames = assembleFrames(captures);
+      } catch {
+        // Cross-breakpoint context is best-effort; the single screenshot stands.
+        frames = undefined;
+      }
     }
 
     const requestId = genId();
@@ -1117,6 +1204,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         annotations,
         targets,
         screenshotDataUrl,
+        frames,
         projectRoot: project.root,
         devServerUrl: previewUrl ?? project.devServerUrl,
       },

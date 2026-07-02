@@ -23,6 +23,7 @@ import {
   Sparkles,
   History,
   Monitor,
+  MonitorSmartphone,
   Code2,
   Terminal,
   ExternalLink,
@@ -309,6 +310,8 @@ export function Toolbar(): React.ReactElement {
   const reloadPreview = useEaselStore((s) => s.reloadPreview);
   const toggleDevTools = useEaselStore((s) => s.toggleDevTools);
   const setViewportWidth = useEaselStore((s) => s.setViewportWidth);
+  const responsiveMatrix = useEaselStore((s) => s.responsiveMatrix);
+  const setResponsiveMatrix = useEaselStore((s) => s.setResponsiveMatrix);
   const setHistoryOpen = useEaselStore((s) => s.setHistoryOpen);
 
   const gridVisible = useEaselStore((s) => s.gridVisible);
@@ -467,6 +470,15 @@ export function Toolbar(): React.ReactElement {
             />
           )}
         </div>
+        <IconButton
+          onClick={() => setResponsiveMatrix(!responsiveMatrix)}
+          tooltip="Responsive matrix — edit Desktop/Tablet/Mobile at once"
+          active={responsiveMatrix}
+          disabled={!previewUrl}
+          aria-label="Responsive matrix"
+        >
+          <MonitorSmartphone className="w-[17px] h-[17px]" />
+        </IconButton>
         <IconButton
           onClick={() => toggleDevTools()}
           tooltip="Toggle DevTools for the preview"
