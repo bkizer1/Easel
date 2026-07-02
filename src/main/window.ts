@@ -33,30 +33,74 @@ export function getMainWindow(): BrowserWindow | null {
 }
 
 /**
- * Capture the contents of the embedded `<webview>` as a PNG data URL.
+ * Pure selection of which guest WebContents id to capture.
+ *
+ * Extracted from {@link capturePreview} so it can be unit-tested without
+ * Electron.  The caller is responsible for resolving the returned id back to an
+ * actual WebContents object (only ever from the already-filtered guest list).
+ *
+ * Rules:
+ *  - If `webContentsId` is provided AND present in `guestIds`, return it — this
+ *    is the Responsive Matrix case where the renderer names a specific webview.
+ *  - Else, if there are any guests, return the first one (today's behavior).
+ *  - Else return `null`, meaning "no guest — fall back to the main window".
+ *
+ * Note we only ever select among ids the caller already filtered to real,
+ * non-main, non-devtools guests; an arbitrary `webContentsId` that is not in
+ * the list is intentionally ignored rather than trusted blindly.
+ *
+ * @param guestIds      - Ids of the filtered guest WebContents.
+ * @param webContentsId - The renderer-requested target id, if any.
+ * @returns The chosen guest id, or `null` to fall back to the main window.
+ */
+export function pickCaptureTargetId(
+  guestIds: number[],
+  webContentsId: number | undefined,
+): number | null {
+  if (webContentsId !== undefined && guestIds.includes(webContentsId)) {
+    return webContentsId;
+  }
+  return guestIds.length > 0 ? guestIds[0] : null;
+}
+
+/**
+ * Capture the contents of an embedded `<webview>` as a PNG data URL.
  *
  * The renderer cannot call `webContents.capturePage()` directly because it
  * has no Node access. The main process locates the webview's `WebContents`
- * by looking for the guest that is currently loading the dev-server URL.
- * Falls back to capturing the full main window if no guest is found.
+ * among the non-main, non-devtools guests attached to the same session.
+ *
+ * The Responsive Matrix renders multiple `<webview>`s at once, so we can no
+ * longer assume the first guest is the right one — the renderer passes a
+ * specific `webContentsId` (from `<webview>.getWebContentsId()`) to name the
+ * exact guest to capture.  When it is omitted (or does not match a known
+ * guest) we fall back to the first guest, then to the full main window.
  *
  * @param box - Optional region in preview-viewport CSS pixels.  When omitted
  *              the full webview content is captured.
+ * @param webContentsId - Optional id of the specific guest `<webview>` to
+ *              capture (Responsive Matrix).  Ignored if it does not match a
+ *              known guest.
  */
-export async function capturePreview(box?: BoundingBox): Promise<string> {
+export async function capturePreview(box?: BoundingBox, webContentsId?: number): Promise<string> {
   const win = mainWindow;
   if (!win) throw new Error('No main window open');
 
   // Locate the webview guest WebContents.  The renderer loads the dev-server URL
   // inside a <webview>; its WebContents is registered as an "in-page" webContents
-  // child.  We pick the first non-main, non-devtools WebContents attached to the
-  // same session.
+  // child.  We filter to non-main, non-devtools WebContents attached to the same
+  // session, then let the pure selector pick which one to capture.
   const { webContents: WebContents } = await import('electron');
   const guests = WebContents.getAllWebContents().filter(
     (wc) => wc.id !== win.webContents.id && !wc.isDevToolsOpened(),
   );
 
-  const target = guests.length > 0 ? guests[0] : win.webContents;
+  const targetId = pickCaptureTargetId(
+    guests.map((wc) => wc.id),
+    webContentsId,
+  );
+  const target =
+    targetId !== null ? (guests.find((wc) => wc.id === targetId) ?? win.webContents) : win.webContents;
 
   const rect = box
     ? { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) }

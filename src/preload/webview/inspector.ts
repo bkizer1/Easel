@@ -44,14 +44,25 @@ import type {
 } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { accumulateStyleEdit } from './styleDelta';
+import { enableMocking, disableMocking, setMocks } from './fetchMock';
+import {
+  collectSvelteEntries,
+  collectReactContextEntries,
+  applyVueWrite,
+  unwrapMaybeRef,
+  type SvelteInstance,
+} from './frameworkTaps';
 import { columnEdges, measureMisalignment, type GridConfig } from '@shared/grid';
 import {
   serializeValue,
   formatSerializedValue,
+  diffFiberRenderCause,
+  deriveRenderNote as deriveRenderNotePure,
   type ElementStateSnapshot,
   type StateEntry,
   type DetectedFramework,
   type RenderCause,
+  type SerializedValue,
 } from '@shared/xray';
 
 /* -------------------------------------------------------------------------- */
@@ -63,6 +74,15 @@ const OUT_CHANNEL = 'inspector-message' as const;
 
 /** Channel on which the host sends `InspectorCommand` payloads to the guest. */
 const IN_CHANNEL = 'inspector-command' as const;
+
+/**
+ * Channel on which the guest sends a time-travel `state-snapshot` reply UP to the
+ * MAIN process (via `ipcRenderer.send`, which reaches `ipcMain.on`). Distinct
+ * from {@link OUT_CHANNEL} (`sendToHost` → the embedder renderer): the snapshot
+ * capture is driven by main before a checkpoint is created, so the reply must go
+ * to main, not the renderer. Kept in sync with `@main/stateCapture`.
+ */
+const SNAPSHOT_REPLY_CHANNEL = 'inspector-state-snapshot' as const;
 
 /* -------------------------------------------------------------------------- */
 /*  State                                                                      */
@@ -644,6 +664,14 @@ function scanOffGrid(grid: GridConfig, threshold: number): OffGridElement[] {
 /** Most recently hovered element, used by click handler to avoid re-computation. */
 let lastHoveredEl: Element | null = null;
 
+/**
+ * Most recently inspected element (picked, or targeted by a state command). Used
+ * by the unconditional `snapshot-state` capture so the time-travel snapshot can
+ * include the element the user was last looking at, even if nothing is "actively"
+ * inspected at checkpoint time. Cleared lazily when it leaves the document.
+ */
+let lastInspectedEl: Element | null = null;
+
 /** Throttle state for mousemove. */
 let moveScheduled = false;
 
@@ -703,6 +731,7 @@ function onClick(event: MouseEvent): void {
 
     if (!el) return;
 
+    lastInspectedEl = el;
     const target = buildElementTarget(el);
     send({ type: 'element-picked', target });
 
@@ -872,6 +901,12 @@ interface ReactFiber {
   return?: ReactFiber | null;
   memoizedProps?: unknown;
   memoizedState?: ReactHook | unknown;
+  /** React's previously-committed fiber for this node — the basis of a TRUE
+   *  last-commit render-cause diff (see `diffFiberRenderCause`). */
+  alternate?: ReactFiber | null;
+  /** Subscribed React Context dependencies (dev + prod), walked for the
+   *  'context' state group. */
+  dependencies?: { firstContext?: unknown } | null;
 }
 
 /** One node in React's hook linked list (`fiber.memoizedState.next…`). */
@@ -959,6 +994,39 @@ function formatEntryValue(entry: StateEntry): string {
   }
 }
 
+/** Compact, comparable string for any raw value, reusing the shared serializer. */
+function formatRawValue(value: unknown): string {
+  try {
+    return formatSerializedValue(serializeValue(value, { maxDepth: 2, maxEntries: 12 }));
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Read the observable render-gate signals off `el` and delegate to the shared,
+ * unit-tested `deriveRenderNotePure` for the honest "why is this here/shown"
+ * wording. This wrapper only does the DOM reads (so the decision logic stays
+ * pure + testable); it never throws.
+ */
+function deriveRenderNote(el: Element): string | undefined {
+  try {
+    let classList: string[] = [];
+    try {
+      classList = Array.from(el.classList);
+    } catch {
+      classList = [];
+    }
+    return deriveRenderNotePure({
+      hidden: el.hasAttribute('hidden'),
+      ariaHidden: el.getAttribute('aria-hidden'),
+      classList,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 /** Computed-style declarations highlighted in the cockpit's State tab. */
 const HIGHLIGHTED_STYLE_PROPS: readonly string[] = [
   'color',
@@ -1033,6 +1101,11 @@ function collectReactEntries(componentFiber: ReactFiber, entries: StateEntry[]):
     // not meaningful "state" rows for the cockpit.
     if (typeof value !== 'function') {
       const writable = typeof hook.queue?.dispatch === 'function';
+      // Label by the positional STATEFUL index. (React's dev `_debugHookTypes`
+      // can't be indexed by the raw chain position — useContext/useDebugValue add
+      // a type entry but no chain node, so they desync the two lists — and this
+      // keeps the row labels aligned with the render-cause note's `state[N]` keys
+      // and the write-back path below.)
       entries.push({
         group: 'hooks',
         label: `state[${stateIndex}]`,
@@ -1045,6 +1118,9 @@ function collectReactEntries(componentFiber: ReactFiber, entries: StateEntry[]):
     hook = hook.next ?? undefined;
     index++;
   }
+
+  // Subscribed React Context slices (the 'context' group). Read-only.
+  collectReactContextEntries(componentFiber, entries, MAX_STATE_ENTRIES);
 }
 
 /** Collect Vue props + setupState entries off a component instance. */
@@ -1065,15 +1141,44 @@ function collectVueEntries(comp: VueComponentInternal, entries: StateEntry[]): v
     for (const key of Object.keys(comp.setupState)) {
       if (entries.length >= MAX_STATE_ENTRIES) return;
       if (key.startsWith('__') || key.startsWith('$')) continue; // internals
+      // Unwrap refs so the row shows the underlying value, not the ref wrapper.
       entries.push({
         group: 'state',
         label: key,
-        value: serializeValue(comp.setupState[key]),
+        value: serializeValue(unwrapMaybeRef(comp.setupState[key])),
         path: ['setupState', key],
         writable: true,
       });
     }
   }
+}
+
+/**
+ * Best-effort reach for a Svelte component instance from a DOM node. Svelte does
+ * not attach the instance to the DOM by default, so this scans the element and a
+ * few ancestors for an own-property (`__…`) whose value carries a `$$` with a
+ * `ctx` array (the internal instance shape). Returns null when unreachable —
+ * common, and handled honestly by the caller (name-only, no state rows).
+ */
+function findSvelteInstance(el: Element): SvelteInstance | null {
+  try {
+    let node: Element | null = el;
+    let hops = 0;
+    while (node && hops++ < 4) {
+      for (const key of Object.getOwnPropertyNames(node)) {
+        if (!key.startsWith('__')) continue;
+        const v = (node as unknown as Record<string, unknown>)[key];
+        if (v && typeof v === 'object' && '$$' in (v as object)) {
+          const inst = v as SvelteInstance;
+          if (inst.$$ && Array.isArray(inst.$$.ctx)) return inst;
+        }
+      }
+      node = node.parentElement;
+    }
+  } catch {
+    // Reading exotic own-properties can throw; treat as unreachable.
+  }
+  return null;
 }
 
 /**
@@ -1092,6 +1197,8 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
     let framework: DetectedFramework = 'unknown';
     let componentName: string | undefined;
     const entries: StateEntry[] = [];
+    // Held so render-cause can diff against this fiber's `alternate` below.
+    let reactComponentFiber: ReactFiber | undefined;
 
     // React.
     const fiber = findReactFiber(el);
@@ -1099,6 +1206,7 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
       framework = 'react';
       const componentFiber = nearestComponentFiber(fiber);
       if (componentFiber) {
+        reactComponentFiber = componentFiber;
         componentName = reactComponentName(componentFiber.type);
         collectReactEntries(componentFiber, entries);
       }
@@ -1115,8 +1223,10 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
       }
     }
 
-    // Svelte (best-effort — internals are mostly closure-bound; we only surface
-    // the component name when the dev compiler stamped `__svelte_meta`).
+    // Svelte. The component name comes from the dev compiler's `__svelte_meta`;
+    // reactive state comes from the instance's `$$.ctx` when it is reachable
+    // (best-effort — Svelte's instance is often closure-bound and not exposed on
+    // the DOM, in which case we honestly surface the name with no state rows).
     if (framework === 'unknown') {
       const meta = readProp(el, '__svelte_meta');
       if (meta && typeof meta === 'object') {
@@ -1124,29 +1234,60 @@ function buildElementStateSnapshot(el: Element, previousKeys?: string[]): Elemen
         const loc = readProp(meta, 'loc');
         const file = readProp(loc, 'file');
         if (typeof file === 'string' && file) componentName = file.split('/').pop();
+        const instance = findSvelteInstance(el);
+        if (instance) collectSvelteEntries(instance, entries, MAX_STATE_ENTRIES);
       }
     }
 
     const computedStyle = collectComputedStyle(el);
 
-    // Render-cause: diff the current label→value map against the cached prior
-    // one for this selector. Only meaningful when a prior snapshot exists.
+    // ── Render-cause ───────────────────────────────────────────────────────
+    // Build the current label→value map up front; it both seeds the cache and
+    // backs the "since you last inspected" fallback diff.
     const currentMap = new Map<string, string>();
     for (const entry of entries) currentMap.set(entry.label, formatEntryValue(entry));
-    const priorMap = renderCauseCache.get(selector);
+
     let renderCause: RenderCause | undefined;
-    if (priorMap) {
-      const changedKeys: string[] = [];
-      for (const [label, formatted] of currentMap) {
-        const prior = priorMap.get(label);
-        if (prior !== undefined && prior !== formatted) changedKeys.push(label);
+
+    // (a) TRUE last-commit cause: diff the component fiber's current props +
+    //     hook-state against React's previously-committed fiber (`alternate`).
+    //     This is the authoritative source whenever React retained an alternate.
+    let changedKeys: string[] | null = null;
+    let source: RenderCause['source'] = 'since-pick';
+    if (reactComponentFiber) {
+      changedKeys = diffFiberRenderCause(reactComponentFiber, formatRawValue);
+      if (changedKeys) source = 'commit';
+    }
+
+    // (b) Fallback: no alternate (first commit / non-React) → diff the current
+    //     value set against the cache from the last time THIS selector was
+    //     inspected. This is the original "since last pick" behavior.
+    if (changedKeys === null) {
+      const priorMap = renderCauseCache.get(selector);
+      if (priorMap) {
+        const sincePick: string[] = [];
+        for (const [label, formatted] of currentMap) {
+          const prior = priorMap.get(label);
+          if (prior !== undefined && prior !== formatted) sincePick.push(label);
+        }
+        // The host's hint can only narrow what it already knows changed; the
+        // cache remains authoritative, so we intersect when a hint is supplied.
+        const filtered = previousKeys ? sincePick.filter((k) => previousKeys.includes(k)) : sincePick;
+        changedKeys = filtered.length ? filtered : sincePick;
+        source = 'since-pick';
       }
-      // The host's hint can only narrow what it already knows changed; the cache
-      // remains authoritative, so we intersect when a hint is supplied.
-      const filtered = previousKeys
-        ? changedKeys.filter((k) => previousKeys.includes(k))
-        : changedKeys;
-      renderCause = { changedKeys: filtered.length ? filtered : changedKeys };
+    }
+
+    // Honest "why is this here/shown" note, walked from the element. Independent
+    // of the changed-key diff — present even on the very first inspection.
+    const note = deriveRenderNote(el);
+
+    if (changedKeys !== null || note) {
+      renderCause = {
+        changedKeys: changedKeys ?? [],
+        ...(changedKeys !== null ? { source } : {}),
+        ...(note ? { note } : {}),
+      };
     }
     renderCauseCache.set(selector, currentMap);
 
@@ -1220,8 +1361,10 @@ function applySetValue(el: Element, path: string[], value: unknown): boolean {
       if (vueComp) {
         const bag = group === 'setupState' ? vueComp.setupState : vueComp.props;
         if (bag && typeof bag === 'object' && key) {
-          (bag as Record<string, unknown>)[key] = value;
-          return true;
+          // Ref-aware: write through `.value` when the member is a Vue ref so
+          // reactivity propagates instead of silently replacing the unwrapped
+          // value on the proxy.
+          return applyVueWrite(bag as Record<string, unknown>, key, value);
         }
       }
       return false;
@@ -1232,6 +1375,148 @@ function applySetValue(el: Element, path: string[], value: unknown): boolean {
     console.error('[Easel:inspector] applySetValue error:', err);
     return false;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Time-travel — unconditional state snapshot (issue #13)                     */
+/* -------------------------------------------------------------------------- */
+
+/** Max top-level groups in a time-travel snapshot (bounds the total tree). */
+const MAX_SNAPSHOT_GROUPS = 12;
+
+/** Tighter serializer caps for the snapshot so the persisted tree stays small. */
+const SNAPSHOT_SERIALIZE_OPTS = { maxDepth: 4, maxEntries: 30, maxStringLen: 120 } as const;
+
+/**
+ * Discover the React root fiber's hosted component tree's nearest state, if any.
+ * Best-effort: walks from `document.body`'s first React-bearing descendant up to
+ * its top component fiber and lowers that component's props/hooks. Returns
+ * `undefined` when no React tree is detectable (keeps the snapshot honest).
+ */
+function captureReactRootState(): SerializedValue | undefined {
+  try {
+    // Find any element carrying a React fiber, starting near the document root.
+    const candidates = document.querySelectorAll('body *');
+    let fiber: ReactFiber | undefined;
+    let guard = 0;
+    for (const el of Array.from(candidates)) {
+      if (guard++ > 400) break; // bound the scan on huge DOMs
+      const f = findReactFiber(el);
+      if (f) {
+        fiber = f;
+        break;
+      }
+    }
+    if (!fiber) return undefined;
+
+    // Walk to the TOP-most component fiber (the app root component) so the
+    // snapshot reflects app-level state, not a leaf host element.
+    let top = nearestComponentFiber(fiber);
+    let walkGuard = 0;
+    let cursor: ReactFiber | undefined = top;
+    while (cursor && walkGuard++ < 2000) {
+      const next = cursor.return ?? undefined;
+      const nextComponent = next ? nearestComponentFiber(next) : undefined;
+      if (!nextComponent) break;
+      top = nextComponent;
+      cursor = nextComponent;
+    }
+    if (!top) return undefined;
+
+    const entries: StateEntry[] = [];
+    collectReactEntries(top, entries);
+    if (entries.length === 0) return undefined;
+    return {
+      kind: 'object',
+      ctor: reactComponentName(top.type),
+      entries: entries.map((e) => ({ key: e.label, value: e.value })),
+      truncated: false,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Best-effort scan of a few well-known global store slices (bounded). Captures
+ * only the SHAPE of state that is trivially discoverable on `window` without a
+ * framework-specific producer (the general store-slice producer is a separate
+ * workstream). Each discovered slice is serialized with the snapshot caps.
+ */
+function captureGlobalStoreSlices(): Array<{ key: string; value: SerializedValue }> {
+  const out: Array<{ key: string; value: SerializedValue }> = [];
+  // Redux DevTools exposes the live store; many apps also attach a store handle.
+  const WELL_KNOWN: readonly string[] = ['__NEXT_DATA__', '__INITIAL_STATE__', '__PRELOADED_STATE__'];
+  try {
+    for (const key of WELL_KNOWN) {
+      if (out.length >= MAX_SNAPSHOT_GROUPS) break;
+      const val = readProp(window, key);
+      if (val !== undefined && val !== null && typeof val === 'object') {
+        out.push({ key, value: serializeValue(val, SNAPSHOT_SERIALIZE_OPTS) });
+      }
+    }
+  } catch {
+    // Reading exotic globals can throw; keep whatever we already gathered.
+  }
+  return out;
+}
+
+/**
+ * Build the bounded time-travel snapshot tree UNCONDITIONALLY. It folds together
+ * (best-effort, each guarded independently):
+ *   - the last-inspected element's entries (when one is/was picked),
+ *   - the detected React root component's props/hooks, and
+ *   - any trivially-discoverable global store slices.
+ * Always returns a valid {@link SerializedValue} — never throws, never returns
+ * nothing. When nothing is discoverable it returns a minimal but valid object so
+ * the persisted snapshot still diffs cleanly against another checkpoint's.
+ */
+function buildStateSnapshotData(): SerializedValue {
+  const groups: Array<{ key: string; value: SerializedValue }> = [];
+
+  // 1. The last-inspected element, if it is still in the document.
+  try {
+    if (lastInspectedEl && document.contains(lastInspectedEl)) {
+      const snap = buildElementStateSnapshot(lastInspectedEl);
+      if (snap.entries.length > 0) {
+        groups.push({
+          key: `element:${snap.componentName ?? snap.selector}`,
+          value: {
+            kind: 'object',
+            entries: snap.entries.map((e) => ({ key: e.label, value: e.value })),
+            truncated: false,
+          },
+        });
+      }
+    } else if (lastInspectedEl && !document.contains(lastInspectedEl)) {
+      lastInspectedEl = null;
+    }
+  } catch {
+    // ignore — fall through to the broader scans
+  }
+
+  // 2. React root state.
+  try {
+    if (groups.length < MAX_SNAPSHOT_GROUPS) {
+      const react = captureReactRootState();
+      if (react) groups.push({ key: 'react', value: react });
+    }
+  } catch {
+    // ignore
+  }
+
+  // 3. Global store slices.
+  try {
+    for (const slice of captureGlobalStoreSlices()) {
+      if (groups.length >= MAX_SNAPSHOT_GROUPS) break;
+      groups.push(slice);
+    }
+  } catch {
+    // ignore
+  }
+
+  // Always return a valid object (possibly with zero groups).
+  return { kind: 'object', entries: groups.slice(0, MAX_SNAPSHOT_GROUPS), truncated: false };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1299,11 +1584,33 @@ ipcRenderer.on(
             el = null;
           }
           if (el) {
+            lastInspectedEl = el;
             send({
               type: 'element-state',
               snapshot: buildElementStateSnapshot(el, cmd.previousKeys),
             });
           }
+          break;
+        }
+
+        case 'snapshot-state': {
+          // Build the bounded snapshot UNCONDITIONALLY (no element need be picked).
+          // Reply to MAIN (which drives this before createCheckpoint) via the
+          // dedicated up-channel, and also surface the typed `state-snapshot`
+          // message to the host renderer for parity / renderer-side orchestration.
+          let data: SerializedValue;
+          try {
+            data = buildStateSnapshotData();
+          } catch {
+            // Degrade to a minimal-but-valid snapshot rather than nothing.
+            data = { kind: 'object', entries: [], truncated: false };
+          }
+          try {
+            ipcRenderer.send(SNAPSHOT_REPLY_CHANNEL, { requestId: cmd.requestId, data });
+          } catch (err) {
+            console.error('[Easel:inspector] snapshot-state reply to main failed:', err);
+          }
+          send({ type: 'state-snapshot', requestId: cmd.requestId, data });
           break;
         }
 
@@ -1315,6 +1622,7 @@ ipcRenderer.on(
             el = null;
           }
           if (el) {
+            lastInspectedEl = el;
             const wrote = applySetValue(el, cmd.path, cmd.value);
             // Re-emit so the panel reflects the (possibly framework-coerced)
             // value after a successful scrub.
@@ -1341,6 +1649,39 @@ ipcRenderer.on(
             if (el) discardStyleTweak(el);
           } catch (err) {
             console.error('[Easel:inspector] discard-style error:', err);
+          }
+          break;
+        }
+
+        // ── Issue #17: Live State Puppeteer (gated in main by policy + opt-in) ──
+        case 'puppeteer-enable': {
+          // Install / uninstall the fetch+XHR interception monkeypatch.
+          // disableMocking() also restores native fetch/XHR and clears specs.
+          if (cmd.enabled) enableMocking();
+          else disableMocking();
+          break;
+        }
+
+        case 'puppeteer-set-mocks': {
+          // Replace the full active mock set (main owns the authoritative list).
+          setMocks(cmd.mocks);
+          break;
+        }
+
+        case 'puppeteer-set-state': {
+          // One-shot structured state write, reusing the State X-Ray fiber tap.
+          let el: Element | null = null;
+          try {
+            el = document.querySelector(cmd.selector);
+          } catch {
+            el = null;
+          }
+          if (el) {
+            const wrote = applySetValue(el, cmd.path, cmd.value);
+            // Re-emit so the panel reflects the applied (possibly coerced) value.
+            if (wrote) {
+              send({ type: 'element-state', snapshot: buildElementStateSnapshot(el) });
+            }
           }
           break;
         }

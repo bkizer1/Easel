@@ -270,6 +270,35 @@ export interface RefactorExtractSpec {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Responsive matrix (issue #14)                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One captured breakpoint frame from the Responsive Matrix (issue #14).
+ *
+ * When the matrix is active, the dev-server URL is rendered in several stacked
+ * `<webview>`s at different viewport widths. On submit every visible breakpoint
+ * is captured so the agent can fix responsive CSS at one breakpoint without
+ * regressing the others. The selected {@link ElementTarget} is identical across
+ * frames (same `data-easel-source`), so a single target drives the edit while
+ * these frames supply the cross-breakpoint visual context.
+ */
+export interface ResponsiveFrame {
+  /** Human-readable breakpoint label, e.g. `Desktop`, `Tablet`, `Mobile`. */
+  label: string;
+  /** CSS px width the frame was rendered at. */
+  width: number;
+  /**
+   * Whether this is the breakpoint the user marked the target/annotations on
+   * (the "active" frame). Its capture corresponds to {@link
+   * EditRequest.screenshotDataUrl}; the others are context-only.
+   */
+  active: boolean;
+  /** Full-frame screenshot of this breakpoint (PNG data URL). */
+  screenshotDataUrl: string;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Edit request (renderer -> main -> agent)                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -292,6 +321,14 @@ export interface EditRequest {
    * from {@link AnnotationBatch.screenshotDataUrl} for direct multimodal use.
    */
   screenshotDataUrl?: string;
+  /**
+   * Optional cross-breakpoint captures from the Responsive Matrix (issue #14).
+   * Present only when the matrix is active on submit; each entry is a full-frame
+   * screenshot at one breakpoint width. {@link screenshotDataUrl} remains the
+   * precise marked region on the active breakpoint. The agent uses these to fix
+   * one breakpoint without regressing the others.
+   */
+  frames?: ResponsiveFrame[];
   /** Absolute path to the project root on disk the agent may edit. */
   projectRoot: string;
   /** The dev-server URL currently loaded in the preview, e.g. `http://localhost:3000`. */

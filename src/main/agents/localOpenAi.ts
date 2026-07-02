@@ -20,6 +20,7 @@ import {
   parseToolInput,
   type ToolExecutorContext,
 } from '@main/agents/tools';
+import { buildPuppeteerCapability } from '@main/puppeteer';
 
 const log = createLogger('backend:local-openai');
 
@@ -88,6 +89,7 @@ export function localOpenAiBackend(_settings: AppSettings): AgentBackend {
         fs: ctx.fs,
         imageProvider: ctx.imageProvider,
         nextImageId: () => crypto.randomUUID(),
+        puppeteer: buildPuppeteerCapability(ctx.projectRoot),
       };
 
       const messages: OpenAiMessage[] = [

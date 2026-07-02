@@ -2,19 +2,25 @@
  * Nimbus — a demo landing page for trying Easel.
  *
  * Things to try (point at them in Easel and describe a change):
- *   • the grey hero subtext  → "make this text white, it's hard to read"
- *   • the hero image         → "replace this with a photo of a golden doodle"
+ *   • the grey hero subtext    → "make this text white, it's hard to read"
+ *   • the hero image           → "replace this with a photo of a golden doodle"
  *   • the "Get started" button → "make this button green and bigger"
- *   • a feature card          → "move this card to the front and add a border"
- *   • the three pricing cards → switch to freeform mode, lasso all three, and
+ *   • a feature card           → "move this card to the front and add a border"
+ *   • the three pricing cards  → switch to freeform mode, lasso all three, and
  *       choose "Extract a reusable component" (issue #15). Each card is the same
  *       markup duplicated across StarterPlan/ProPlan/TeamPlan in separate files.
+ *
+ * State Puppeteer targets (enable State Puppeteer first, then ask):
+ *   • "pretend /api/products returns 50 items"  → fetch-mock fills the product list
+ *   • "show the empty cart state"               → state-override writes [] into Cart.items
  */
 
 import React, { useRef, useState } from 'react';
 import { StarterPlan } from './sections/StarterPlan';
 import { ProPlan } from './sections/ProPlan';
 import { TeamPlan } from './sections/TeamPlan';
+import ProductList from './ProductList';
+import Cart from './Cart';
 
 const features = [
   { title: 'Lightning fast', body: 'Ship in milliseconds with our edge-native runtime and zero cold starts.' },
@@ -120,6 +126,22 @@ export default function App(): React.ReactElement {
         <StarterPlan />
         <ProPlan />
         <TeamPlan />
+      </section>
+
+      {/* ── State Puppeteer demo section ────────────────────────────────────── */}
+      <section className="puppeteer-section">
+        <div className="puppeteer-section-header">
+          <span className="eyebrow">EASEL #17 — LIVE STATE PUPPETEER</span>
+          <h2 className="puppeteer-section-title">Manual verification targets</h2>
+          <p className="puppeteer-section-desc">
+            Enable State Puppeteer in Easel, then use natural language to drive these
+            components into hard-to-reach states — without touching source code.
+          </p>
+        </div>
+        <div className="puppeteer-grid">
+          <ProductList />
+          <Cart />
+        </div>
       </section>
 
       <footer className="footer">

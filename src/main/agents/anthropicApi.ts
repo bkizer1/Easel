@@ -21,6 +21,7 @@ import {
 } from '@main/agents/tools';
 import { createAnthropicClient } from '@main/agents/anthropicClient';
 import type { VisionClient } from '@main/agents/visionJudge';
+import { buildPuppeteerCapability } from '@main/puppeteer';
 
 const log = createLogger('backend:anthropic-api');
 
@@ -127,6 +128,7 @@ export function anthropicApiBackend(_settings: AppSettings): AgentBackend {
         fs: ctx.fs,
         imageProvider: ctx.imageProvider,
         nextImageId: () => crypto.randomUUID(),
+        puppeteer: buildPuppeteerCapability(ctx.projectRoot),
       };
 
       type Block = Record<string, unknown>;

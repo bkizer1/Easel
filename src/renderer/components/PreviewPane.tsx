@@ -30,6 +30,7 @@ import type { BoundingBox, ElementTarget, Point } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { DEFAULT_OFF_GRID_THRESHOLD } from '@shared/grid';
 import { useEaselStore, normalizePreviewUrl } from '../store';
+import { MATRIX_PRESETS, type MatrixFrameDef } from '../lib/responsiveMatrix';
 import { easel } from '../lib/api';
 import { AnnotationOverlay } from './AnnotationOverlay';
 import { dropPointToQueryBox } from '../lib/dropImage';
@@ -63,6 +64,7 @@ interface WebviewElement extends HTMLElement {
   openDevTools(): void;
   closeDevTools(): void;
   isDevToolsOpened(): boolean;
+  getWebContentsId(): number;
   addEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void;
   removeEventListener(type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void;
 }
@@ -135,6 +137,136 @@ function EmptyState({ onOpen, onNewSite }: { onOpen: () => void; onNewSite: () =
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Responsive matrix frame (issue #14)                                       */
+/* -------------------------------------------------------------------------- */
+
+interface MatrixFrameProps {
+  /** Breakpoint definition (id/label/width). */
+  def: MatrixFrameDef;
+  /** Whether this is the active, interactive frame. */
+  active: boolean;
+  /** URL all frames load (synced navigation). */
+  src: string;
+  /** Absolute URL of the guest inspector preload. */
+  preloadUrl: string;
+  /** Bumped to force a synced reload across every frame. */
+  reloadNonce: number;
+  /** Report this frame's `<webview>` element up (null on unmount/remount). */
+  onElement: (id: string, el: WebviewElement | null) => void;
+  /** Report this frame's guest `webContentsId` once the page is ready. */
+  onReady: (def: MatrixFrameDef, webContentsId: number) => void;
+  /** Make this frame the active one. */
+  onActivate: (id: string) => void;
+  /** Overlay + drop affordance — supplied only for the active frame. */
+  children?: React.ReactNode;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDragLeave?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
+}
+
+/**
+ * One breakpoint column of the Responsive Matrix: a width-constrained
+ * `<webview>` plus a clickable header. The active frame carries the inspector
+ * wiring (via {@link MatrixFrameProps.onElement} → PreviewPane) and the
+ * annotation overlay; the others are live context mirrors that are still
+ * captured on submit. The `<webview>` key is stable across active changes so
+ * switching the active frame never reloads a guest.
+ */
+function MatrixFrame({
+  def,
+  active,
+  src,
+  preloadUrl,
+  reloadNonce,
+  onElement,
+  onReady,
+  onActivate,
+  children,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+}: MatrixFrameProps): React.ReactElement {
+  const wvRef = useRef<WebviewElement | null>(null);
+
+  const setRef = useCallback(
+    (el: HTMLElement | null) => {
+      const wv = (el as unknown as WebviewElement | null) ?? null;
+      wvRef.current = wv;
+      onElement(def.id, wv);
+    },
+    [def.id, onElement],
+  );
+
+  // Register the guest WebContents id once the page is ready (and after any
+  // remount triggered by a navigation, hence `src` in the deps).
+  useEffect(() => {
+    const wv = wvRef.current;
+    if (!wv) return;
+    const report = (): void => {
+      try {
+        onReady(def, wv.getWebContentsId());
+      } catch {
+        /* webview not attached yet — a later dom-ready will cover it */
+      }
+    };
+    wv.addEventListener('dom-ready', report);
+    // The webview may already be loaded when this (re)binds — report now too.
+    report();
+    return () => wv.removeEventListener('dom-ready', report);
+  }, [def, onReady, src]);
+
+  // Synced reload when a revert / the toolbar bumps the nonce.
+  useEffect(() => {
+    if (reloadNonce > 0) wvRef.current?.reload();
+  }, [reloadNonce]);
+
+  return (
+    <div className="relative flex h-full shrink-0 flex-col">
+      <button
+        type="button"
+        onClick={() => onActivate(def.id)}
+        className={`flex items-center justify-between gap-2 rounded-t-lg px-3 py-1.5 text-[11px] font-medium transition-colors ${
+          active
+            ? 'bg-brand-500/15 text-brand-200 ring-1 ring-inset ring-brand-400/40'
+            : 'bg-ink-900/70 text-gray-400 hover:bg-ink-800/80 hover:text-gray-200'
+        }`}
+        style={{ width: `${def.width}px`, maxWidth: '100%' }}
+      >
+        <span className="flex items-center gap-1.5">
+          {active && <span className="h-1.5 w-1.5 rounded-full bg-brand-400" />}
+          {def.label}
+        </span>
+        <span className="font-mono text-[10px] text-gray-500">
+          {active ? 'editing' : `${def.width}px`}
+        </span>
+      </button>
+      <div
+        className={`relative flex-1 overflow-hidden bg-gray-950 ${
+          active ? 'ring-1 ring-inset ring-brand-400/40' : ''
+        }`}
+        style={{ width: `${def.width}px`, maxWidth: '100%' }}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        <webview
+          // Stable per (frame, url): switching the active frame must not remount
+          // a guest, but navigating to a new url should.
+          key={`${def.id}:${src}`}
+          ref={setRef}
+          src={src}
+          preload={preloadUrl}
+          partition="persist:easel-preview"
+          webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
+          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', border: 'none' }}
+        />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  PreviewPane                                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -149,6 +281,10 @@ export function PreviewPane(): React.ReactElement {
   const previewReloadNonce = useEaselStore((s) => s.previewReloadNonce);
   const devToolsNonce = useEaselStore((s) => s.devToolsNonce);
   const viewportWidth = useEaselStore((s) => s.viewportWidth);
+  const responsiveMatrix = useEaselStore((s) => s.responsiveMatrix);
+  const matrixActiveFrameId = useEaselStore((s) => s.matrixActiveFrameId);
+  const setMatrixActiveFrameId = useEaselStore((s) => s.setMatrixActiveFrameId);
+  const setMatrixFrames = useEaselStore((s) => s.setMatrixFrames);
   const addPageLog = useEaselStore((s) => s.addPageLog);
   const addPageError = useEaselStore((s) => s.addPageError);
   const mode = useEaselStore((s) => s.mode);
@@ -174,6 +310,8 @@ export function PreviewPane(): React.ReactElement {
   // Issue #6: relay the accumulated style delta; Issue #9: drop-an-image.
   const setStyleTweak = useEaselStore((s) => s.setStyleTweak);
   const dropImageOnElement = useEaselStore((s) => s.dropImageOnElement);
+  // Issue #17: resync puppeteer state into the guest after a reload/HMR cycle.
+  const resyncPuppeteer = useEaselStore((s) => s.resyncPuppeteer);
   const pendingInspectorCommand = useEaselStore((s) => s.pendingInspectorCommand);
   const inspectorCommandNonce = useEaselStore((s) => s.inspectorCommandNonce);
 
@@ -190,6 +328,61 @@ export function PreviewPane(): React.ReactElement {
     webviewRef.current = wv;
     setWebviewEl(wv);
   }, []);
+
+  /* ---- Responsive Matrix (issue #14): multi-frame registry ----
+   * In matrix mode several <webview>s are live at once. We bind ALL the existing
+   * single-webview inspector wiring to whichever frame is *active* (so exactly
+   * one frame is interactive), and register every frame's guest `webContentsId`
+   * so the store can capture each breakpoint on submit. Refs (not state) hold
+   * the live elements/ids so re-registration never re-renders. */
+  const frameEls = useRef<Map<string, WebviewElement | null>>(new Map());
+  const frameRegs = useRef<Map<string, { id: string; label: string; width: number; webContentsId: number }>>(new Map());
+  // Read latest active id / matrix flag inside stable callbacks without re-binding.
+  const activeFrameIdRef = useRef(matrixActiveFrameId);
+  activeFrameIdRef.current = matrixActiveFrameId;
+  const responsiveMatrixRef = useRef(responsiveMatrix);
+  responsiveMatrixRef.current = responsiveMatrix;
+
+  const registerFrameEl = useCallback((id: string, el: WebviewElement | null) => {
+    if (el) frameEls.current.set(id, el);
+    else frameEls.current.delete(id);
+    // Point the interactive webview at the active frame as it mounts.
+    if (responsiveMatrixRef.current && id === activeFrameIdRef.current) {
+      webviewRef.current = el;
+      setWebviewEl(el);
+    }
+  }, []);
+
+  const registerFrameReady = useCallback(
+    (def: MatrixFrameDef, webContentsId: number) => {
+      const prev = frameRegs.current.get(def.id);
+      if (prev && prev.webContentsId === webContentsId) return; // no change
+      frameRegs.current.set(def.id, { id: def.id, label: def.label, width: def.width, webContentsId });
+      // Publish only the frames that are part of the current matrix layout.
+      const live = MATRIX_PRESETS.map((p) => frameRegs.current.get(p.id)).filter(
+        (f): f is { id: string; label: string; width: number; webContentsId: number } => f !== undefined,
+      );
+      setMatrixFrames(live);
+    },
+    [setMatrixFrames],
+  );
+
+  // Repoint the interactive webview whenever the active frame changes.
+  useEffect(() => {
+    if (!responsiveMatrix) return;
+    const el = frameEls.current.get(matrixActiveFrameId) ?? null;
+    webviewRef.current = el;
+    setWebviewEl(el);
+  }, [matrixActiveFrameId, responsiveMatrix]);
+
+  // Tear down the registry when leaving matrix mode so stale guests aren't
+  // captured and the single-preview webview owns `webviewEl` again.
+  useEffect(() => {
+    if (responsiveMatrix) return;
+    frameEls.current.clear();
+    frameRegs.current.clear();
+    setMatrixFrames([]);
+  }, [responsiveMatrix, setMatrixFrames]);
 
   // Address-bar text (synced to previewUrl, but editable while typing).
   const [urlInput, setUrlInput] = useState(previewUrl ?? '');
@@ -266,6 +459,10 @@ export function PreviewPane(): React.ReactElement {
           // element-select works on the very first click.
           setWebviewReady(true);
           sendCommand({ type: 'set-mode', mode: useEaselStore.getState().mode });
+          // Issue #17: re-push the active puppeteer enabled+mocks state into the
+          // freshly (re)loaded guest so fetch/XHR interception stays sticky across
+          // HMR reloads and full page navigations.
+          void resyncPuppeteer();
           break;
 
         case 'element-hover':
@@ -357,6 +554,7 @@ export function PreviewPane(): React.ReactElement {
       setElementState,
       setStyleTweak,
       dropImageOnElement,
+      resyncPuppeteer,
       sendCommand,
     ],
   );
@@ -722,6 +920,45 @@ export function PreviewPane(): React.ReactElement {
             onStart={() => void startDevServer()}
             onStop={() => void stopDevServer()}
           />
+        ) : responsiveMatrix ? (
+          // Responsive Matrix (issue #14): the dev-server URL rendered at every
+          // breakpoint side by side. The active frame is interactive (inspector
+          // + overlay); the rest are live context mirrors. All are captured on
+          // submit so the agent fixes one breakpoint without regressing others.
+          <div className="absolute inset-0 flex justify-start gap-4 overflow-x-auto overflow-y-hidden bg-black/30 px-4 pb-4 pt-2">
+            {MATRIX_PRESETS.map((def) => {
+              const active = def.id === matrixActiveFrameId;
+              return (
+                <MatrixFrame
+                  key={def.id}
+                  def={def}
+                  active={active}
+                  src={previewUrl}
+                  preloadUrl={easel.webviewPreloadUrl}
+                  reloadNonce={previewReloadNonce}
+                  onElement={registerFrameEl}
+                  onReady={registerFrameReady}
+                  onActivate={setMatrixActiveFrameId}
+                  onDragOver={active ? onPreviewDragOver : undefined}
+                  onDragLeave={active ? onPreviewDragLeave : undefined}
+                  onDrop={active ? onPreviewDrop : undefined}
+                >
+                  {active && (
+                    <>
+                      <AnnotationOverlay hoverBox={hoverBox} scroll={scroll} sendCommand={sendCommand} />
+                      {dragActive && (
+                        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-brand-500/10 ring-2 ring-inset ring-brand-400/70">
+                          <span className="rounded-lg bg-ink-900/90 px-3 py-1.5 text-[12px] font-medium text-brand-200 shadow-lg">
+                            Drop an image onto an element to restyle it
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </MatrixFrame>
+              );
+            })}
+          </div>
         ) : (
           // Center a (optionally width-constrained) column for responsive testing.
           // At full width this just fills the surface; the darker backdrop only
