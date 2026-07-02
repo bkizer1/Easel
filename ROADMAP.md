@@ -123,9 +123,10 @@ code." Pairs with provenance trailers.
   state", "pretend the API returns 50 items" — a scoped eval-in-guest command + a
   `set_app_state` agent tool (clear a store, intercept `fetch` with MSW the agent writes)
   drive the app into hard-to-reach states so you can fix them.
-- **Session replay as a runnable `.easel` artifact** — serialize the chat (annotations +
-  diffs + checkpoints) plus the checkpoint trees (`git bundle`) into a portable bundle a
-  colleague scrubs frame-by-frame, with "Re-run this step" against current code. Design
+- **Session replay as a runnable `.easel` artifact** — _shipped (#18)._ Export the chat
+  (annotations + diffs + checkpoints) plus the checkpoint trees (`git bundle`) into a
+  portable `.easel` ZIP a colleague scrubs frame-by-frame, with "Re-run this step"
+  deterministically re-applying a recorded checkpoint's delta to current code. Design
   intent as a replayable program, not a Loom + Slack thread.
 - **Review mode (propose-don't-write)** — a staged runner writes to a shadow git worktree;
   diffs stream and, because each maps to a `data-easel-source`, the PreviewPane highlights

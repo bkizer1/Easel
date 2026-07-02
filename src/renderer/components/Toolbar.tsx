@@ -23,6 +23,7 @@ import {
   Sparkles,
   History,
   Monitor,
+  MonitorSmartphone,
   Code2,
   Terminal,
   ExternalLink,
@@ -31,6 +32,9 @@ import {
   Wand2,
   ScanEye,
   GitPullRequestArrow,
+  Download,
+  FolderInput,
+  FlaskConical,
 } from 'lucide-react';
 import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
@@ -299,6 +303,7 @@ export function Toolbar(): React.ReactElement {
   const viewportWidth = useEaselStore((s) => s.viewportWidth);
   const pageLogs = useEaselStore((s) => s.pageLogs);
   const historyOpen = useEaselStore((s) => s.historyOpen);
+  const exporting = useEaselStore((s) => s.exporting);
 
   const openProject = useEaselStore((s) => s.openProject);
   const closeProject = useEaselStore((s) => s.closeProject);
@@ -309,7 +314,11 @@ export function Toolbar(): React.ReactElement {
   const reloadPreview = useEaselStore((s) => s.reloadPreview);
   const toggleDevTools = useEaselStore((s) => s.toggleDevTools);
   const setViewportWidth = useEaselStore((s) => s.setViewportWidth);
+  const responsiveMatrix = useEaselStore((s) => s.responsiveMatrix);
+  const setResponsiveMatrix = useEaselStore((s) => s.setResponsiveMatrix);
   const setHistoryOpen = useEaselStore((s) => s.setHistoryOpen);
+  const exportSession = useEaselStore((s) => s.exportSession);
+  const importSession = useEaselStore((s) => s.importSession);
 
   const gridVisible = useEaselStore((s) => s.gridVisible);
   const offGridElements = useEaselStore((s) => s.offGridElements);
@@ -317,6 +326,9 @@ export function Toolbar(): React.ReactElement {
 
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
   const setXrayOpen = useEaselStore((s) => s.setXrayOpen);
+  const puppeteerOpen = useEaselStore((s) => s.puppeteerOpen);
+  const setPuppeteerOpen = useEaselStore((s) => s.setPuppeteerOpen);
+  const puppeteer = useEaselStore((s) => s.puppeteer);
 
   const settings = useEaselStore((s) => s.settings);
   const updateSettings = useEaselStore((s) => s.updateSettings);
@@ -438,6 +450,25 @@ export function Toolbar(): React.ReactElement {
         </div>
       </Seg>
 
+      {/* Session export / import cluster (Issue #18) */}
+      <Seg>
+        <IconButton
+          onClick={() => void exportSession()}
+          tooltip="Export session as .easel bundle"
+          disabled={!project || checkpoints.length === 0 || exporting}
+          aria-label="Export session"
+        >
+          <Download className="w-[17px] h-[17px]" />
+        </IconButton>
+        <IconButton
+          onClick={() => void importSession()}
+          tooltip="Import .easel bundle for replay"
+          aria-label="Import session"
+        >
+          <FolderInput className="w-[17px] h-[17px]" />
+        </IconButton>
+      </Seg>
+
       {/* View-tools cluster */}
       <Seg>
         <IconButton
@@ -468,6 +499,15 @@ export function Toolbar(): React.ReactElement {
             />
           )}
         </div>
+        <IconButton
+          onClick={() => setResponsiveMatrix(!responsiveMatrix)}
+          tooltip="Responsive matrix — edit Desktop/Tablet/Mobile at once"
+          active={responsiveMatrix}
+          disabled={!previewUrl}
+          aria-label="Responsive matrix"
+        >
+          <MonitorSmartphone className="w-[17px] h-[17px]" />
+        </IconButton>
         <IconButton
           onClick={() => toggleDevTools()}
           tooltip="Toggle DevTools for the preview"
@@ -519,6 +559,20 @@ export function Toolbar(): React.ReactElement {
         >
           <ScanEye className="w-[17px] h-[17px]" />
         </IconButton>
+        <div className="relative no-drag">
+          <IconButton
+            onClick={() => setPuppeteerOpen(!puppeteerOpen)}
+            tooltip="Live State Puppeteer — intercept fetches & override component state"
+            active={puppeteerOpen || puppeteer.enabled}
+            disabled={!previewUrl}
+            aria-label="Live State Puppeteer"
+          >
+            <FlaskConical className="w-[17px] h-[17px]" />
+          </IconButton>
+          {puppeteer.enabled && (puppeteer.mocks.length > 0 || puppeteer.overrides.length > 0) && (
+            <CountBadge count={puppeteer.mocks.length + puppeteer.overrides.length} tone="amber" />
+          )}
+        </div>
         <IconButton
           onClick={() => {
             if (!settings) return;

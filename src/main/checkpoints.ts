@@ -50,6 +50,14 @@ const log = createLogger('checkpoints');
  */
 const EASEL_REF = 'refs/easel/checkpoint';
 
+/**
+ * The canonical checkpoint ref name (Issue #18: session export bundles its
+ * history with `git bundle`). Always the main line, never a scratch ref.
+ */
+export function checkpointRefName(): string {
+  return EASEL_REF;
+}
+
 /** Issue #11: scratch experiment refs live exclusively under this prefix. */
 const SCRATCH_REF_PREFIX = 'refs/easel/scratch/';
 

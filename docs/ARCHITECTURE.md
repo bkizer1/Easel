@@ -540,6 +540,7 @@ All main <-> renderer communication is declared once in `src/shared/ipc.ts` and 
 | `settings.*` | `get`, `update`, `setSecret`, `clearSecret`, `validateBackend` (invoke); `changed` (push) | renderer↔main; main→renderer |
 | `checkpoint.*` | `list`, `restore`, `undo`, `redo` (invoke); `changed` (push) | renderer↔main; main→renderer |
 | `preview.*` | `reload`, `capture`, `requestImage` (invoke); `status` (push) | renderer↔main; main→renderer |
+| `session.*` | `export`, `import`, `replayStep` (invoke) — session replay as a runnable `.easel` bundle (#18) | renderer↔main |
 
 ### 7.3 The other channel: guest ↔ host renderer
 

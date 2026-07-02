@@ -228,6 +228,21 @@ const api: EaselApi = {
     setNetworkCapture(req) {
       return ipcRenderer.invoke(IpcChannels.xraySetNetworkCapture, req);
     },
+    setNetworkIntercept(req) {
+      return ipcRenderer.invoke(IpcChannels.xraySetNetworkIntercept, req);
+    },
+    continueRequest(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayContinueRequest, req);
+    },
+    fulfillRequest(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayFulfillRequest, req);
+    },
+    failRequest(req) {
+      return ipcRenderer.invoke(IpcChannels.xrayFailRequest, req);
+    },
+    onNetworkStatus(handler) {
+      return subscribe(IpcChannels.networkStatus, handler);
+    },
     saveSnapshot(req) {
       return ipcRenderer.invoke(IpcChannels.xraySaveSnapshot, req);
     },
@@ -239,6 +254,28 @@ const api: EaselApi = {
     },
     onNetworkEvent(handler) {
       return subscribe(IpcChannels.networkEvent, handler);
+    },
+  },
+
+  // ── puppeteer.* (Live State Puppeteer, issue #17) ───────────────────────────
+  puppeteer: {
+    getState() {
+      return ipcRenderer.invoke(IpcChannels.puppeteerGetState);
+    },
+    setEnabled(req) {
+      return ipcRenderer.invoke(IpcChannels.puppeteerSetEnabled, req);
+    },
+    removeMock(req) {
+      return ipcRenderer.invoke(IpcChannels.puppeteerRemoveMock, req);
+    },
+    clearAll() {
+      return ipcRenderer.invoke(IpcChannels.puppeteerClearAll);
+    },
+    resync() {
+      return ipcRenderer.invoke(IpcChannels.puppeteerResync);
+    },
+    onChanged(handler) {
+      return subscribe(IpcChannels.puppeteerChanged, handler);
     },
   },
 
@@ -263,6 +300,19 @@ const api: EaselApi = {
     },
     discard(req) {
       return ipcRenderer.invoke(IpcChannels.reviewDiscard, req);
+    },
+  },
+
+  // ── session.* (Issue #18: session replay) ────────────────────────────────────
+  session: {
+    export(req) {
+      return ipcRenderer.invoke(IpcChannels.sessionExport, req);
+    },
+    import() {
+      return ipcRenderer.invoke(IpcChannels.sessionImport);
+    },
+    replayStep(req) {
+      return ipcRenderer.invoke(IpcChannels.sessionReplayStep, req);
     },
   },
 };

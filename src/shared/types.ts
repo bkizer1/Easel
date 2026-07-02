@@ -237,6 +237,68 @@ export interface AnnotationBatch {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Lasso refactor — extract a reusable component (issue #15)                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Describes an "extract a reusable component" refactor, derived when a freeform
+ * (lasso) region resolves to several structurally-similar {@link ElementTarget}s
+ * that span more than one source file. Present on an {@link EditRequest} only
+ * when the user invoked the "Extract a reusable component" affordance.
+ *
+ * When set, the agent's brief changes from "make a freeform edit" to a precise
+ * multi-file refactor: read each member target's source, factor the shared
+ * markup into ONE new component (parameterizing the parts that differ between
+ * instances via props), and rewrite every call site to use it — keeping the
+ * rendered output identical. The whole thing lands as one atomic checkpoint.
+ */
+export interface RefactorExtractSpec {
+  /** Discriminator; `extract-component` is currently the only refactor kind. */
+  kind: 'extract-component';
+  /**
+   * The {@link ElementTarget.id}s of the structurally-similar members that
+   * motivated the extraction. These correspond 1:1 to {@link EditRequest.targets}.
+   */
+  memberTargetIds: string[];
+  /**
+   * Distinct source files (project-relative paths) the members span, lifted
+   * from each member's {@link ElementTarget.dataEaselSource}. Always length >= 2.
+   */
+  files: string[];
+  /** A PascalCase name suggestion for the new component (user-editable). */
+  suggestedName?: string;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Responsive matrix (issue #14)                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * One captured breakpoint frame from the Responsive Matrix (issue #14).
+ *
+ * When the matrix is active, the dev-server URL is rendered in several stacked
+ * `<webview>`s at different viewport widths. On submit every visible breakpoint
+ * is captured so the agent can fix responsive CSS at one breakpoint without
+ * regressing the others. The selected {@link ElementTarget} is identical across
+ * frames (same `data-easel-source`), so a single target drives the edit while
+ * these frames supply the cross-breakpoint visual context.
+ */
+export interface ResponsiveFrame {
+  /** Human-readable breakpoint label, e.g. `Desktop`, `Tablet`, `Mobile`. */
+  label: string;
+  /** CSS px width the frame was rendered at. */
+  width: number;
+  /**
+   * Whether this is the breakpoint the user marked the target/annotations on
+   * (the "active" frame). Its capture corresponds to {@link
+   * EditRequest.screenshotDataUrl}; the others are context-only.
+   */
+  active: boolean;
+  /** Full-frame screenshot of this breakpoint (PNG data URL). */
+  screenshotDataUrl: string;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Edit request (renderer -> main -> agent)                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -259,10 +321,25 @@ export interface EditRequest {
    * from {@link AnnotationBatch.screenshotDataUrl} for direct multimodal use.
    */
   screenshotDataUrl?: string;
+  /**
+   * Optional cross-breakpoint captures from the Responsive Matrix (issue #14).
+   * Present only when the matrix is active on submit; each entry is a full-frame
+   * screenshot at one breakpoint width. {@link screenshotDataUrl} remains the
+   * precise marked region on the active breakpoint. The agent uses these to fix
+   * one breakpoint without regressing the others.
+   */
+  frames?: ResponsiveFrame[];
   /** Absolute path to the project root on disk the agent may edit. */
   projectRoot: string;
   /** The dev-server URL currently loaded in the preview, e.g. `http://localhost:3000`. */
   devServerUrl: string;
+  /**
+   * Lasso refactor (issue #15): when present, this edit is an "extract a
+   * reusable component" refactor rather than a freeform instruction. The
+   * backend appends a refactor-specific brief; {@link targets} are the call
+   * sites to rewrite. Absent for ordinary edits.
+   */
+  refactor?: RefactorExtractSpec;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -526,6 +603,21 @@ export interface CheckpointProvenance {
 export type ChatRole = 'user' | 'assistant' | 'system';
 
 /**
+ * Lasso refactor (issue #15): a compact descriptor attached to the assistant
+ * turn that produced an "extract a reusable component" refactor, so the
+ * ChatPanel can render the DiffViewer in its grouped "new component vs. updated
+ * call sites" presentation. Absent for ordinary edits.
+ */
+export interface RefactorSummary {
+  /** The component name the refactor set out to create, when known. */
+  componentName?: string;
+  /** How many call sites (member targets) the refactor set out to rewrite. */
+  memberCount: number;
+  /** How many distinct source files the members spanned. */
+  fileCount: number;
+}
+
+/**
  * One entry in the conversation transcript rendered by the ChatPanel. User
  * entries may carry the annotations/targets that accompanied the instruction.
  */
@@ -553,6 +645,13 @@ export interface ChatMessage {
    * first attempt's. Lets the UI render a subtle "Retried" divider above it.
    */
   retryAttempt?: number;
+  /**
+   * Lasso refactor (issue #15): set on the assistant turn when this edit was an
+   * "extract a reusable component" refactor, so the DiffViewer renders the
+   * grouped "new component vs. updated call sites" presentation. Absent for
+   * ordinary edits.
+   */
+  refactor?: RefactorSummary;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -938,4 +1037,65 @@ export interface ReviewSession {
   baseCheckpointId?: string;
   /** All staged changes, in stream order. */
   changes: StagedChange[];
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Issue #18: Session replay — the runnable `.easel` artifact                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Schema version stamped into every `.easel` bundle's manifest. Bumped on any
+ * breaking change to {@link EaselBundleManifest}; the importer rejects a bundle
+ * whose `schemaVersion` it does not understand.
+ */
+export const BUNDLE_SCHEMA_VERSION = 1;
+
+/**
+ * The manifest at the root of a `.easel` bundle (a ZIP). It captures the design
+ * session as a replayable program: the full chat transcript (with annotations,
+ * diffs, and the `checkpointId` each turn produced), the checkpoint timeline,
+ * and a pointer to the `git bundle` of the internal checkpoint ref that ships
+ * alongside it. Per-checkpoint before/after preview PNGs travel under
+ * `shots/<checkpointId>/` so a colleague can scrub frame-by-frame offline.
+ */
+export interface EaselBundleManifest {
+  /** Must equal {@link BUNDLE_SCHEMA_VERSION} for the importer to accept it. */
+  schemaVersion: number;
+  /** Easel app version that produced the bundle (from `package.json`). */
+  easelVersion: string;
+  /** Epoch milliseconds when the bundle was exported. */
+  exportedAt: number;
+  /** Minimal project context, so the scrubber can label the session. */
+  session: {
+    /** Display name of the source project. */
+    projectName: string;
+    /** Detected framework of the source project. */
+    framework: ProjectFramework;
+    /** Dev-server URL the session ran against. */
+    devServerUrl: string;
+  };
+  /** The full chat transcript (user + assistant + system turns), in order. */
+  chat: ChatMessage[];
+  /** The checkpoint timeline (oldest first), mirroring the source project. */
+  checkpoints: Checkpoint[];
+  /** Id of the checkpoint the working tree matched at export time. */
+  currentCheckpointId?: string;
+  /** The git ref the accompanying `checkpoints.bundle` carries, e.g. `refs/easel/checkpoint`. */
+  checkpointRef: string;
+  /** Checkpoint ids that have before/after PNGs under `shots/` in the bundle. */
+  shots: string[];
+}
+
+/**
+ * An imported `.easel` session, held live in the main process so the scrubber
+ * can replay individual steps. The git objects from the bundle are fetched into
+ * a namespaced ref (`refs/easel/imported/<sessionId>`) that never clobbers the
+ * importing project's own checkpoint ref; the manifest lets the renderer drive
+ * the read-only scrubber UI.
+ */
+export interface ImportedSession {
+  /** Stable id assigned at import time (also the imported ref's `<id>` segment). */
+  sessionId: string;
+  /** The bundle manifest, parsed and validated. */
+  manifest: EaselBundleManifest;
 }
