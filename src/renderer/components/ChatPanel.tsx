@@ -30,6 +30,7 @@ import { hotkeyMatches, normalizeHotkey } from '../lib/hotkeys';
 import { parseVerifyBadge } from '../lib/verifyBadge';
 import { earliestTurnCheckpointId, resolveRollbackTarget } from '../lib/rollback';
 import { selfHealPhaseLabel } from '../lib/selfHealLabel';
+import { thinkingVerb, THINKING_VERBS } from '../lib/thinkingVerbs';
 
 /**
  * Stable empty-array reference for the macros selector. Returning a fresh `[]`
@@ -176,6 +177,95 @@ function SelfHealIndicator(): React.ReactElement | null {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  "Working" indicator (never let the panel look hung)                        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Live tool-activity line shown INSIDE the streaming assistant bubble (e.g.
+ * "Reading App.tsx") while the model is mid-narration but paused on a tool.
+ * Rendered only when the parent bubble `isStreaming`, so only the active turn
+ * subscribes to {@link EaselState.activeToolActivity} — other bubbles don't
+ * re-render when it changes. Returns nothing when no tool is running.
+ */
+function StreamingToolActivity(): React.ReactElement | null {
+  const activeToolActivity = useEaselStore((s) => s.activeToolActivity);
+  if (!activeToolActivity) return null;
+  return (
+    <div className="flex items-center gap-1.5 text-[11px] text-gray-500 animate-fade-in">
+      <Loader2 className="w-3 h-3 animate-spin flex-shrink-0" />
+      <span className="truncate">{activeToolActivity}</span>
+    </div>
+  );
+}
+
+/**
+ * Transcript "working" indicator — the primary defense against the panel looking
+ * hung. Shown while an edit is streaming but the active turn has produced no
+ * visible assistant text yet: the pre-first-token gap (agent spin-up, tool use
+ * before any narration) and the fresh gap a self-heal retry re-opens. Surfaces
+ * the current tool activity when the store has one, otherwise cycles whimsical
+ * spinner verbs, and counts elapsed seconds so even a slow turn visibly ticks.
+ *
+ * Once the assistant streams any text, the bubble's own pulsing cursor (plus
+ * {@link StreamingToolActivity}) takes over and this hides — so the two never
+ * show at once.
+ */
+function WorkingIndicator(): React.ReactElement | null {
+  const streaming = useEaselStore((s) => s.streaming);
+  const activeRequestId = useEaselStore((s) => s.activeRequestId);
+  const activeToolActivity = useEaselStore((s) => s.activeToolActivity);
+  // Has the in-flight turn produced any visible assistant text yet?
+  const hasVisibleContent = useEaselStore((s) =>
+    s.chat.some(
+      (m) =>
+        m.role === 'assistant' &&
+        m.requestId === s.activeRequestId &&
+        m.content.trim().length > 0,
+    ),
+  );
+
+  const show = streaming && !hasVisibleContent;
+
+  const [tick, setTick] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  // Start each turn on a different verb so it doesn't always open with the same
+  // word; re-seeded whenever the active request changes (incl. a retry re-arm).
+  const seedRef = useRef(0);
+
+  useEffect(() => {
+    seedRef.current = Math.floor(Math.random() * THINKING_VERBS.length);
+    setTick(0);
+    setElapsed(0);
+  }, [activeRequestId]);
+
+  useEffect(() => {
+    if (!show) return;
+    const verbTimer = setInterval(() => setTick((t) => t + 1), 2400);
+    const secTimer = setInterval(() => setElapsed((n) => n + 1), 1000);
+    return () => {
+      clearInterval(verbTimer);
+      clearInterval(secTimer);
+    };
+  }, [show]);
+
+  if (!show) return null;
+
+  const label = activeToolActivity ?? `${thinkingVerb(seedRef.current + tick)}…`;
+
+  return (
+    <div role="status" aria-live="polite" className="flex items-center gap-2 animate-slide-up">
+      <span className="grid place-items-center w-6 h-6 rounded-lg bg-brand-500/10 border border-brand-500/20 text-brand-300 flex-shrink-0">
+        <Loader2 className="w-3 h-3 animate-spin" />
+      </span>
+      <span className="text-[13px] leading-relaxed text-gray-400">
+        <span className="animate-pulse-soft">{label}</span>
+        {elapsed >= 3 && <span className="text-gray-600"> · {elapsed}s</span>}
+      </span>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Message bubble                                                            */
 /* -------------------------------------------------------------------------- */
 
@@ -251,6 +341,10 @@ function MessageBubble({
           )}
         </div>
       )}
+      {/* Mid-stream tool activity ("Reading App.tsx"): only when this bubble is
+          the active streaming turn AND has already narrated some text — the
+          pre-text gap is covered by the transcript-level WorkingIndicator. */}
+      {isStreaming && message.content && <StreamingToolActivity />}
       {!diffsDismissed && diffs.length > 0 && (
         <DiffViewer diffs={diffs} checkpointId={diffCheckpointId} refactor={message.refactor} onDismiss={() => setDiffsDismissed(true)} />
       )}
@@ -628,14 +722,19 @@ export function ChatPanel(): React.ReactElement {
             </div>
           </div>
         ) : (
-          chat.map((msg) => (
-            <MessageBubble
-              key={msg.id}
-              message={msg}
-              isStreaming={msg.role === 'assistant' && msg.requestId === activeRequestId && streaming}
-              onSaveAsMacro={msg.role === 'user' ? openSaveMacro : undefined}
-            />
-          ))
+          <>
+            {chat.map((msg) => (
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                isStreaming={msg.role === 'assistant' && msg.requestId === activeRequestId && streaming}
+                onSaveAsMacro={msg.role === 'user' ? openSaveMacro : undefined}
+              />
+            ))}
+            {/* Reassure the user Easel is working during the silent pre-first-token
+                gap; hides itself the moment the assistant starts streaming text. */}
+            <WorkingIndicator />
+          </>
         )}
       </div>
 

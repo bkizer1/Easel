@@ -55,6 +55,7 @@ import { buildTokenizeInstruction } from './lib/tokenize';
 import { buildDropImageEditRequest } from './lib/dropImage';
 import { formatVerifyContent, placeVerifyMessage } from './lib/verifyBadge';
 import { mergeFileDiffs } from './lib/mergeFileDiffs';
+import { toolActivityLabel } from './lib/thinkingVerbs';
 import { detectClusters } from './lib/refactorClusters';
 import {
   approvedPaths,
@@ -255,6 +256,14 @@ export interface EaselState {
   activeRequestId: string | null;
   /** True while an edit is streaming; gates submit and drives spinner. */
   streaming: boolean;
+  /**
+   * Human-readable label for the tool the agent is CURRENTLY running (e.g.
+   * "Reading Button.tsx", "Editing App.tsx"), or null when it is thinking /
+   * narrating rather than using a tool. Set from `tool-call` events and cleared
+   * as soon as assistant text resumes (or the turn ends). Drives the ChatPanel's
+   * "working" indicator so the app never looks hung during a long tool step.
+   */
+  activeToolActivity: string | null;
   /**
    * Issue #31: the current self-heal lifecycle phase (verifying / bounded
    * auto-retry), or null when idle. Set from the `verifying`/`retrying`
@@ -762,6 +771,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   chat: [],
   activeRequestId: null,
   streaming: false,
+  activeToolActivity: null,
   selfHealPhase: null,
   activeRefactor: null,
   liveDiffs: [],
@@ -942,6 +952,7 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       chat: [],
       activeRequestId: null,
       streaming: false,
+      activeToolActivity: null,
       selfHealPhase: null,
       activeRefactor: null,
       liveDiffs: [],
@@ -1301,6 +1312,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       chat: [...s.chat, userMsg],
       activeRequestId: requestId,
       streaming: true,
+      // Fresh turn: no tool is running yet, so the indicator starts on verbs.
+      activeToolActivity: null,
       liveDiffs: [],
       // Issue #19: initialize a fresh review session for a review request, or
       // clear any stale one for a normal (live) request.
@@ -1499,6 +1512,10 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
         // Guard against stale events from a previous request.
         if (e.requestId !== activeRequestId) return;
 
+        // Narration resumed → the model is no longer inside a tool step, so drop
+        // any stale "Reading …/Editing …" activity label.
+        if (get().activeToolActivity !== null) set({ activeToolActivity: null });
+
         // Stream incremental thinking text onto the last assistant message, or
         // create a new assistant message if the last entry is not one.
         set((s) => {
@@ -1521,6 +1538,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
 
       case 'message': {
         if (e.requestId !== activeRequestId) return;
+
+        // Narration resumed → clear any stale tool-activity label (see 'thinking').
+        if (get().activeToolActivity !== null) set({ activeToolActivity: null });
 
         // Stream user-facing assistant narration onto the last assistant turn.
         set((s) => {
@@ -1718,6 +1738,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       case 'done': {
         if (e.requestId !== activeRequestId) return;
 
+        // Turn is ending → no tool is running; drop the activity label.
+        if (get().activeToolActivity !== null) set({ activeToolActivity: null });
+
         // Issue #19: a review request finalizes the stream (streaming off,
         // activeRequestId cleared) but KEEPS the review session open so the user
         // can approve/reject. Nothing is marked applied: no liveDiffs, no chat
@@ -1866,6 +1889,8 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
           return {
             chat: [...s.chat, errMsg],
             streaming: false,
+            // Turn is over (error/cancel) → clear any in-flight tool label.
+            activeToolActivity: null,
             activeRequestId: null,
             // Issue #31: an error ends any in-flight self-heal lifecycle too.
             selfHealPhase: null,
@@ -1906,8 +1931,17 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
       }
 
       case 'tool-call': {
-        // Tool-call events are transient; they don't update chat or diffs.
-        // A future version could show inline tool progress in the chat.
+        // Tool-call events are transient — they don't update chat or diffs — but
+        // they're the longest SILENT stretch of an edit (a Read/Grep/Edit can run
+        // for seconds with no streamed text). Surface the current tool as a live
+        // activity label so the "working" indicator can show concrete progress
+        // ("Reading App.tsx") instead of leaving the panel looking hung.
+        //
+        // Gate on the active request so a late tool-call from a superseded turn
+        // can't overwrite the foreground. `toolActivityLabel` returns null for a
+        // tool we have no phrasing for → the indicator falls back to spinner verbs.
+        if (e.requestId !== activeRequestId) break;
+        set({ activeToolActivity: toolActivityLabel(e.tool, e.input) });
         break;
       }
 
@@ -1983,6 +2017,9 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
           return {
             ...nextCorrelationOnRetrying(e.requestId),
             chat: [...s.chat, retryBubble],
+            // Retry re-arms streaming with a fresh empty bubble; start its
+            // pre-token gap on verbs, not a stale tool label from attempt 1.
+            activeToolActivity: null,
             selfHealPhase: selfHealPhaseOnRetrying(e.requestId, e.attempt, e.rationale),
           };
         });
