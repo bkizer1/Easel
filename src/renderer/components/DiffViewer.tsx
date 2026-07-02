@@ -11,8 +11,8 @@
  */
 
 import React, { useState } from 'react';
-import { ChevronDown, ChevronRight, Check, RotateCcw, FileText } from 'lucide-react';
-import type { FileDiff } from '@shared/types';
+import { ChevronDown, ChevronRight, Check, RotateCcw, FileText, Sparkles } from 'lucide-react';
+import type { FileDiff, RefactorSummary } from '@shared/types';
 import { useEaselStore } from '../store';
 import { resolveRollbackTarget } from '../lib/rollback';
 import { Tooltip } from './Tooltip';
@@ -155,6 +155,32 @@ function SingleFileDiff({ diff }: { diff: FileDiff }): React.ReactElement {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Refactor grouping helper (pure, exported for unit tests)                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Split a set of FileDiffs into the two presentation groups used by the
+ * refactor variant of DiffViewer:
+ *
+ * - `created`: diffs whose `changeType` is `'created'` (the new component file).
+ * - `callSites`: all other diffs (modified/renamed/deleted call sites).
+ *
+ * Order within each group preserves the input order.
+ */
+export function groupRefactorDiffs(diffs: FileDiff[]): { created: FileDiff[]; callSites: FileDiff[] } {
+  const created: FileDiff[] = [];
+  const callSites: FileDiff[] = [];
+  for (const diff of diffs) {
+    if (diff.changeType === 'created') {
+      created.push(diff);
+    } else {
+      callSites.push(diff);
+    }
+  }
+  return { created, callSites };
+}
+
+/* -------------------------------------------------------------------------- */
 /*  DiffViewer                                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -162,11 +188,16 @@ interface Props {
   diffs: FileDiff[];
   /** Id of the checkpoint that should be reverted on Reject. */
   checkpointId?: string;
+  /**
+   * Lasso refactor (issue #15): when present, render the grouped "new component
+   * vs. updated call sites" presentation instead of the flat file list.
+   */
+  refactor?: RefactorSummary;
   /** Called when the user accepts or rejects so the parent can dismiss. */
   onDismiss(): void;
 }
 
-export function DiffViewer({ diffs, checkpointId, onDismiss }: Props): React.ReactElement | null {
+export function DiffViewer({ diffs, checkpointId, refactor, onDismiss }: Props): React.ReactElement | null {
   const checkpoints = useEaselStore((s) => s.checkpoints);
   const restoreCheckpoint = useEaselStore((s) => s.restoreCheckpoint);
 
@@ -182,34 +213,97 @@ export function DiffViewer({ diffs, checkpointId, onDismiss }: Props): React.Rea
     onDismiss();
   }
 
+  /* -- Accept / Reject action row (shared between both variants) ----------- */
+  const actions = (
+    <div className="flex gap-2">
+      <Tooltip label="Accept changes (keep)" side="bottom">
+        <button
+          aria-label="Accept changes"
+          onClick={onDismiss}
+          className="flex items-center gap-1.5 rounded-md bg-emerald-900/40 px-2.5 py-1 text-xs font-medium text-emerald-300 transition-all duration-150 ease-spring hover:bg-emerald-800/60 active:scale-[0.97]"
+        >
+          <Check className="h-3 w-3" />
+          Accept
+        </button>
+      </Tooltip>
+      <Tooltip label="Reject changes (restore previous checkpoint)" side="bottom">
+        <button
+          aria-label="Reject changes"
+          onClick={() => void handleReject()}
+          className="flex items-center gap-1.5 rounded-md bg-red-950/40 px-2.5 py-1 text-xs font-medium text-red-400 transition-all duration-150 ease-spring hover:bg-red-900/60 active:scale-[0.97]"
+        >
+          <RotateCcw className="h-3 w-3" />
+          Reject
+        </button>
+      </Tooltip>
+    </div>
+  );
+
+  /* -- Refactor grouped variant ------------------------------------------- */
+  if (refactor) {
+    const { created, callSites } = groupRefactorDiffs(diffs);
+    const componentName = refactor.componentName ?? 'component';
+
+    // Prefer counts derived from the actual diffs, but fall back to the
+    // RefactorSummary's intended counts so the header never claims "0 new files"
+    // when a backend labels the new component an existing/modified file.
+    const callSiteCount = callSites.length > 0 ? callSites.length : refactor.memberCount;
+    const headerSegments = [
+      `Extracted ${componentName}`,
+      created.length > 0 ? `${created.length} new file${created.length !== 1 ? 's' : ''}` : null,
+      `${callSiteCount} call site${callSiteCount !== 1 ? 's' : ''} updated`,
+    ].filter(Boolean);
+
+    return (
+      <div className="flex flex-col gap-2">
+        {/* Refactor summary header */}
+        <div className="mb-1 flex items-center justify-between">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Sparkles className="h-3.5 w-3.5 flex-shrink-0 text-emerald-400" />
+            <span className="text-xs font-semibold text-emerald-300 truncate">
+              {headerSegments.join(' · ')}
+            </span>
+          </div>
+          {actions}
+        </div>
+
+        <div className="flex max-h-96 flex-col gap-3 overflow-y-auto">
+          {/* New component group */}
+          {created.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-400/80">
+                New component
+              </span>
+              {created.map((d) => (
+                <SingleFileDiff key={d.filePath} diff={d} />
+              ))}
+            </div>
+          )}
+
+          {/* Call sites updated group */}
+          {callSites.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="px-0.5 text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+                Call sites updated ({callSites.length})
+              </span>
+              {callSites.map((d) => (
+                <SingleFileDiff key={d.filePath} diff={d} />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  /* -- Default flat variant ----------------------------------------------- */
   return (
     <div className="flex flex-col gap-2">
       <div className="mb-1 flex items-center justify-between">
         <span className="text-xs font-semibold uppercase tracking-wider text-gray-400">
           {diffs.length} {diffs.length === 1 ? 'file' : 'files'} changed
         </span>
-        <div className="flex gap-2">
-          <Tooltip label="Accept changes (keep)" side="bottom">
-            <button
-              aria-label="Accept changes"
-              onClick={onDismiss}
-              className="flex items-center gap-1.5 rounded-md bg-emerald-900/40 px-2.5 py-1 text-xs font-medium text-emerald-300 transition-all duration-150 ease-spring hover:bg-emerald-800/60 active:scale-[0.97]"
-            >
-              <Check className="h-3 w-3" />
-              Accept
-            </button>
-          </Tooltip>
-          <Tooltip label="Reject changes (restore previous checkpoint)" side="bottom">
-            <button
-              aria-label="Reject changes"
-              onClick={() => void handleReject()}
-              className="flex items-center gap-1.5 rounded-md bg-red-950/40 px-2.5 py-1 text-xs font-medium text-red-400 transition-all duration-150 ease-spring hover:bg-red-900/60 active:scale-[0.97]"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Reject
-            </button>
-          </Tooltip>
-        </div>
+        {actions}
       </div>
 
       <div className="flex max-h-96 flex-col gap-2 overflow-y-auto">
