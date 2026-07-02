@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { rmrf } from './rmrf';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -67,11 +68,11 @@ function refExists(dir: string, ref: string): boolean {
 }
 
 beforeEach(() => {
-  while (created.length) rmSync(created.pop()!, { recursive: true, force: true });
+  while (created.length) rmrf(created.pop()!);
 });
 
 afterEach(() => {
-  while (created.length) rmSync(created.pop()!, { recursive: true, force: true });
+  while (created.length) rmrf(created.pop()!);
 });
 
 describe('reviewSession — propose-don\'t-write (Issue #19)', () => {
