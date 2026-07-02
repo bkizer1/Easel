@@ -29,6 +29,10 @@ import type {
   PreviewRequestImageRequest,
   PreviewOpenExternalRequest,
   XraySetNetworkCaptureRequest,
+  XraySetNetworkInterceptRequest,
+  XrayContinueRequestRequest,
+  XrayFulfillRequestRequest,
+  XrayFailRequestRequest,
   XraySaveSnapshotRequest,
   XrayGetSnapshotRequest,
   PuppeteerSetEnabledRequest,
@@ -77,6 +81,10 @@ import { buildJudgePrompt, runVisionJudge } from '@main/agents/visionJudge';
 import { createAnthropicClient } from '@main/agents/anthropicClient';
 import {
   setNetworkCapture,
+  setNetworkIntercept,
+  continueRequest,
+  fulfillRequest,
+  failRequest,
   getNetworkLog,
   clearNetworkLog,
 } from '@main/networkTap';
@@ -92,6 +100,7 @@ import {
   clearAll as clearPuppeteerAll,
   resync as resyncPuppeteer,
 } from '@main/puppeteer';
+import { captureStateSnapshot } from '@main/stateCapture';
 
 const log = createLogger('ipc');
 
@@ -200,7 +209,13 @@ export function registerIpcHandlers(): void {
       settings,
       secrets,
       projectRoot: project.root,
-      createCheckpointFn: (msg, rid, provenance) => createCheckpoint(msg, rid, provenance),
+      // Time-travel (State X-Ray, issue #13): capture a bounded app-state
+      // snapshot from the guest BEFORE the checkpoint commit, then persist it
+      // keyed by the resulting checkpoint id — UNCONDITIONALLY, so every edit's
+      // checkpoint gets a usable, diffable snapshot. The capture is best-effort
+      // and timeout-bounded; it must never block or fail the checkpoint.
+      createCheckpointFn: (msg, rid, provenance) =>
+        _checkpointWithSnapshot(msg, rid, provenance),
       verify: _makeVerifyFn(settings),
       maxRetries: settings.maxRetries,
     });
@@ -396,6 +411,28 @@ export function registerIpcHandlers(): void {
     return ok(setNetworkCapture(req.enabled));
   });
 
+  handle(IpcChannels.xraySetNetworkIntercept, (req: XraySetNetworkInterceptRequest) => {
+    return ok(setNetworkIntercept(req.enabled));
+  });
+
+  handle(IpcChannels.xrayContinueRequest, (req: XrayContinueRequestRequest) => {
+    if (!req.interceptId) return fail('interceptId is required', 'validation');
+    return ok(continueRequest(req.interceptId, req.rewrite));
+  });
+
+  handle(IpcChannels.xrayFulfillRequest, (req: XrayFulfillRequestRequest) => {
+    if (!req.interceptId) return fail('interceptId is required', 'validation');
+    if (!req.mock || typeof req.mock.responseCode !== 'number') {
+      return fail('a mock with a numeric responseCode is required', 'validation');
+    }
+    return ok(fulfillRequest(req.interceptId, req.mock));
+  });
+
+  handle(IpcChannels.xrayFailRequest, (req: XrayFailRequestRequest) => {
+    if (!req.interceptId) return fail('interceptId is required', 'validation');
+    return ok(failRequest(req.interceptId, req.reason));
+  });
+
   handle(IpcChannels.xraySaveSnapshot, (req: XraySaveSnapshotRequest) => {
     if (!req.snapshot || !req.snapshot.checkpointId) {
       return fail('snapshot with a checkpointId is required', 'validation');
@@ -514,7 +551,7 @@ export function registerIpcHandlers(): void {
 /*  Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-import type { AppSettings, AgentBackendId, CheckpointProvenance } from '@shared/types';
+import type { AppSettings, AgentBackendId, Checkpoint, CheckpointProvenance } from '@shared/types';
 import type { SettingsChangedPayload } from '@shared/ipc';
 
 /** Return the secret ids the given backend may need decrypted at call time. */
@@ -529,6 +566,53 @@ function _secretIdsForBackend(backendId: AgentBackendId): string[] {
     default:
       return [];
   }
+}
+
+/**
+ * Time-travel (State X-Ray, issue #13): create a checkpoint AND persist a bounded
+ * app-state snapshot keyed by the resulting checkpoint id.
+ *
+ * Order matters per spec: the snapshot is captured from the guest BEFORE the
+ * checkpoint commit (so it reflects the pre-commit state), then — once we know
+ * the new checkpoint id — persisted under that id. Capture is best-effort and
+ * timeout-bounded inside {@link captureStateSnapshot}; persistence is best-effort
+ * inside {@link saveSnapshot}. Neither can throw into or block the edit pipeline:
+ * the checkpoint is returned regardless, so an edit never fails because the
+ * snapshot side-channel hiccuped.
+ */
+async function _checkpointWithSnapshot(
+  message: string,
+  requestId: string,
+  provenance?: CheckpointProvenance,
+): Promise<Checkpoint> {
+  // Capture BEFORE the commit. Never throws; degrades to an empty-but-valid tree.
+  let data;
+  try {
+    data = await captureStateSnapshot();
+  } catch (err) {
+    log.warn('State snapshot capture failed; proceeding without it', { err: String(err) });
+    data = undefined;
+  }
+
+  const checkpoint = await createCheckpoint(message, requestId, provenance);
+
+  // Persist keyed by the resulting checkpoint id, UNCONDITIONALLY (an empty tree
+  // is still a valid, diffable snapshot — every checkpoint gets one).
+  try {
+    saveSnapshot({
+      checkpointId: checkpoint.id,
+      capturedAt: Date.now(),
+      label: checkpoint.message,
+      data: data ?? { kind: 'object', entries: [], truncated: false },
+    });
+  } catch (err) {
+    log.warn('Failed to persist state snapshot for checkpoint', {
+      checkpointId: checkpoint.id,
+      err: String(err),
+    });
+  }
+
+  return checkpoint;
 }
 
 /**
