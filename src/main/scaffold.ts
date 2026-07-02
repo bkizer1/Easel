@@ -23,6 +23,7 @@ import { TEMPLATE_DEPENDENCIES, TEMPLATE_DEV_DEPENDENCIES } from '@shared/toolch
 import { getMainWindow } from '@main/window';
 import { loadProject } from '@main/project';
 import { ensureToolchain, isToolchainReady, toolchainModulesPath } from '@main/toolchain';
+import { findFreePort } from '@main/ports';
 import { createLogger } from '@main/logger';
 
 const execFileAsync = promisify(execFile);
@@ -57,7 +58,7 @@ export async function chooseNewSiteLocation(): Promise<string | null> {
 /* -------------------------------------------------------------------------- */
 
 /** A fresh Vite + React + TS project — the AI replaces App.tsx/styles.css. */
-function templateFiles(name: string, slug: string): Record<string, string> {
+function templateFiles(name: string, slug: string, port: number): Record<string, string> {
   const nameLit = JSON.stringify(name); // safe to inline into TSX/HTML
   return {
     'package.json':
@@ -83,7 +84,9 @@ function templateFiles(name: string, slug: string): Record<string, string> {
       'export default defineConfig({\n' +
       '  plugins: [react()],\n' +
       "  cacheDir: '.vite',\n" +
-      '  server: { port: 3000 },\n' +
+      // strictPort: fail loudly rather than silently hop to another port and
+      // desync from the devServerUrl Easel inferred from this exact number.
+      `  server: { port: ${port}, strictPort: true },\n` +
       '});\n',
     'index.html':
       '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n' +
@@ -172,9 +175,15 @@ export async function createNewSite(opts: {
     throw new Error(`A folder named "${slug}" already exists here — pick a different name or location.`);
   }
 
-  log.info('Scaffolding new site', { dir });
+  // Pick a port nothing is currently serving on. Hardcoding 3000 meant a new
+  // site whose port was taken (the demo app, another Easel project) would either
+  // fail to start or — worse — get shadowed by whatever already answered there,
+  // so Easel loaded that instead of the new project.
+  const port = await findFreePort(3000);
+
+  log.info('Scaffolding new site', { dir, port });
   emit({ phase: 'writing', message: `Creating ${slug}…` });
-  for (const [rel, content] of Object.entries(templateFiles(opts.name, slug))) {
+  for (const [rel, content] of Object.entries(templateFiles(opts.name, slug, port))) {
     const p = path.join(dir, rel);
     await mkdir(path.dirname(p), { recursive: true });
     await writeFile(p, content, 'utf8');
