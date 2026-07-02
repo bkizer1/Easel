@@ -24,6 +24,7 @@ import { Toolbar } from './components/Toolbar';
 import { PreviewPane } from './components/PreviewPane';
 import { ChatPanel } from './components/ChatPanel';
 import { DiffViewer } from './components/DiffViewer';
+import { ReviewPanel } from './components/ReviewPanel';
 import { SettingsDialog } from './components/SettingsDialog';
 import { ScrubberDialog } from './components/ScrubberDialog';
 import { NewSiteWizard } from './components/NewSiteWizard';
@@ -280,6 +281,7 @@ export default function App(): JSX.Element {
   const lastError = useEaselStore((s) => s.lastError);
   const clearError = useEaselStore((s) => s.clearError);
   const liveDiffs = useEaselStore((s) => s.liveDiffs);
+  const reviewSession = useEaselStore((s) => s.reviewSession);
   const currentCheckpointId = useEaselStore((s) => s.currentCheckpointId);
   const settingsOpen = useEaselStore((s) => s.settingsOpen);
   const needsAuth = useEaselStore((s) => s.needsAuth);
@@ -375,11 +377,19 @@ export default function App(): JSX.Element {
           </div>
         )}
 
-        {/* DiffViewer: slide-up panel when there are live diffs */}
-        {liveDiffs.length > 0 && (
-          <div className="shrink-0 hairline-t max-h-64 overflow-y-auto bg-ink-900/60">
-            <DiffViewer diffs={liveDiffs} checkpointId={currentCheckpointId} onDismiss={clearDiffs} />
+        {/* Issue #19: ReviewPanel supersedes the normal DiffViewer slide-up
+            while a review session is active (propose-don't-write). */}
+        {reviewSession ? (
+          <div className="shrink-0 hairline-t max-h-80 overflow-y-auto bg-ink-900/60 p-3">
+            <ReviewPanel />
           </div>
+        ) : (
+          /* DiffViewer: slide-up panel when there are live diffs */
+          liveDiffs.length > 0 && (
+            <div className="shrink-0 hairline-t max-h-64 overflow-y-auto bg-ink-900/60">
+              <DiffViewer diffs={liveDiffs} checkpointId={currentCheckpointId} onDismiss={clearDiffs} />
+            </div>
+          )
         )}
       </div>
 

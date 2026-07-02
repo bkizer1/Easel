@@ -31,6 +31,7 @@ import {
   ScanLine,
   Wand2,
   ScanEye,
+  GitPullRequestArrow,
   Download,
   FolderInput,
   FlaskConical,
@@ -329,6 +330,10 @@ export function Toolbar(): React.ReactElement {
   const setPuppeteerOpen = useEaselStore((s) => s.setPuppeteerOpen);
   const puppeteer = useEaselStore((s) => s.puppeteer);
 
+  const settings = useEaselStore((s) => s.settings);
+  const updateSettings = useEaselStore((s) => s.updateSettings);
+  const reviewMode = settings?.featureFlags.reviewMode ?? false;
+
   const [menu, setMenu] = useState<'viewport' | 'console' | 'grid' | null>(null);
 
   // Timeline is oldest-first; the cursor is the checkpoint the tree matches.
@@ -568,6 +573,20 @@ export function Toolbar(): React.ReactElement {
             <CountBadge count={puppeteer.mocks.length + puppeteer.overrides.length} tone="amber" />
           )}
         </div>
+        <IconButton
+          onClick={() => {
+            if (!settings) return;
+            void updateSettings({
+              featureFlags: { ...settings.featureFlags, reviewMode: !reviewMode },
+            });
+          }}
+          tooltip="Review mode — stage edits for per-change approval instead of writing them live"
+          active={reviewMode}
+          disabled={!settings}
+          aria-label="Review mode"
+        >
+          <GitPullRequestArrow className="w-[17px] h-[17px]" />
+        </IconButton>
         <IconButton
           onClick={() => {
             if (previewUrl) void easel.preview.openExternal({ url: previewUrl });

@@ -72,7 +72,7 @@ function parseDiff(unifiedDiff: string): DiffLine[] {
 /*  SingleFileDiff                                                            */
 /* -------------------------------------------------------------------------- */
 
-function SingleFileDiff({ diff }: { diff: FileDiff }): React.ReactElement {
+export function SingleFileDiff({ diff }: { diff: FileDiff }): React.ReactElement {
   const [expanded, setExpanded] = useState(true);
 
   const changeColor: Record<FileDiff['changeType'], string> = {

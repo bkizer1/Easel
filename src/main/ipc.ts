@@ -40,6 +40,8 @@ import type {
   TokensMatchRequest,
   PublishOpenPrRequest,
   ProjectCreateNewRequest,
+  ReviewApplyRequest,
+  ReviewDiscardRequest,
   SessionExportRequest,
   SessionReplayStepRequest,
 } from '@shared/ipc';
@@ -198,12 +200,62 @@ export function registerIpcHandlers(): void {
     const settings = getSettings();
     const requestId = req.request.id;
 
-    log.info('Edit submitted', { requestId, instruction: req.request.instruction.slice(0, 80) });
+    log.info('Edit submitted', {
+      requestId,
+      instruction: req.request.instruction.slice(0, 80),
+      reviewMode: req.reviewMode === true,
+    });
 
     // Resolve the secrets the active backend may need.
     const secretIds = _secretIdsForBackend(settings.agentBackend);
     const secrets = resolveSecrets(secretIds);
 
+    // ── Review mode (Issue #19): stage the edit in a shadow worktree ─────────
+    // Instead of writing to the live project, point the agent at a shadow
+    // worktree and commit its edits to a staging ref. The live tree (and preview)
+    // is never touched until the user approves via review.apply. Self-heal verify
+    // is DISABLED here: there is no live HMR to capture before/after frames, so we
+    // pass verify: undefined + maxRetries: 0.
+    if (req.reviewMode) {
+      const { createReviewSession, discardReviewSession } = await import('@main/reviewSession');
+      let worktreePath: string;
+      let stagedCheckpointFn: Parameters<typeof runEditStream>[0]['createCheckpointFn'];
+      try {
+        const session = await createReviewSession(project.root, requestId);
+        worktreePath = session.worktreePath;
+        stagedCheckpointFn = session.stagedCheckpointFn;
+      } catch (err) {
+        log.error('Failed to create review session', { requestId, err: String(err) });
+        return fail(`Could not start review session: ${String(err)}`, 'review-init-failed');
+      }
+
+      // CRITICAL: the Claude Agent SDK roots cwd / additionalDirectories on
+      // request.projectRoot (not ctx.projectRoot), so the request itself must
+      // point at the worktree for the default backend to stage rather than write
+      // the live tree. The hand-built backends use ctx.fs (rooted at the projectRoot
+      // we pass below), so they are correct either way.
+      const stagedRequest = { ...req.request, projectRoot: worktreePath };
+
+      void runEditStream({
+        request: stagedRequest,
+        settings,
+        secrets,
+        projectRoot: worktreePath,
+        createCheckpointFn: stagedCheckpointFn,
+        // No live HMR in review mode → no before/after frames to judge against.
+        verify: undefined,
+        maxRetries: 0,
+      }).catch(async (err) => {
+        // A synchronous throw from runEditStream is unexpected (it catches its own
+        // errors), but if session wiring half-fails, don't leak the worktree.
+        log.error('Review edit stream threw', { requestId, err: String(err) });
+        await discardReviewSession(project.root, requestId).catch(() => undefined);
+      });
+
+      return ok({ requestId, reviewMode: true });
+    }
+
+    // ── Normal mode: write directly to the live project ──────────────────────
     // Start the agent stream in the background; each event is pushed to the
     // renderer over the editEvent channel.
     void runEditStream({
@@ -545,6 +597,41 @@ export function registerIpcHandlers(): void {
 
     if (!result.ok) return fail(result.message, result.code);
     return ok({ branch: result.branch, prUrl: result.prUrl });
+  });
+
+  // ── review.* (Issue #19: propose-don't-write) ─────────────────────────────────
+
+  handle(IpcChannels.reviewApply, async (req: ReviewApplyRequest) => {
+    if (!req.requestId) return fail('requestId is required', 'validation');
+    const project = getCurrentProject();
+    if (!project) return fail('No project open', 'no-project');
+
+    const { applyReviewSession } = await import('@main/reviewSession');
+    try {
+      const result = await applyReviewSession(
+        project.root,
+        req.requestId,
+        Array.isArray(req.approvedPaths) ? req.approvedPaths : [],
+      );
+      return ok(result);
+    } catch (err) {
+      // Unknown session (or apply failure) → typed failure, never thrown across IPC.
+      return fail(String(err instanceof Error ? err.message : err), 'review-apply-failed');
+    }
+  });
+
+  handle(IpcChannels.reviewDiscard, async (req: ReviewDiscardRequest) => {
+    if (!req.requestId) return fail('requestId is required', 'validation');
+    const project = getCurrentProject();
+    // Discard must tear down the worktree even if the project was closed; fall
+    // back to the checkpoint root when no project is open so the worktree still
+    // gets cleaned up.
+    const { discardReviewSession } = await import('@main/reviewSession');
+    const { getCheckpointRoot } = await import('@main/checkpoints');
+    const root = project?.root ?? getCheckpointRoot();
+    if (!root) return fail('No project open', 'no-project');
+    await discardReviewSession(root, req.requestId);
+    return okVoid();
   });
 
   // ── session.* (Issue #18: session replay) ────────────────────────────────────

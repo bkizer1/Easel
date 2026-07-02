@@ -44,6 +44,7 @@ import type {
 } from '@shared/types';
 import type { InspectorCommand, InspectorMessage } from '@shared/ipc';
 import { accumulateStyleEdit } from './styleDelta';
+import { matchSourcesToElements, type StampedElement } from './highlightSource';
 import { enableMocking, disableMocking, setMocks } from './fetchMock';
 import {
   collectSvelteEntries,
@@ -100,6 +101,16 @@ let gridEl: HTMLDivElement | null = null;
 
 /** The grid config the overlay is currently drawn with, so we can redraw on resize. */
 let gridConfig: GridConfig | null = null;
+
+/**
+ * Review mode (issue #19): the live elements currently outlined by a
+ * `highlight-source` command, plus their overlay divs. Kept on a SEPARATE layer
+ * from {@link highlightEl} (the single hover overlay) so the frequent hover
+ * `highlight: null` clears never wipe the review outlines. Redrawn on
+ * scroll/resize to stay aligned, and replaced wholesale on each new command.
+ */
+let reviewHighlightEls: Element[] = [];
+let reviewOverlayEls: HTMLDivElement[] = [];
 
 /* -------------------------------------------------------------------------- */
 /*  Helpers — messaging                                                        */
@@ -509,6 +520,108 @@ function drawHighlight(el: Element, color = '#3b82f6'): void {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Helpers — review-mode source highlight overlay (issue #19)                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Distinguishable "staged change" tone — an amber/violet outline, clearly
+ * distinct from the blue hover highlight (`#3b82f6`) so a reviewer can tell the
+ * two layers apart at a glance.
+ */
+const REVIEW_HIGHLIGHT_COLOR = '#a855f7';
+
+/** Tear down ALL review highlight overlays (the separate review layer). */
+function removeReviewHighlights(): void {
+  for (const el of reviewOverlayEls) el.remove();
+  reviewOverlayEls = [];
+  reviewHighlightEls = [];
+}
+
+/**
+ * Draw a review-highlight box over a single element on the SEPARATE review
+ * overlay layer (tagged `data-easel-review-overlay`). Mirrors
+ * {@link drawHighlight}'s alignment technique — absolutely positioned from
+ * `getBoundingClientRect` + scroll, appended to `document.documentElement`,
+ * `pointer-events:none`, max z-index — but does NOT clear the hover overlay.
+ * Skips zero-size (un-rendered) elements. The created div is tracked so the set
+ * can be redrawn on scroll/resize and replaced on the next command.
+ */
+function drawReviewHighlight(el: Element): void {
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return;
+
+  const div = document.createElement('div');
+  // Tagged on BOTH attributes: `data-easel-overlay` so the hit-test in
+  // mousemove/click and the region scan skip it like every other overlay, and
+  // `data-easel-review-overlay` so this review layer is independently
+  // identifiable from the hover overlay.
+  div.setAttribute('data-easel-overlay', 'true');
+  div.setAttribute('data-easel-review-overlay', 'true');
+
+  const top = rect.top + window.scrollY;
+  const left = rect.left + window.scrollX;
+
+  div.style.cssText = [
+    'position:absolute',
+    `top:${top}px`,
+    `left:${left}px`,
+    `width:${rect.width}px`,
+    `height:${rect.height}px`,
+    `outline:2px dashed ${REVIEW_HIGHLIGHT_COLOR}`,
+    'outline-offset:-1px',
+    `background:${REVIEW_HIGHLIGHT_COLOR}1a`, // ~10% alpha fill
+    'pointer-events:none',
+    'z-index:2147483646', // just below the hover highlight, like the grid
+    'box-sizing:border-box',
+  ].join(';');
+
+  document.documentElement.appendChild(div);
+  reviewOverlayEls.push(div);
+}
+
+/**
+ * Replace the review-highlight layer with outlines around `elements`. Clears any
+ * previous review overlays first, then draws + tracks one box per element so
+ * {@link sendViewportChanged} can re-align them after scroll/resize.
+ */
+function drawReviewHighlights(elements: Element[]): void {
+  removeReviewHighlights();
+  reviewHighlightEls = elements.slice();
+  for (const el of elements) drawReviewHighlight(el);
+}
+
+/**
+ * Re-align the review overlays to their tracked elements' current positions.
+ * Called from the viewport-change path (same place the grid redraws). Rebuilds
+ * the overlay divs from the retained element list so a scrolled or resized page
+ * keeps the outlines on their targets.
+ */
+function redrawReviewHighlights(): void {
+  if (reviewHighlightEls.length === 0) return;
+  const elements = reviewHighlightEls.slice();
+  drawReviewHighlights(elements);
+}
+
+/**
+ * Scan the live DOM for `[data-easel-source]` elements and resolve the requested
+ * {@link SourceLocation}s to the matching element(s) via the pure
+ * {@link matchSourcesToElements}. Pairs each stamped element with its parsed
+ * source, then delegates the (DOM-free) matching so it stays unit-testable.
+ */
+function matchSourceLocations(sources: SourceLocation[]): Element[] {
+  const stamped: StampedElement[] = [];
+  const all = document.querySelectorAll('[data-easel-source]');
+  for (const el of Array.from(all)) {
+    const raw = el.getAttribute('data-easel-source');
+    if (!raw) continue;
+    const source = parseSourceAttr(raw);
+    if (!source) continue;
+    stamped.push({ el, source });
+  }
+  return matchSourcesToElements(sources, stamped);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Helpers — alignment grid overlay (issue #5)                                */
 /* -------------------------------------------------------------------------- */
 
@@ -804,6 +917,9 @@ const VIEWPORT_THROTTLE_MS = 100;
 function sendViewportChanged(): void {
   // Keep the alignment grid sized/positioned to the (possibly resized) document.
   if (gridConfig) drawGrid(gridConfig);
+
+  // Keep review-mode source highlights aligned to their elements after scroll.
+  redrawReviewHighlights();
 
   send({
     type: 'viewport-changed',
@@ -1546,6 +1662,20 @@ ipcRenderer.on(
             } catch {
               removeHighlight();
             }
+          }
+          break;
+        }
+
+        case 'highlight-source': {
+          // Review mode (issue #19): outline the live element(s) a staged change
+          // affects, by REVERSE data-easel-source lookup. Replaces the previous
+          // review set; `sources: null`/empty clears. Uses a SEPARATE overlay
+          // layer from `highlight`, so hover's frequent `highlight: null` clears
+          // never wipe these.
+          if (!cmd.sources || cmd.sources.length === 0) {
+            removeReviewHighlights();
+          } else {
+            drawReviewHighlights(matchSourceLocations(cmd.sources));
           }
           break;
         }

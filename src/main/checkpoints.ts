@@ -98,6 +98,30 @@ function _activeRef(): string {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Issue #19: additive accessors for review mode (shadow-worktree staging)    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Issue #19: the commit SHA of the current Easel checkpoint tip the working tree
+ * matches, or `null` when there is no checkpoint yet. Review mode forks a shadow
+ * worktree from this SHA so the staged edit reflects the current live state.
+ * Additive read-only accessor — does not touch the timeline or git refs.
+ */
+export function getCurrentCheckpointSha(): string | null {
+  const current = _currentIndex >= 0 ? _timeline[_currentIndex] : undefined;
+  return current?.commitSha ?? null;
+}
+
+/**
+ * Issue #19: the absolute project root the checkpoint manager is bound to, or
+ * `null` before {@link initCheckpoints}. Review mode needs the live root to add
+ * the shadow worktree against the live repo's `.git`.
+ */
+export function getCheckpointRoot(): string | null {
+  return _projectRoot;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Git shell helpers                                                          */
 /* -------------------------------------------------------------------------- */
 

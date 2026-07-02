@@ -293,6 +293,16 @@ const api: EaselApi = {
     },
   },
 
+  // ── review.* (Issue #19: propose-don't-write) ─────────────────────────────────
+  review: {
+    apply(req) {
+      return ipcRenderer.invoke(IpcChannels.reviewApply, req);
+    },
+    discard(req) {
+      return ipcRenderer.invoke(IpcChannels.reviewDiscard, req);
+    },
+  },
+
   // ── session.* (Issue #18: session replay) ────────────────────────────────────
   session: {
     export(req) {

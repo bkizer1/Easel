@@ -187,6 +187,12 @@ export const IpcChannels = {
   /** Squash accepted checkpoints onto a fresh branch off HEAD and open a PR. */
   publishOpenPr: 'publish.openPr',
 
+  // Review mode — propose-don't-write (Issue #19) ---------------------------
+  /** Apply the approved subset of a staged review session → live project + checkpoint. */
+  reviewApply: 'review.apply',
+  /** Discard a staged review session (tear down the shadow worktree, apply nothing). */
+  reviewDiscard: 'review.discard',
+
   // Session replay (Issue #18) ----------------------------------------------
   /** Export the current session as a portable `.easel` bundle (save dialog). */
   sessionExport: 'session.export',
@@ -223,10 +229,20 @@ export interface ProjectGetCurrentResponse {
 
 export interface EditSubmitRequest {
   request: EditRequest;
+  /**
+   * Issue #19: when true, the edit is STAGED in a shadow git worktree for
+   * on-page approval instead of being written to the live project. The renderer
+   * sets this from `settings.featureFlags.reviewMode` at submit time. The
+   * streamed events are identical; the renderer routes them to the review panel
+   * (rather than the live timeline) because it knows the request is staged.
+   */
+  reviewMode?: boolean;
 }
 export interface EditSubmitResponse {
   /** Echo of the request id now streaming via {@link IpcChannels.editEvent}. */
   requestId: string;
+  /** Issue #19: echoes whether main staged this edit (shadow worktree created). */
+  reviewMode?: boolean;
 }
 
 export interface EditCancelRequest {
@@ -378,6 +394,30 @@ export interface PublishOpenPrResponse {
   branch: string;
   /** The opened PR URL, when `gh` returned one. */
   prUrl?: string;
+}
+
+// review.* (Issue #19: propose-don't-write) ----------------------------------
+
+export interface ReviewApplyRequest {
+  /** The staged session's request id (echoes {@link EditRequest.id}). */
+  requestId: string;
+  /**
+   * Project-relative paths the user approved. Only these are copied from the
+   * shadow worktree into the live project; everything else is dropped. An empty
+   * list applies nothing (equivalent to discard, but still tears the session down).
+   */
+  approvedPaths: string[];
+}
+export interface ReviewApplyResponse {
+  /** The checkpoint created from the applied changes, or null if nothing applied. */
+  checkpoint: Checkpoint | null;
+  /** The project-relative files actually written to the live project. */
+  appliedFiles: string[];
+}
+
+export interface ReviewDiscardRequest {
+  /** The staged session's request id. */
+  requestId: string;
 }
 
 // session.* (Issue #18: session replay) -------------------------------------
@@ -818,6 +858,14 @@ export interface EaselApi {
     openPr(req: PublishOpenPrRequest): Promise<IpcResult<PublishOpenPrResponse>>;
   };
 
+  // ── Issue #19: Review mode (propose-don't-write) ────────────────────────────
+  review: {
+    /** Apply the approved subset of a staged session to the live project + checkpoint. */
+    apply(req: ReviewApplyRequest): Promise<IpcResult<ReviewApplyResponse>>;
+    /** Discard a staged session without applying (tear down the shadow worktree). */
+    discard(req: ReviewDiscardRequest): Promise<IpcResult<void>>;
+  };
+
   // ── Issue #18: Session replay (.easel bundles) ──────────────────────────────
   session: {
     /** Save the current session as a `.easel` bundle (shows a save dialog). */
@@ -925,6 +973,9 @@ export interface IpcInvokeMap {
   [IpcChannels.tokensMatch]: { request: TokensMatchRequest; response: IpcResult<TokensMatchResponse> };
 
   [IpcChannels.publishOpenPr]: { request: PublishOpenPrRequest; response: IpcResult<PublishOpenPrResponse> };
+
+  [IpcChannels.reviewApply]: { request: ReviewApplyRequest; response: IpcResult<ReviewApplyResponse> };
+  [IpcChannels.reviewDiscard]: { request: ReviewDiscardRequest; response: IpcResult<void> };
 
   [IpcChannels.sessionExport]: { request: SessionExportRequest; response: IpcResult<SessionExportResponse> };
   [IpcChannels.sessionImport]: { request: void; response: IpcResult<SessionImportResponse> };
@@ -1075,6 +1126,20 @@ export type InspectorMessage =
 export type InspectorCommand =
   | { type: 'set-mode'; mode: 'idle' | 'element-select' | 'freeform' }
   | { type: 'highlight'; selector: string | null }
+  | {
+      /**
+       * Review mode (Issue #19): highlight the live on-page element(s) a staged
+       * change affects, resolved by REVERSE `data-easel-source` lookup. The guest
+       * scans stamped elements (`[data-easel-source]`), matches each
+       * {@link SourceLocation} by `filePath` and nearest `line`, and outlines the
+       * best match(es) — reusing the same overlay as `highlight`. Pass `sources:
+       * null` (or an empty array) to clear. Distinct from `highlight`, which keys
+       * off a CSS selector; this lets a streamed diff light up its target with no
+       * selector, since the diff only knows file:line.
+       */
+      type: 'highlight-source';
+      sources: SourceLocation[] | null;
+    }
   | { type: 'request-target'; selector: string }
   | {
       /** Freeform mode: resolve which element(s) a drawn region overlaps. */

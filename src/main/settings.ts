@@ -80,6 +80,7 @@ function defaultSettings(): AppSettings {
       showThinking: true,
       autoCheckpoint: true,
       selfHealVerify: false,
+      reviewMode: false,
     },
     theme: 'system',
     maxRetries: 1,
