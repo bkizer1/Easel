@@ -310,6 +310,8 @@ export function PreviewPane(): React.ReactElement {
   // Issue #6: relay the accumulated style delta; Issue #9: drop-an-image.
   const setStyleTweak = useEaselStore((s) => s.setStyleTweak);
   const dropImageOnElement = useEaselStore((s) => s.dropImageOnElement);
+  // Issue #17: resync puppeteer state into the guest after a reload/HMR cycle.
+  const resyncPuppeteer = useEaselStore((s) => s.resyncPuppeteer);
   const pendingInspectorCommand = useEaselStore((s) => s.pendingInspectorCommand);
   const inspectorCommandNonce = useEaselStore((s) => s.inspectorCommandNonce);
 
@@ -457,6 +459,10 @@ export function PreviewPane(): React.ReactElement {
           // element-select works on the very first click.
           setWebviewReady(true);
           sendCommand({ type: 'set-mode', mode: useEaselStore.getState().mode });
+          // Issue #17: re-push the active puppeteer enabled+mocks state into the
+          // freshly (re)loaded guest so fetch/XHR interception stays sticky across
+          // HMR reloads and full page navigations.
+          void resyncPuppeteer();
           break;
 
         case 'element-hover':
@@ -548,6 +554,7 @@ export function PreviewPane(): React.ReactElement {
       setElementState,
       setStyleTweak,
       dropImageOnElement,
+      resyncPuppeteer,
       sendCommand,
     ],
   );

@@ -34,6 +34,8 @@ import path from 'node:path';
 import type { AgentBackend, AgentBackendContext, AgentCapabilities, ProjectFs, ValidateContext } from '@shared/agent';
 import type { AgentEvent, AppSettings, EditRequest, FileDiff } from '@shared/types';
 import { createLogger } from '@main/logger';
+import { buildPuppeteerCapability } from '@main/puppeteer';
+import { parseToolInput, executeTool } from '@main/agents/tools';
 
 /* -------------------------------------------------------------------------- */
 /*  Claude Agent SDK resolution — NOT bundled; uses the user's own install     */
@@ -53,6 +55,69 @@ const CLAUDE_NOT_INSTALLED =
   '`claude` in a terminal and restart Easel. (Or switch to the API key / local model backend in Settings.)';
 
 type ClaudeQuery = (args: { prompt: string; options?: Record<string, unknown> }) => AsyncIterable<unknown>;
+
+/**
+ * Minimal local surface of the SDK's in-process MCP API (issue #17). The SDK is
+ * resolved at runtime (never bundled — see resolveClaudeSdk), so we describe only
+ * the shapes we call rather than importing the SDK's own generics. Verified
+ * against @anthropic-ai/claude-agent-sdk@0.3.190:
+ *
+ *   tool(name, description, inputSchema, handler, extras?) → SdkMcpToolDefinition
+ *     where `inputSchema` is a Zod *raw shape* (Record<string, ZodType>) — at
+ *     runtime createSdkMcpServer checks each value has a `_zod` marker (Zod v4),
+ *     then hands the shape to MCP's registerTool for JSON-Schema generation.
+ *   createSdkMcpServer({ name, version?, tools }) → McpSdkServerConfigWithInstance
+ *     (a non-serializable { type: 'sdk', name, instance } passed via mcpServers).
+ *
+ * The handler returns an MCP CallToolResult: `{ content: [{ type:'text', text }],
+ * isError? }`.
+ */
+type SdkMcpToolHandler = (
+  args: Record<string, unknown>,
+  extra: unknown,
+) => Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }>;
+
+type SdkToolFn = (
+  name: string,
+  description: string,
+  inputSchema: Record<string, unknown>,
+  handler: SdkMcpToolHandler,
+) => unknown;
+
+type SdkCreateMcpServerFn = (options: {
+  name: string;
+  version?: string;
+  tools: unknown[];
+}) => unknown;
+
+/** The runtime SDK surface this backend uses (resolved, never statically imported). */
+interface ClaudeSdk {
+  query: ClaudeQuery;
+  tool: SdkToolFn;
+  createSdkMcpServer: SdkCreateMcpServerFn;
+}
+
+/**
+ * Minimal slice of Zod's builder API needed to describe the `set_app_state`
+ * input shape. Resolved at runtime alongside the SDK (the SDK depends on Zod, so
+ * it is reachable wherever the SDK is). We avoid a static `import 'zod'` for the
+ * same reason we don't statically import the SDK: Easel does not ship either, and
+ * a packaged build may only have the user's global Claude Code install.
+ */
+interface ZodBuilder {
+  string(): ZodLeaf;
+  number(): ZodLeaf;
+  boolean(): ZodLeaf;
+  unknown(): ZodLeaf;
+  array(item: unknown): ZodLeaf;
+  enum(values: readonly string[]): ZodLeaf;
+}
+
+/** A single Zod schema node — only the chained methods we call are modelled. */
+interface ZodLeaf {
+  optional(): ZodLeaf;
+  describe(text: string): ZodLeaf;
+}
 
 /** Run a command and return its first stdout line, or null on failure. */
 function firstLine(cmd: string, args: string[]): Promise<string | null> {
@@ -116,10 +181,13 @@ async function candidateGlobalRoots(): Promise<string[]> {
  * resolution first (present when running Easel from source / `npm install`),
  * then the user's GLOBAL install across common locations (for packaged builds).
  * Returns null when Claude Code isn't installed anywhere we can find it.
+ *
+ * Exposes `query` plus the in-process MCP API (`tool`, `createSdkMcpServer`) used
+ * to surface Easel's `set_app_state` tool to this backend (issue #17).
  */
-async function resolveClaudeSdk(): Promise<{ query: ClaudeQuery } | null> {
+async function resolveClaudeSdk(): Promise<ClaudeSdk | null> {
   try {
-    return (await import(SDK_PKG)) as unknown as { query: ClaudeQuery };
+    return (await import(SDK_PKG)) as unknown as ClaudeSdk;
   } catch {
     /* not resolvable locally — search the user's global installs */
   }
@@ -127,9 +195,42 @@ async function resolveClaudeSdk(): Promise<{ query: ClaudeQuery } | null> {
     try {
       const req = createRequire(path.join(root, '_resolve.js'));
       const entry = req.resolve(SDK_PKG);
-      return (await import(pathToFileURL(entry).href)) as unknown as { query: ClaudeQuery };
+      return (await import(pathToFileURL(entry).href)) as unknown as ClaudeSdk;
     } catch {
       /* not here — try the next root */
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve Zod's runtime builder. Tries the host's own resolution first, then a
+ * `createRequire` rooted at the resolved SDK directory (the SDK depends on Zod,
+ * so Zod is reachable from there even when Easel itself doesn't ship it). The v4
+ * entrypoint is preferred because the SDK's `createSdkMcpServer` recognises a
+ * schema by its v4 `_zod` marker; the default entry is a fine fallback (the
+ * installed Zod is v4 across both). Returns null when Zod can't be found.
+ */
+async function resolveZod(): Promise<ZodBuilder | null> {
+  for (const spec of ['zod/v4', 'zod']) {
+    try {
+      const mod = (await import(spec)) as { z?: ZodBuilder } & ZodBuilder;
+      return (mod.z ?? mod) as ZodBuilder;
+    } catch {
+      /* try the next entrypoint / resolution strategy */
+    }
+  }
+  for (const root of await candidateGlobalRoots()) {
+    const req = createRequire(path.join(root, '_resolve.js'));
+    for (const spec of ['zod/v4', 'zod']) {
+      try {
+        const mod = (await import(pathToFileURL(req.resolve(spec)).href)) as {
+          z?: ZodBuilder;
+        } & ZodBuilder;
+        return (mod.z ?? mod) as ZodBuilder;
+      } catch {
+        /* not here — try the next entry / root */
+      }
     }
   }
   return null;
@@ -463,6 +564,133 @@ export async function evaluateSdkWrite(
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Live State Puppeteer — in-process MCP server (issue #17)                    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Server name for the in-process MCP server that hosts `set_app_state`. The SDK
+ * namespaces MCP tools as `mcp__<serverName>__<toolName>`, so the agent sees and
+ * must be allow-listed for {@link PUPPETEER_TOOL_NAME}.
+ */
+const PUPPETEER_MCP_SERVER = 'easel';
+
+/** Fully-qualified tool name the SDK exposes for the puppeteer tool. */
+export const PUPPETEER_TOOL_NAME = `mcp__${PUPPETEER_MCP_SERVER}__set_app_state`;
+
+/**
+ * Build the Zod *raw shape* for `set_app_state`, mirroring the JSON `input_schema`
+ * in `TOOL_DEFINITIONS` (src/main/agents/tools.ts). The actual coercion/validation
+ * lives in `parseToolInput`; this shape exists so the SDK can advertise the tool's
+ * parameters to the model. Only `action` is required — every other field belongs
+ * to one of the three discriminated actions.
+ */
+function setAppStateInputShape(z: ZodBuilder): Record<string, unknown> {
+  return {
+    action: z
+      .enum(['mock_fetch', 'set_state', 'clear_mocks'])
+      .describe('Which puppeteer operation to perform.'),
+    // ── mock_fetch fields ──────────────────────────────────────────────────
+    url_pattern: z
+      .string()
+      .optional()
+      .describe('(mock_fetch) URL pattern to intercept, matched per `match`.'),
+    method: z
+      .string()
+      .optional()
+      .describe('(mock_fetch) HTTP method to match, case-insensitive. Omit to match any.'),
+    match: z
+      .enum(['substring', 'glob', 'exact'])
+      .optional()
+      .describe('(mock_fetch) How to interpret url_pattern. Default: "substring".'),
+    status: z.number().optional().describe('(mock_fetch) HTTP response status code. Default: 200.'),
+    json_body: z
+      .unknown()
+      .optional()
+      .describe('(mock_fetch) JSON response body. Sets content-type: application/json.'),
+    text_body: z
+      .string()
+      .optional()
+      .describe('(mock_fetch) Raw text response body (used when json_body is absent).'),
+    delay_ms: z
+      .number()
+      .optional()
+      .describe('(mock_fetch) Artificial response latency in milliseconds.'),
+    once: z.boolean().optional().describe('(mock_fetch) Fire this mock once then auto-remove it.'),
+    label: z
+      .string()
+      .optional()
+      .describe('Human-readable label shown in the Easel panel (e.g. "empty cart").'),
+    // ── set_state fields ───────────────────────────────────────────────────
+    selector: z
+      .string()
+      .optional()
+      .describe('(set_state) Robust CSS selector for the target component element.'),
+    path: z
+      .array(z.string())
+      .optional()
+      .describe('(set_state) Machine path into the component\'s state, e.g. ["state","items"].'),
+    value: z.unknown().optional().describe('(set_state) The JSON value to write.'),
+  };
+}
+
+/**
+ * Create the in-process MCP server that exposes Easel's `set_app_state` tool to
+ * the Claude Agent SDK backend (issue #17). This is the third backend to surface
+ * the tool — `anthropic-api` and `local-openai` call `executeTool` directly; the
+ * SDK owns its own tool loop, so we register the tool through its in-process MCP
+ * transport instead.
+ *
+ * The handler is a thin adapter onto the SHARED tool contract: it funnels the raw
+ * SDK args through `parseToolInput('set_app_state', …)` (the same parser the other
+ * backends use) and runs `executeTool` with a fresh puppeteer capability. The
+ * tool's own guards (`isEnabled`/`allowed`/policy) live in `_execSetAppState` and
+ * are untouched here. Returns the SDK MCP server config (passed via `mcpServers`)
+ * or null when Zod can't be resolved (the tool is then simply not offered).
+ */
+export function buildPuppeteerMcpServer(
+  sdk: ClaudeSdk,
+  z: ZodBuilder,
+  ctx: AgentBackendContext,
+): unknown {
+  const setAppState = sdk.tool(
+    'set_app_state',
+    'Drive the RUNNING app into a hard-to-reach state WITHOUT editing source code. ' +
+      'Ephemeral — a reload restores reality. Actions: "mock_fetch" (intercept a fetch/XHR ' +
+      'URL and return a canned response), "set_state" (write a JSON value into a running ' +
+      'component\'s framework state), "clear_mocks" (remove all active fetch mocks). ' +
+      'REQUIRES the user to have enabled the State Puppeteer toggle in Easel first.',
+    setAppStateInputShape(z),
+    async (args) => {
+      const parsed = parseToolInput('set_app_state', args);
+      if (!parsed) {
+        return {
+          content: [{ type: 'text' as const, text: 'Invalid set_app_state input.' }],
+          isError: true,
+        };
+      }
+      const result = await executeTool(parsed, {
+        fs: ctx.fs,
+        imageProvider: ctx.imageProvider,
+        nextImageId: () => crypto.randomUUID(),
+        puppeteer: buildPuppeteerCapability(ctx.projectRoot),
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: result.ok ? result.output : (result.error ?? 'failed') },
+        ],
+        isError: !result.ok,
+      };
+    },
+  );
+
+  return sdk.createSdkMcpServer({
+    name: PUPPETEER_MCP_SERVER,
+    version: '1.0.0',
+    tools: [setAppState],
+  });
+}
+
 export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
   return {
     id: 'claude-agent-sdk',
@@ -566,6 +794,20 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         return;
       }
 
+      // Live State Puppeteer (issue #17): expose `set_app_state` to this backend
+      // via an in-process MCP server. The SDK owns its own tool loop, so unlike
+      // the hand-built backends (which call executeTool directly) we register the
+      // tool through the SDK's MCP transport. Resolved Zod is required to describe
+      // the tool's schema; if it's missing we simply don't offer the tool rather
+      // than failing the edit (file-editing — the core flow — still works).
+      const zod = await resolveZod();
+      const puppeteerServer = zod ? buildPuppeteerMcpServer(sdk, zod, ctx) : null;
+      if (!puppeteerServer) {
+        log.warn('Skipping set_app_state MCP tool — Zod could not be resolved', {
+          requestId: request.id,
+        });
+      }
+
       // Build options.  The SDK accepts `env` to override the subprocess env
       // (not `process.env`), and `allowedDirectories` to sandbox file access.
       // Bridge our AbortSignal to the SDK's AbortController option.
@@ -588,9 +830,17 @@ export function claudeAgentSdkBackend(_settings: AppSettings): AgentBackend {
         additionalDirectories: [request.projectRoot, ...visionDirs],
         // Auto-apply file edits (no interactive permission prompt is possible
         // here) and restrict to safe file tools so the agent can't hang on a
-        // Bash permission request.
+        // Bash permission request.  set_app_state is intentionally added when
+        // available — its name is allow-listed below and the PreToolUse hook only
+        // gates Edit/Write/MultiEdit, so the puppeteer tool is never blocked.
         permissionMode: 'acceptEdits',
-        allowedTools: ['Read', 'Edit', 'Write', 'MultiEdit', 'Glob', 'Grep'],
+        allowedTools: puppeteerServer
+          ? ['Read', 'Edit', 'Write', 'MultiEdit', 'Glob', 'Grep', PUPPETEER_TOOL_NAME]
+          : ['Read', 'Edit', 'Write', 'MultiEdit', 'Glob', 'Grep'],
+        // In-process MCP server hosting set_app_state (issue #17). Keys are server
+        // names; the SDK exposes its tools as `mcp__<serverName>__<toolName>`
+        // (here PUPPETEER_TOOL_NAME). Omitted entirely when Zod is unavailable.
+        ...(puppeteerServer ? { mcpServers: { [PUPPETEER_MCP_SERVER]: puppeteerServer } } : {}),
         // The SDK uses `env` as the COMPLETE child environment — it does NOT
         // merge with process.env (passing {} would wipe PATH → `spawn node
         // ENOENT`). buildChildEnv preserves the inherited PATH/HOME/keychain

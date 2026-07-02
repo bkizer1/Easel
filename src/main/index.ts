@@ -10,6 +10,7 @@ import { registerIpcHandlers } from '@main/ipc';
 import { initSettings } from '@main/settings';
 import { stopDevServer } from '@main/devServer';
 import { disposeNetworkTap } from '@main/networkTap';
+import { disposePuppeteer } from '@main/puppeteer';
 import { rootLogger } from '@main/logger';
 
 const log = rootLogger;
@@ -53,5 +54,6 @@ if (!gotLock) {
   app.on('before-quit', () => {
     stopDevServer();
     disposeNetworkTap();
+    disposePuppeteer();
   });
 }

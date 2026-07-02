@@ -31,6 +31,7 @@ import {
   ScanLine,
   Wand2,
   ScanEye,
+  FlaskConical,
 } from 'lucide-react';
 import { useEaselStore, VIEWPORT_PRESETS } from '../store';
 import { easel } from '../lib/api';
@@ -319,6 +320,9 @@ export function Toolbar(): React.ReactElement {
 
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
   const setXrayOpen = useEaselStore((s) => s.setXrayOpen);
+  const puppeteerOpen = useEaselStore((s) => s.puppeteerOpen);
+  const setPuppeteerOpen = useEaselStore((s) => s.setPuppeteerOpen);
+  const puppeteer = useEaselStore((s) => s.puppeteer);
 
   const [menu, setMenu] = useState<'viewport' | 'console' | 'grid' | null>(null);
 
@@ -526,6 +530,20 @@ export function Toolbar(): React.ReactElement {
         >
           <ScanEye className="w-[17px] h-[17px]" />
         </IconButton>
+        <div className="relative no-drag">
+          <IconButton
+            onClick={() => setPuppeteerOpen(!puppeteerOpen)}
+            tooltip="Live State Puppeteer — intercept fetches & override component state"
+            active={puppeteerOpen || puppeteer.enabled}
+            disabled={!previewUrl}
+            aria-label="Live State Puppeteer"
+          >
+            <FlaskConical className="w-[17px] h-[17px]" />
+          </IconButton>
+          {puppeteer.enabled && (puppeteer.mocks.length > 0 || puppeteer.overrides.length > 0) && (
+            <CountBadge count={puppeteer.mocks.length + puppeteer.overrides.length} tone="amber" />
+          )}
+        </div>
         <IconButton
           onClick={() => {
             if (previewUrl) void easel.preview.openExternal({ url: previewUrl });
