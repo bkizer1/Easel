@@ -25,6 +25,7 @@ import { PreviewPane } from './components/PreviewPane';
 import { ChatPanel } from './components/ChatPanel';
 import { DiffViewer } from './components/DiffViewer';
 import { SettingsDialog } from './components/SettingsDialog';
+import { ScrubberDialog } from './components/ScrubberDialog';
 import { NewSiteWizard } from './components/NewSiteWizard';
 import { PolicyPrompt } from './components/PolicyPrompt';
 import { StateXRayPanel } from './components/StateXRayPanel';
@@ -285,6 +286,7 @@ export default function App(): JSX.Element {
   const xrayOpen = useEaselStore((s) => s.xrayOpen);
   const puppeteerOpen = useEaselStore((s) => s.puppeteerOpen);
   const newSiteOpen = useEaselStore((s) => s.newSiteOpen);
+  const scrubberOpen = useEaselStore((s) => s.scrubberOpen);
 
   // Apply theme whenever settings change.
   useTheme(settings?.theme);
@@ -383,6 +385,9 @@ export default function App(): JSX.Element {
 
       {/* Settings dialog: modal overlay */}
       {settingsOpen && <SettingsDialog />}
+
+      {/* Session scrubber dialog: modal overlay (Issue #18) */}
+      {scrubberOpen && <ScrubberDialog />}
 
       {/* New-site intake wizard: shown when starting a site from scratch */}
       {newSiteOpen && <NewSiteWizard />}

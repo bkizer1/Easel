@@ -292,6 +292,19 @@ const api: EaselApi = {
       return ipcRenderer.invoke(IpcChannels.publishOpenPr, req);
     },
   },
+
+  // ── session.* (Issue #18: session replay) ────────────────────────────────────
+  session: {
+    export(req) {
+      return ipcRenderer.invoke(IpcChannels.sessionExport, req);
+    },
+    import() {
+      return ipcRenderer.invoke(IpcChannels.sessionImport);
+    },
+    replayStep(req) {
+      return ipcRenderer.invoke(IpcChannels.sessionReplayStep, req);
+    },
+  },
 };
 
 /* -------------------------------------------------------------------------- */

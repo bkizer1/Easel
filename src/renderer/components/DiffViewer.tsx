@@ -194,10 +194,23 @@ interface Props {
    */
   refactor?: RefactorSummary;
   /** Called when the user accepts or rejects so the parent can dismiss. */
-  onDismiss(): void;
+  onDismiss?(): void;
+  /**
+   * Render the diffs without the Accept/Reject controls. Used by the session
+   * scrubber (Issue #18), which reviews diffs from an imported bundle whose
+   * checkpoints are NOT on the live timeline — accept/reject would be meaningless
+   * (and rejecting would call `restoreCheckpoint` with a foreign id).
+   */
+  readOnly?: boolean;
 }
 
-export function DiffViewer({ diffs, checkpointId, refactor, onDismiss }: Props): React.ReactElement | null {
+export function DiffViewer({
+  diffs,
+  checkpointId,
+  refactor,
+  onDismiss,
+  readOnly = false,
+}: Props): React.ReactElement | null {
   const checkpoints = useEaselStore((s) => s.checkpoints);
   const restoreCheckpoint = useEaselStore((s) => s.restoreCheckpoint);
 
@@ -210,11 +223,14 @@ export function DiffViewer({ diffs, checkpointId, refactor, onDismiss }: Props):
     if (previousId) {
       await restoreCheckpoint(previousId);
     }
-    onDismiss();
+    onDismiss?.();
   }
 
-  /* -- Accept / Reject action row (shared between both variants) ----------- */
-  const actions = (
+  /* -- Accept / Reject action row (shared between both variants) -----------
+   * Suppressed in read-only mode (Issue #18 session scrubber): imported diffs
+   * aren't on the live timeline, so accept/reject would be meaningless (reject
+   * would call restoreCheckpoint with a foreign id). */
+  const actions = readOnly ? null : (
     <div className="flex gap-2">
       <Tooltip label="Accept changes (keep)" side="bottom">
         <button

@@ -40,6 +40,8 @@ import type {
   TokensMatchRequest,
   PublishOpenPrRequest,
   ProjectCreateNewRequest,
+  SessionExportRequest,
+  SessionReplayStepRequest,
 } from '@shared/ipc';
 import { IpcChannels } from '@shared/ipc';
 import { ok, okVoid, fail } from '@shared/result';
@@ -543,6 +545,33 @@ export function registerIpcHandlers(): void {
 
     if (!result.ok) return fail(result.message, result.code);
     return ok({ branch: result.branch, prUrl: result.prUrl });
+  });
+
+  // ── session.* (Issue #18: session replay) ────────────────────────────────────
+
+  handle(IpcChannels.sessionExport, async (req: SessionExportRequest) => {
+    const { exportSessionToFile } = await import('@main/session');
+    const res = await exportSessionToFile(req);
+    return ok(res);
+  });
+
+  handle(IpcChannels.sessionImport, async () => {
+    const { importSessionFromFile } = await import('@main/session');
+    const res = await importSessionFromFile();
+    return ok(res);
+  });
+
+  handle(IpcChannels.sessionReplayStep, async (req: SessionReplayStepRequest) => {
+    const { replayActiveStep, ReplayConflictError } = await import('@main/session');
+    try {
+      const res = await replayActiveStep(req);
+      return ok(res);
+    } catch (err) {
+      // A conflict is an expected outcome (the code moved on); give the renderer
+      // a stable code so it can show a friendly, non-alarming message.
+      if (err instanceof ReplayConflictError) return fail(err.message, 'conflict');
+      throw err;
+    }
   });
 
   log.info('IPC handlers registered');

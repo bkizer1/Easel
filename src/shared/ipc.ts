@@ -16,11 +16,13 @@ import type {
   AgentEvent,
   AppSettings,
   BoundingBox,
+  ChatMessage,
   Checkpoint,
   EditRequest,
   ElementTarget,
   ImageRequest,
   ImageResult,
+  ImportedSession,
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
@@ -184,6 +186,14 @@ export const IpcChannels = {
   // Publish (Issue #10) -----------------------------------------------------
   /** Squash accepted checkpoints onto a fresh branch off HEAD and open a PR. */
   publishOpenPr: 'publish.openPr',
+
+  // Session replay (Issue #18) ----------------------------------------------
+  /** Export the current session as a portable `.easel` bundle (save dialog). */
+  sessionExport: 'session.export',
+  /** Import a `.easel` bundle for scrubbing/replay (open dialog). */
+  sessionImport: 'session.import',
+  /** Deterministically re-apply one imported checkpoint's delta to current code. */
+  sessionReplayStep: 'session.replayStep',
 } as const;
 
 /** Union of every channel-name literal. */
@@ -368,6 +378,36 @@ export interface PublishOpenPrResponse {
   branch: string;
   /** The opened PR URL, when `gh` returned one. */
   prUrl?: string;
+}
+
+// session.* (Issue #18: session replay) -------------------------------------
+
+export interface SessionExportRequest {
+  /**
+   * The renderer's chat transcript snapshot. Chat lives in the renderer store,
+   * so the renderer hands it to main to fold into the bundle manifest.
+   */
+  chat: ChatMessage[];
+  /** Id of the checkpoint the working tree currently matches, if any. */
+  currentCheckpointId?: string;
+}
+export interface SessionExportResponse {
+  /** Absolute path the bundle was written to, or null if the dialog was cancelled. */
+  savedPath: string | null;
+}
+
+export interface SessionImportResponse {
+  /** The imported session (held live in main for replay), or null if cancelled. */
+  session: ImportedSession | null;
+}
+
+export interface SessionReplayStepRequest {
+  /** The imported checkpoint id whose recorded delta should be re-applied. */
+  checkpointId: string;
+}
+export interface SessionReplayStepResponse {
+  /** The new live checkpoint created by re-applying the step. */
+  checkpoint: Checkpoint;
 }
 
 // preview.* -----------------------------------------------------------------
@@ -777,6 +817,20 @@ export interface EaselApi {
     /** Squash accepted checkpoints onto a fresh branch off HEAD and open a PR. */
     openPr(req: PublishOpenPrRequest): Promise<IpcResult<PublishOpenPrResponse>>;
   };
+
+  // ── Issue #18: Session replay (.easel bundles) ──────────────────────────────
+  session: {
+    /** Save the current session as a `.easel` bundle (shows a save dialog). */
+    export(req: SessionExportRequest): Promise<IpcResult<SessionExportResponse>>;
+    /** Open and import a `.easel` bundle for scrubbing/replay (open dialog). */
+    import(): Promise<IpcResult<SessionImportResponse>>;
+    /**
+     * Deterministically re-apply one imported checkpoint's recorded delta to the
+     * current working tree, creating a new live checkpoint. Fails with
+     * `code: 'conflict'` when the patch does not apply cleanly.
+     */
+    replayStep(req: SessionReplayStepRequest): Promise<IpcResult<SessionReplayStepResponse>>;
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -871,6 +925,13 @@ export interface IpcInvokeMap {
   [IpcChannels.tokensMatch]: { request: TokensMatchRequest; response: IpcResult<TokensMatchResponse> };
 
   [IpcChannels.publishOpenPr]: { request: PublishOpenPrRequest; response: IpcResult<PublishOpenPrResponse> };
+
+  [IpcChannels.sessionExport]: { request: SessionExportRequest; response: IpcResult<SessionExportResponse> };
+  [IpcChannels.sessionImport]: { request: void; response: IpcResult<SessionImportResponse> };
+  [IpcChannels.sessionReplayStep]: {
+    request: SessionReplayStepRequest;
+    response: IpcResult<SessionReplayStepResponse>;
+  };
 }
 
 /**

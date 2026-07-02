@@ -26,6 +26,7 @@ import type {
   EditRequest,
   ElementTarget,
   FileDiff,
+  ImportedSession,
   OffGridElement,
   InstructionMacro,
   ProjectConfig,
@@ -326,6 +327,18 @@ export interface EaselState {
   publishing: boolean;
   /** URL of the most recently opened PR, or null. */
   lastPrUrl: string | null;
+
+  // ── Issue #18: Session replay ──────────────────────────────────────────────
+  /** Whether the session scrubber dialog is open. */
+  scrubberOpen: boolean;
+  /** The imported session currently being scrubbed/replayed, or null. */
+  replaySession: ImportedSession | null;
+  /** Current step index in the scrubber (0-based). */
+  scrubIndex: number;
+  /** True while a replayStep IPC call is in flight. */
+  replayBusy: boolean;
+  /** True while an exportSession call is in flight. */
+  exporting: boolean;
 
   // ── Issue #17: Live State Puppeteer ───────────────────────────────────────
   /**
@@ -632,6 +645,30 @@ export interface EaselActions {
   /** Squash this session's accepted checkpoints onto a fresh branch and open a PR. */
   openPr(): Promise<string | null>;
 
+  // ── Issue #18: Session replay ──────────────────────────────────────────────
+  /** Open or close the session scrubber dialog. */
+  setScrubberOpen(open: boolean): void;
+  /** Set the current step index in the scrubber. */
+  setScrubIndex(i: number): void;
+  /**
+   * Export the current session as a portable `.easel` bundle. Shows a save
+   * dialog. On success surfaces a system message with the saved path; on
+   * cancel is a no-op; on error sets lastError.
+   */
+  exportSession(): Promise<void>;
+  /**
+   * Import a `.easel` bundle for scrubbing/replay. Shows an open dialog. On
+   * success sets replaySession, resets scrubIndex to 0, and opens the scrubber.
+   * On cancel is a no-op; on error sets lastError.
+   */
+  importSession(): Promise<void>;
+  /**
+   * Re-apply one imported checkpoint's delta to the current working tree,
+   * creating a new live checkpoint. Sets replayBusy while in flight. On
+   * `code:'conflict'` sets a friendly lastError. Always clears replayBusy.
+   */
+  replayStep(checkpointId: string): Promise<void>;
+
   // ── Issue #17: Live State Puppeteer ───────────────────────────────────────
   /** Open/close the Puppeteer cockpit panel. */
   setPuppeteerOpen(open: boolean): void;
@@ -717,6 +754,11 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
   scratch: null,
   publishing: false,
   lastPrUrl: null,
+  scrubberOpen: false,
+  replaySession: null,
+  scrubIndex: 0,
+  replayBusy: false,
+  exporting: false,
   puppeteer: EMPTY_PUPPETEER_STATE,
   puppeteerOpen: false,
 
@@ -2480,6 +2522,78 @@ export const useEaselStore = create<EaselStore>((set, get) => ({
     const url = result.value.prUrl ?? null;
     set({ lastPrUrl: url });
     return url;
+  },
+
+  /* ---- Issue #18: Session replay ------------------------------------------ */
+
+  setScrubberOpen(open) {
+    set({ scrubberOpen: open });
+  },
+
+  setScrubIndex(i) {
+    set({ scrubIndex: i });
+  },
+
+  async exportSession() {
+    if (get().exporting) return;
+    set({ exporting: true, lastError: null });
+    const { chat, currentCheckpointId } = get();
+    const result = await easel.session.export({ chat, currentCheckpointId });
+    set({ exporting: false });
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    const { savedPath } = result.value;
+    if (savedPath) {
+      // Surface success as a system chat message so the user sees confirmation
+      // without a toast that auto-dismisses. Mirrors how other system events
+      // (blocked policy writes, errors) appear in the transcript.
+      const successMsg: ChatMessage = {
+        id: genId(),
+        role: 'system',
+        content: `Session exported to ${savedPath}`,
+        createdAt: Date.now(),
+      };
+      set((s) => ({ chat: [...s.chat, successMsg] }));
+    }
+    // null savedPath = user cancelled save dialog; no-op.
+  },
+
+  async importSession() {
+    const result = await easel.session.import();
+    if (!result.ok) {
+      set({ lastError: result.error });
+      return;
+    }
+    const { session } = result.value;
+    if (!session) {
+      // null = user cancelled the open dialog; no-op.
+      return;
+    }
+    set({ replaySession: session, scrubIndex: 0, scrubberOpen: true, lastError: null });
+  },
+
+  async replayStep(checkpointId) {
+    set({ replayBusy: true, lastError: null });
+    const result = await easel.session.replayStep({ checkpointId });
+    if (!result.ok) {
+      if (result.code === 'conflict') {
+        set({
+          lastError:
+            "This step couldn't be replayed cleanly — the code has changed too much since it was recorded.",
+        });
+      } else {
+        set({ lastError: result.error });
+      }
+      set({ replayBusy: false });
+      return;
+    }
+    // Success: the live checkpoint list will be refreshed via the existing
+    // checkpoint.onChanged push from main. Call listCheckpoints defensively
+    // in case the push is delayed or missed.
+    await get().listCheckpoints();
+    set({ replayBusy: false, lastError: null });
   },
 
   /* ---- Issue #17: Live State Puppeteer ------------------------------------- */
